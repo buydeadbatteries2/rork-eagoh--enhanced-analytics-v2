@@ -2415,6 +2415,10 @@ $$;
 -- many vendors in a single call. Eliminates the N-per-vendor request pattern.
 -- Vendors with no open_intelligence rows are omitted from the result set
 -- (callers treat a missing vendor_id as zeroed metrics).
+--
+-- PERFORMANCE: The per-vendor correlated subquery on analyst_context_usage
+-- was replaced with a single filtered LEFT JOIN so the usage table is scanned
+-- once (using acu_source_owner_idx) instead of once per vendor group.
 create or replace function public.get_bulk_vendor_quality_metrics(
   p_vendor_ids uuid[]
 )
@@ -2434,33 +2438,43 @@ set search_path = ''
 as $$
 begin
   return query
+  with filtered_oi as (
+    -- Filter open_intelligence to ONLY the requested vendors before any aggregation.
+    select user_id, quality_score, validation_status, exchange_share_enabled
+    from public.open_intelligence
+    where user_id = any(p_vendor_ids)
+  ),
+  recent_usage as (
+    -- Single filtered scan of analyst_context_usage for all requested vendors.
+    -- Uses acu_source_owner_idx (source_owner_id, source_type, used_at desc).
+    select source_owner_id as vendor_id, count(*)::bigint as usage_count
+    from public.analyst_context_usage
+    where source_type = 'exchange'
+      and source_owner_id = any(p_vendor_ids)
+      and used_at >= now() - interval '30 days'
+    group by source_owner_id
+  )
   select
-    oi.user_id as vendor_id,
-    coalesce(avg(oi.quality_score), 0)::numeric as avg_entry_quality,
+    foi.user_id as vendor_id,
+    coalesce(avg(foi.quality_score), 0)::numeric as avg_entry_quality,
     case when count(*) > 0
-      then count(*) filter (where oi.validation_status in ('community_supported', 'externally_supported'))::numeric / count(*)::numeric
+      then count(*) filter (where foi.validation_status in ('community_supported', 'externally_supported'))::numeric / count(*)::numeric
       else 0::numeric
     end as supported_entry_rate,
     case when count(*) > 0
-      then count(*) filter (where oi.validation_status = 'disputed')::numeric / count(*)::numeric
+      then count(*) filter (where foi.validation_status = 'disputed')::numeric / count(*)::numeric
       else 0::numeric
     end as dispute_rate,
     case when count(*) > 0
-      then count(*) filter (where oi.validation_status = 'rejected')::numeric / count(*)::numeric
+      then count(*) filter (where foi.validation_status = 'rejected')::numeric / count(*)::numeric
       else 0::numeric
     end as rejected_rate,
-    coalesce(
-      (select count(*)::bigint from public.analyst_context_usage acu
-       where acu.source_type = 'exchange'
-         and acu.source_owner_id = oi.user_id
-         and acu.used_at >= now() - interval '30 days'),
-      0::bigint
-    ) as recent_usefulness,
-    count(*) filter (where oi.exchange_share_enabled = true)::bigint as eligible_exchange_entries,
+    coalesce(ru.usage_count, 0::bigint) as recent_usefulness,
+    count(*) filter (where foi.exchange_share_enabled = true)::bigint as eligible_exchange_entries,
     count(*)::bigint as total_entries
-  from public.open_intelligence oi
-  where oi.user_id = any(p_vendor_ids)
-  group by oi.user_id;
+  from filtered_oi foi
+  left join recent_usage ru on ru.vendor_id = foi.user_id
+  group by foi.user_id;
 end;
 $$;
 
