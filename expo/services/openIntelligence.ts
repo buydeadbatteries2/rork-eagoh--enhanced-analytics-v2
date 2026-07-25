@@ -673,6 +673,48 @@ export async function fetchVendorQualityMetrics(
   return row ?? null;
 }
 
+/** Bulk row type returned by the bulk vendor quality metrics RPC. */
+type BulkVendorQualityRow = VendorQualityMetrics & { vendor_id: string };
+
+/**
+ * Fetch quality metrics for many vendors in a single RPC call.
+ *
+ * Replaces the previous `Promise.all(vendorIds.map(fetchVendorQualityMetrics))`
+ * N-per-vendor pattern. Returns a Map keyed by vendor_id. Vendors with no
+ * entries are omitted from the Map (callers should treat a missing key as
+ * zeroed metrics).
+ */
+export async function fetchBulkVendorQualityMetrics(
+  vendorIds: string[],
+): Promise<Map<string, VendorQualityMetrics>> {
+  const result = new Map<string, VendorQualityMetrics>();
+  if (vendorIds.length === 0) return result;
+
+  // De-duplicate to avoid redundant work
+  const uniqueIds = [...new Set(vendorIds)];
+
+  const { data, error } = await supabase
+    .rpc("get_bulk_vendor_quality_metrics", { p_vendor_ids: uniqueIds });
+  if (error) {
+    console.warn("[trust] bulk vendor quality metrics failed", error.message);
+    // Fall back to per-vendor calls so a missing bulk RPC does not break trust
+    // indicators. This is a graceful degradation path, not the primary flow.
+    await Promise.all(
+      uniqueIds.map(async (vid) => {
+        const m = await fetchVendorQualityMetrics(vid);
+        if (m) result.set(vid, m);
+      }),
+    );
+    return result;
+  }
+
+  for (const row of (data ?? []) as BulkVendorQualityRow[]) {
+    const { vendor_id, ...metrics } = row;
+    result.set(vendor_id, metrics);
+  }
+  return result;
+}
+
 /** Faction quality metrics from the safe RPC. */
 export type FactionQualityMetrics = {
   total_shared_entries: number;

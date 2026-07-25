@@ -2410,6 +2410,63 @@ begin
 end;
 $$;
 
+-- ── 5B-8-BULK: BULK VENDOR QUALITY METRICS RPC ──────────────────────────
+-- Same safe aggregate quality metrics as get_vendor_quality_metrics but for
+-- many vendors in a single call. Eliminates the N-per-vendor request pattern.
+-- Vendors with no open_intelligence rows are omitted from the result set
+-- (callers treat a missing vendor_id as zeroed metrics).
+create or replace function public.get_bulk_vendor_quality_metrics(
+  p_vendor_ids uuid[]
+)
+returns table (
+  vendor_id uuid,
+  avg_entry_quality numeric,
+  supported_entry_rate numeric,
+  dispute_rate numeric,
+  rejected_rate numeric,
+  recent_usefulness bigint,
+  eligible_exchange_entries bigint,
+  total_entries bigint
+)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  return query
+  select
+    oi.user_id as vendor_id,
+    coalesce(avg(oi.quality_score), 0)::numeric as avg_entry_quality,
+    case when count(*) > 0
+      then count(*) filter (where oi.validation_status in ('community_supported', 'externally_supported'))::numeric / count(*)::numeric
+      else 0::numeric
+    end as supported_entry_rate,
+    case when count(*) > 0
+      then count(*) filter (where oi.validation_status = 'disputed')::numeric / count(*)::numeric
+      else 0::numeric
+    end as dispute_rate,
+    case when count(*) > 0
+      then count(*) filter (where oi.validation_status = 'rejected')::numeric / count(*)::numeric
+      else 0::numeric
+    end as rejected_rate,
+    coalesce(
+      (select count(*)::bigint from public.analyst_context_usage acu
+       where acu.source_type = 'exchange'
+         and acu.source_owner_id = oi.user_id
+         and acu.used_at >= now() - interval '30 days'),
+      0::bigint
+    ) as recent_usefulness,
+    count(*) filter (where oi.exchange_share_enabled = true)::bigint as eligible_exchange_entries,
+    count(*)::bigint as total_entries
+  from public.open_intelligence oi
+  where oi.user_id = any(p_vendor_ids)
+  group by oi.user_id;
+end;
+$$;
+
+-- The bulk RPC inherits the same access as the single-vendor RPC.
+-- grant execute is added alongside the existing vendor quality grants below.
+
 -- ── 5B-9: FACTION QUALITY METRICS RPC ────────────────────────────────────
 -- Safe aggregate quality metrics for a faction's shared intelligence.
 create or replace function public.get_faction_quality_metrics(

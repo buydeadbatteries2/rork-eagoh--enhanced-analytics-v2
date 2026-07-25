@@ -480,6 +480,119 @@ export async function recalculateVendorStats(vendorId: string): Promise<VendorSt
 
 // ── Listings CRUD ──────────────────────────────────────────────────────
 
+/**
+ * Bulk-enrich marketplace listing rows with fanatic teams, vendor profiles,
+ * vendor stats, credentials, and verification status.
+ *
+ * Runs exactly 5 Supabase requests in parallel regardless of how many listings
+ * are passed in — no per-listing queries:
+ *   1. eagoh_fanatic_teams  (filtered by eagoh_id IN (...))
+ *   2. profiles              (filtered by id IN (...))
+ *   3. marketplace_vendor_stats (filtered by vendor_id IN (...))
+ *   4. getBulkEagohHasCredentials (already bulk)
+ *   5. getBulkVerificationStatus  (already bulk)
+ *
+ * Results are converted into Maps keyed by eagoh_id / vendor_id and then
+ * joined locally — eliminating the previous N+1 query pattern.
+ */
+async function bulkEnrichListings(
+  rows: (MarketplaceListingRow & { eagoh: EagohRecord | null })[],
+): Promise<EnrichedListing[]> {
+  const vendorIds = [...new Set(rows.map((r) => r.vendor_id))];
+  const eagohIds = [...new Set(rows.map((r) => r.eagoh_id))];
+
+  const [teamsRows, profileRows, statsRows, credentialsSet, verificationMap] =
+    await Promise.all([
+      // 1. Fanatic teams — bulk query by eagoh_id
+      supabase
+        .from("eagoh_fanatic_teams")
+        .select("eagoh_id, team_id")
+        .in("eagoh_id", eagohIds)
+        .then(({ data, error }) => {
+          if (error) console.warn("[marketplace] bulk fanatic teams error", error.message);
+          return (data ?? []) as { eagoh_id: string; team_id: string }[];
+        }),
+      // 2. Vendor profiles — bulk query by vendor id
+      supabase
+        .from("profiles")
+        .select("id, username, avatar_url")
+        .in("id", vendorIds)
+        .then(({ data, error }) => {
+          if (error) console.warn("[marketplace] bulk profiles error", error.message);
+          return (data ?? []) as { id: string; username: string | null; avatar_url: string | null }[];
+        }),
+      // 3. Vendor stats — bulk query by vendor_id
+      supabase
+        .from("marketplace_vendor_stats")
+        .select(
+          "vendor_id, rank, sync_success_score, avg_quality_score, edge_earned_this_month",
+        )
+        .in("vendor_id", vendorIds)
+        .then(({ data, error }) => {
+          if (error) console.warn("[marketplace] bulk vendor stats error", error.message);
+          return (data ?? []) as {
+            vendor_id: string;
+            rank: string;
+            sync_success_score: number;
+            avg_quality_score: number;
+            edge_earned_this_month: number;
+          }[];
+        }),
+      // 4. Credentials — already bulk
+      getBulkEagohHasCredentials(eagohIds),
+      // 5. Verification — already bulk
+      getBulkVerificationStatus(vendorIds),
+    ]);
+
+  // Build Maps for O(1) local lookup
+  const teamsByEagoh = new Map<string, string[]>();
+  for (const t of teamsRows) {
+    const arr = teamsByEagoh.get(t.eagoh_id);
+    if (arr) arr.push(t.team_id);
+    else teamsByEagoh.set(t.eagoh_id, [t.team_id]);
+  }
+
+  const profileByVendor = new Map<
+    string,
+    { username: string | null; avatar_url: string | null }
+  >();
+  for (const p of profileRows) {
+    profileByVendor.set(p.id, { username: p.username, avatar_url: p.avatar_url });
+  }
+
+  const statsByVendor = new Map<
+    string,
+    {
+      rank: string;
+      sync_success_score: number;
+      avg_quality_score: number;
+      edge_earned_this_month: number;
+    }
+  >();
+  for (const s of statsRows) {
+    statsByVendor.set(s.vendor_id, s);
+  }
+
+  return rows.map((row) => {
+    const profile = profileByVendor.get(row.vendor_id);
+    const stats = statsByVendor.get(row.vendor_id);
+    const verif = verificationMap.get(row.vendor_id);
+    return {
+      ...row,
+      fanatic_teams: teamsByEagoh.get(row.eagoh_id) ?? [],
+      vendor_username: profile?.username ?? null,
+      vendor_avatar_url: profile?.avatar_url ?? null,
+      vendor_rank: stats?.rank ?? "UNRANKED",
+      sync_success_score: stats?.sync_success_score ?? 0,
+      avg_quality_score: stats?.avg_quality_score ?? 0,
+      edge_earned_this_month: stats?.edge_earned_this_month ?? 0,
+      has_credentials: credentialsSet.has(row.eagoh_id),
+      is_vendor_verified: verif?.isVerified ?? false,
+      vendor_verified_platform: verif?.verifiedPlatform ?? null,
+    } as EnrichedListing;
+  });
+}
+
 export async function listActiveListings(
   filters: ListingFilters = {},
   limit: number = 50,
@@ -503,58 +616,7 @@ export async function listActiveListings(
   const rows: (MarketplaceListingRow & { eagoh: EagohRecord | null })[] = (data ?? []) as any;
   if (rows.length === 0) return [];
 
-  // Enrich with fanatic teams, vendor stats, credentials, and verification in parallel
-  const vendorIds = [...new Set(rows.map((r) => r.vendor_id))];
-  const eagohIds: string[] = [...new Set(rows.map((r) => r.eagoh_id))];
-  const [enrichedCore, credentialsSet, verificationMap] = await Promise.all([
-    Promise.all(
-      rows.map(async (row) => {
-        // Fanatic teams
-        const { data: teams } = await supabase
-          .from("eagoh_fanatic_teams")
-          .select("team_id")
-          .eq("eagoh_id", row.eagoh_id);
-        const fanaticTeams = (teams ?? []).map((t: any) => t.team_id);
-
-        // Vendor profile username + avatar
-        const { data: profileData } = await supabase
-          .from("profiles")
-          .select("username, avatar_url")
-          .eq("id", row.vendor_id)
-          .maybeSingle();
-        const vendorUsername = (profileData as { username: string | null; avatar_url: string | null } | null)?.username ?? null;
-        const vendorAvatarUrl = (profileData as { username: string | null; avatar_url: string | null } | null)?.avatar_url ?? null;
-
-        // Vendor stats
-        const stats = await getVendorStats(row.vendor_id);
-
-        return {
-          ...row,
-          fanatic_teams: fanaticTeams,
-          vendor_username: vendorUsername,
-          vendor_avatar_url: vendorAvatarUrl,
-          vendor_rank: stats?.rank ?? "UNRANKED",
-          sync_success_score: stats?.sync_success_score ?? 0,
-          avg_quality_score: stats?.avg_quality_score ?? 0,
-          edge_earned_this_month: stats?.edge_earned_this_month ?? 0,
-        };
-      }),
-    ),
-    getBulkEagohHasCredentials(eagohIds),
-    getBulkVerificationStatus(vendorIds),
-  ]);
-
-  const enriched: EnrichedListing[] = enrichedCore.map((item) => {
-    const verif = verificationMap.get(item.vendor_id);
-    return {
-      ...item,
-      has_credentials: credentialsSet.has(item.eagoh_id),
-      is_vendor_verified: verif?.isVerified ?? false,
-      vendor_verified_platform: verif?.verifiedPlatform ?? null,
-    };
-  });
-
-  // Apply client-side filters that cross tables
+  const enriched = await bulkEnrichListings(rows);
   let result = enriched;
 
   if (filters.domain) {
@@ -693,49 +755,9 @@ export async function getMyListings(vendorId: string): Promise<EnrichedListing[]
 
   if (error) throw error;
   const rows: (MarketplaceListingRow & { eagoh: EagohRecord | null })[] = (data ?? []) as any;
+  if (rows.length === 0) return [];
 
-  const vendorIds = [...new Set(rows.map((r) => r.vendor_id))];
-  const eagohIds: string[] = [...new Set(rows.map((r) => r.eagoh_id))];
-  const [enrichedCore, credentialsSet, verificationMap] = await Promise.all([
-    Promise.all(
-      rows.map(async (row) => {
-        const { data: teams } = await supabase
-          .from("eagoh_fanatic_teams")
-          .select("team_id")
-          .eq("eagoh_id", row.eagoh_id);
-        const stats = await getVendorStats(row.vendor_id);
-        const { data: profileData } = await supabase
-          .from("profiles")
-          .select("username, avatar_url")
-          .eq("id", row.vendor_id)
-          .maybeSingle();
-        const vendorUsername = (profileData as { username: string | null; avatar_url: string | null } | null)?.username ?? null;
-        const vendorAvatarUrl = (profileData as { username: string | null; avatar_url: string | null } | null)?.avatar_url ?? null;
-        return {
-          ...row,
-          fanatic_teams: (teams ?? []).map((t: any) => t.team_id),
-          vendor_username: vendorUsername,
-          vendor_avatar_url: vendorAvatarUrl,
-          vendor_rank: stats?.rank ?? "UNRANKED",
-          sync_success_score: stats?.sync_success_score ?? 0,
-          avg_quality_score: stats?.avg_quality_score ?? 0,
-          edge_earned_this_month: stats?.edge_earned_this_month ?? 0,
-        };
-      }),
-    ),
-    getBulkEagohHasCredentials(eagohIds),
-    getBulkVerificationStatus(vendorIds),
-  ]);
-
-  return enrichedCore.map((item) => {
-    const verif = verificationMap.get(item.vendor_id);
-    return {
-      ...item,
-      has_credentials: credentialsSet.has(item.eagoh_id),
-      is_vendor_verified: verif?.isVerified ?? false,
-      vendor_verified_platform: verif?.verifiedPlatform ?? null,
-    };
-  });
+  return bulkEnrichListings(rows);
 }
 
 export type CreateListingInput = {

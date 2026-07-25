@@ -37,7 +37,8 @@ import {
   TrendingUp,
   X,
 } from "lucide-react-native";
-import React, { memo, useCallback, useEffect, useMemo, useState } from "react";
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
 import PublicProfileModal from "@/components/PublicProfileModal";
 import {
@@ -100,7 +101,7 @@ import { supabase } from "@/lib/supabase";
 import { getLeaderboard } from "@/services/leaderboards";
 import { shareListing, copyListingLink } from "@/services/sharing";
 import {
-  fetchVendorQualityMetrics,
+  fetchBulkVendorQualityMetrics,
   fetchBulkPublicReputations,
   trustLabel,
   trustLabelColor,
@@ -2165,6 +2166,24 @@ const MktSponsoredCarousel = memo(function MktSponsoredCarousel({ userId }: { us
   );
 });
 
+// ── Skeleton Listing Card (initial load placeholder) ────────────────────
+const SkeletonListingCard = memo(function SkeletonListingCard(): JSX.Element {
+  return (
+    <View style={styles.skeletonCard}>
+      <View style={styles.skeletonImage} />
+      <View style={styles.skeletonBody}>
+        <View style={styles.skeletonLineWide} />
+        <View style={styles.skeletonLineNarrow} />
+        <View style={styles.skeletonLineMedium} />
+        <View style={styles.skeletonPriceRow}>
+          <View style={styles.skeletonPriceBlock} />
+          <View style={styles.skeletonBtnBlock} />
+        </View>
+      </View>
+    </View>
+  );
+});
+
 // ── Main Screen ────────────────────────────────────────────────────────
 
 export default function MarketplaceScreen(): JSX.Element {
@@ -2175,13 +2194,18 @@ export default function MarketplaceScreen(): JSX.Element {
   const { balances } = useEdge();
   const { palette: pal } = useAppTheme();
 
+  const queryClient = useQueryClient();
+
   const [filters, setFilters] = useState<ListingFilters>({});
   const [listings, setListings] = useState<EnrichedListing[]>([]);
   const [myListings, setMyListings] = useState<EnrichedListing[]>([]);
   const [activeSyncs, setActiveSyncsState] = useState<EnrichedPurchase[]>([]);
   const [purchases, setPurchases] = useState<EnrichedPurchase[]>([]);
   const [filterMeta, setFilterMeta] = useState<{ domains: string[]; sports: string[]; ranks: string[] }>({ domains: [], sports: [], ranks: [] });
-  const [loading, setLoading] = useState(true);
+  // Separate loading states: initial load vs. filter refresh
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [filtering, setFiltering] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [tab, setTab] = useState<"browse" | "rankings" | "my-listings" | "my-syncs" | "my-purchases">("browse");
   const [rankingsData, setRankingsData] = useState<Array<{ rank: number; eagoh_id: string; eagoh_name: string; reputation_score: number; rank_tier: RankTier; marketplace_trust: number; sync_success: number; marketplace_sales: number; owner_username: string }>>([]);
   const [rankingsLoading, setRankingsLoading] = useState(false);
@@ -2203,51 +2227,93 @@ export default function MarketplaceScreen(): JSX.Element {
 
   const isPaid = canTransact(effectiveSubscriptionTier);
 
+  // ── React Query: cached marketplace listings ──────────────────────────
+  // Keeps previous data visible while refetching after filter changes.
+  const listingsQuery = useQuery<EnrichedListing[]>({
+    queryKey: ["marketplace-listings", filters],
+    queryFn: () => listActiveListings(filters),
+    staleTime: 60_000,
+    gcTime: 5 * 60_000,
+    placeholderData: (prev) => prev,
+    enabled: !!user?.id,
+  });
+
+  // Stale-request protection: only the latest filter change may update state.
+  const loadRequestId = useRef(0);
+
   const loadData = useCallback(async () => {
-    if (!user?.id) { setLoading(false); return; }
+    if (!user?.id) { setInitialLoading(false); return; }
+    const reqId = ++loadRequestId.current;
+    const hasPriorData = listings.length > 0;
+    // Only show full-screen initial loader when there is no prior data
+    if (!hasPriorData) {
+      setInitialLoading(true);
+      setLoadError(false);
+    } else {
+      // Keep cards visible during filter refresh — show inline indicator only
+      setFiltering(true);
+    }
     try {
       const [l, meta, syncs, myList, myPurch] = await Promise.all([
-        listActiveListings(filters),
+        // Prefer the React Query cache (avoids duplicate fetch for same filters)
+        queryClient.fetchQuery({
+          queryKey: ["marketplace-listings", filters],
+          queryFn: () => listActiveListings(filters),
+          staleTime: 60_000,
+        }),
         getActiveFilters(),
         getActiveSyncs(user.id),
         isPaid ? getMyListings(user.id) : Promise.resolve([]),
         isPaid ? getMyPurchases(user.id) : Promise.resolve([]),
       ]);
+      // Stale guard: discard results from a superseded request
+      if (reqId !== loadRequestId.current) return;
       setListings(l);
       setFilterMeta(meta);
       setActiveSyncsState(syncs);
       setMyListings(myList);
       setPurchases(myPurch);
-      // Load reputations for all listings
+      setLoadError(false);
+      // Secondary data loads after cards are rendered (non-blocking)
       const allEagohIds = [...new Set(l.map((li) => li.eagoh_id))];
       if (allEagohIds.length > 0) {
-        getBulkReputations(allEagohIds).then(setRepMap).catch(() => undefined);
+        getBulkReputations(allEagohIds)
+          .then((m) => { if (reqId === loadRequestId.current) setRepMap(m); })
+          .catch(() => undefined);
       }
-      // Phase 6A: Load vendor quality metrics + public reputations for trust indicators
       const allVendorIds = [...new Set(l.map((li) => li.vendor_id))];
       if (allVendorIds.length > 0) {
-        fetchBulkPublicReputations(allVendorIds).then(setVendorRepMap).catch(() => undefined);
-        Promise.all(allVendorIds.map((vid) => fetchVendorQualityMetrics(vid).then((m) => [vid, m] as const)))
-          .then((results) => {
-            const map = new Map<string, VendorQualityMetrics>();
-            for (const [vid, m] of results) {
-              if (m) map.set(vid, m);
-            }
-            setVendorMetricsMap(map);
-          })
+        fetchBulkPublicReputations(allVendorIds)
+          .then((m) => { if (reqId === loadRequestId.current) setVendorRepMap(m); })
+          .catch(() => undefined);
+        fetchBulkVendorQualityMetrics(allVendorIds)
+          .then((m) => { if (reqId === loadRequestId.current) setVendorMetricsMap(m); })
           .catch(() => undefined);
       }
     } catch (err) {
+      if (reqId !== loadRequestId.current) return;
       console.warn("[marketplace] load error", err);
+      // Only surface error when there is no prior data to keep showing
+      if (!hasPriorData) setLoadError(true);
     } finally {
-      setLoading(false);
+      if (reqId === loadRequestId.current) {
+        setInitialLoading(false);
+        setFiltering(false);
+      }
     }
-  }, [user?.id, isPaid, filters]);
+  }, [user?.id, isPaid, filters, listings.length, queryClient]);
 
   useEffect(() => {
-    setLoading(true);
     loadData();
   }, [loadData]);
+
+  // Keep listings state in sync with the React Query cache so background
+  // refetches (e.g. window refocus) update the UI without a full reload.
+  useEffect(() => {
+    if (listingsQuery.data && loadRequestId.current === 0) {
+      setListings(listingsQuery.data);
+    }
+  }, [listingsQuery.data]);
 
   const handlePurchaseConfirm = useCallback(async (level: SyncLevel, days: number) => {
     if (!user?.id || !profile || !purchaseModal) return;
@@ -2278,6 +2344,14 @@ export default function MarketplaceScreen(): JSX.Element {
       Alert.alert("Error", "Failed to update listing.");
     }
   }, [loadData, h]);
+
+  // Stable callbacks for ListingCard — prevent re-creation on every render
+  const handlePurchasePress = useCallback((l: EnrichedListing) => {
+    setPurchaseModal(l);
+  }, []);
+  const handleViewVendorProfile = useCallback((vendorId: string) => {
+    setPublicProfileVendorId(vendorId);
+  }, []);
 
   const renderHeader = useCallback(
     () => (
@@ -2376,10 +2450,64 @@ export default function MarketplaceScreen(): JSX.Element {
 
   const renderListings = () => {
     if (tab === "browse") {
-      if (loading) {
+      // ── Initial load: loading text + skeleton placeholders ──
+      if (initialLoading && listings.length === 0) {
+        if (loadError) {
+          return (
+            <View style={styles.loadingWrap}>
+              <PackageOpen color={palette.muted} size={36} />
+              <Text style={styles.emptyTitle}>Unable to load the Exchange.</Text>
+              <Pressable onPress={() => { setLoadError(false); setInitialLoading(true); loadData(); }} style={({ pressed }) => [styles.emptyActionBtn, pressed && { opacity: 0.8 }]}>
+                <Text style={styles.emptyActionText}>Try Again</Text>
+              </Pressable>
+            </View>
+          );
+        }
         return (
           <View style={styles.loadingWrap}>
             <ActivityIndicator color={palette.cyan} size="large" />
+            <Text style={styles.loadingTitle}>Loading EAGOH Exchange...</Text>
+            <Text style={styles.loadingSubtitle}>Gathering analyst listings and intelligence details.</Text>
+            <SkeletonListingCard />
+            <SkeletonListingCard />
+          </View>
+        );
+      }
+      // ── Filter refresh: keep cards visible, show inline indicator ──
+      if (filtering && listings.length > 0) {
+        return (
+          <View style={styles.domainCarouselsWrap}>
+            <View style={styles.filterRefreshBar}>
+              <ActivityIndicator color={palette.cyan} size="small" />
+              <Text style={styles.filterRefreshText}>Updating results...</Text>
+            </View>
+            {domainGroups.map(([domain, domainListings]) => (
+              <View key={domain} style={styles.carouselSection}>
+                <View style={styles.carouselSectionHeader}>
+                  <Text style={styles.carouselSectionTitle}>{domainLabel(domain)}</Text>
+                  <Text style={styles.carouselSectionCount}>{domainListings.length}</Text>
+                </View>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.carouselRail}
+                  {...HORIZONTAL_LIST_PERFORMANCE_PROPS}
+                >
+                  {domainListings.map((item) => (
+                    <ListingCard
+                      key={item.id}
+                      item={item}
+                      isPaid={isPaid}
+                      onPurchase={handlePurchasePress}
+                      reputation={repMap.get(item.eagoh_id)}
+                      onViewVendorProfile={handleViewVendorProfile}
+                      vendorMetrics={vendorMetricsMap.get(item.vendor_id)}
+                      vendorRep={vendorRepMap.get(item.vendor_id)}
+                    />
+                  ))}
+                </ScrollView>
+              </View>
+            ))}
           </View>
         );
       }
@@ -2416,9 +2544,9 @@ export default function MarketplaceScreen(): JSX.Element {
                     key={item.id}
                     item={item}
                     isPaid={isPaid}
-                    onPurchase={(l) => setPurchaseModal(l)}
+                    onPurchase={handlePurchasePress}
                     reputation={repMap.get(item.eagoh_id)}
-                    onViewVendorProfile={(vendorId) => setPublicProfileVendorId(vendorId)}
+                    onViewVendorProfile={handleViewVendorProfile}
                     vendorMetrics={vendorMetricsMap.get(item.vendor_id)}
                     vendorRep={vendorRepMap.get(item.vendor_id)}
                   />
@@ -2607,7 +2735,7 @@ export default function MarketplaceScreen(): JSX.Element {
       </SafeAreaView>
 
       {/* Free user upsell */}
-      {!isPaid && !loading && (
+      {!isPaid && !initialLoading && (
         <View style={styles.freeUpsell}>
           <LinearGradient colors={["rgba(138,92,255,0.25)", "rgba(10,20,38,0.95)"]} style={StyleSheet.absoluteFill} />
           <Shield color={palette.violet} size={18} />
@@ -3156,7 +3284,34 @@ const styles = StyleSheet.create({
   emptyActionText: { color: palette.void, fontSize: 13, fontWeight: "900" },
 
   // Loading
-  loadingWrap: { alignItems: "center", paddingVertical: 40 },
+  loadingWrap: { alignItems: "center", paddingVertical: 40, gap: 10 },
+  loadingTitle: { color: palette.text, fontSize: 16, fontWeight: "900", letterSpacing: -0.2, marginTop: 4 },
+  loadingSubtitle: { color: palette.muted, fontSize: 12, fontWeight: "700", textAlign: "center", lineHeight: 17, paddingHorizontal: 20 },
+
+  // Filter refresh bar (inline, above existing cards)
+  filterRefreshBar: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 8, marginBottom: 4 },
+  filterRefreshText: { color: palette.cyan, fontSize: 12, fontWeight: "800", letterSpacing: 0.3 },
+
+  // Skeleton card placeholders (shown during initial Exchange load)
+  skeletonCard: {
+    flexDirection: "row",
+    width: 320,
+    minHeight: 180,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.06)",
+    backgroundColor: "rgba(255,255,255,0.025)",
+    overflow: "hidden",
+    marginTop: 14,
+  },
+  skeletonImage: { width: 128, backgroundColor: "rgba(54,245,255,0.05)" },
+  skeletonBody: { flex: 1, padding: 12, gap: 8, justifyContent: "center" },
+  skeletonLineWide: { height: 12, borderRadius: 3, backgroundColor: "rgba(255,255,255,0.08)", width: "85%" },
+  skeletonLineNarrow: { height: 10, borderRadius: 3, backgroundColor: "rgba(255,255,255,0.06)", width: "55%" },
+  skeletonLineMedium: { height: 10, borderRadius: 3, backgroundColor: "rgba(255,255,255,0.06)", width: "70%" },
+  skeletonPriceRow: { flexDirection: "row", alignItems: "center", gap: 10, marginTop: 6 },
+  skeletonPriceBlock: { height: 18, width: 64, borderRadius: 4, backgroundColor: "rgba(54,245,255,0.08)" },
+  skeletonBtnBlock: { height: 22, width: 90, borderRadius: 4, backgroundColor: "rgba(54,245,255,0.12)" },
 
   // Free upsell
   freeUpsell: {
