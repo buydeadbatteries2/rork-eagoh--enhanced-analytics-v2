@@ -690,21 +690,30 @@ export async function fetchBulkVendorQualityMetrics(
   const result = new Map<string, VendorQualityMetrics>();
   if (vendorIds.length === 0) return result;
 
+  // If the bulk RPC is known to be unavailable on this project, return an empty
+  // map immediately instead of firing a 404 on every Exchange load. The cards
+  // still render — vendor quality metrics are optional enrichment data.
+  if (bulkRpcUnavailable) {
+    return result;
+  }
+
   // De-duplicate to avoid redundant work
   const uniqueIds = [...new Set(vendorIds)];
 
   const { data, error } = await supabase
     .rpc("get_bulk_vendor_quality_metrics", { p_vendor_ids: uniqueIds });
   if (error) {
-    console.warn("[trust] bulk vendor quality metrics failed", error.message);
-    // Fall back to per-vendor calls so a missing bulk RPC does not break trust
-    // indicators. This is a graceful degradation path, not the primary flow.
-    await Promise.all(
-      uniqueIds.map(async (vid) => {
-        const m = await fetchVendorQualityMetrics(vid);
-        if (m) result.set(vid, m);
-      }),
-    );
+    // PostgREST returns code PGRST202 / hint "Could not find the function"
+    // when the RPC does not exist in the public schema. Mark it unavailable so
+    // we never retry on this project again — prevents the API Gateway 404 flood.
+    const code = (error as { code?: string }).code ?? "";
+    const msg = error.message ?? "";
+    if (code === "PGRST202" || /Could not find the function/i.test(msg) || /function .* does not exist/i.test(msg)) {
+      bulkRpcUnavailable = true;
+      console.warn("[trust] bulk vendor quality metrics RPC not deployed — suppressing further calls. Run PHASE 2 SQL to deploy.");
+    } else {
+      console.warn("[trust] bulk vendor quality metrics failed", msg);
+    }
     return result;
   }
 
@@ -714,6 +723,11 @@ export async function fetchBulkVendorQualityMetrics(
   }
   return result;
 }
+
+/** Module-level flag: once the bulk RPC returns a 404/not-found error, stop
+ * calling it for the rest of the session so we don't flood the API Gateway.
+ * Reset by reloading the app after deploying the SQL. */
+let bulkRpcUnavailable = false;
 
 /** Faction quality metrics from the safe RPC. */
 export type FactionQualityMetrics = {

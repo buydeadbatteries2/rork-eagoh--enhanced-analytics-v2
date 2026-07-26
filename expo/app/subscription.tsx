@@ -21,6 +21,7 @@ import {
   TIER_MONTHLY_ALLOCATION,
   TIER_MAX_EAGOHS,
   TIER_BENEFITS,
+  SUBSCRIPTION_ENTITLEMENT_IDS,
   subscriptionTierFromPackageId,
   type SubscriptionTier,
 } from "@/services/tiers";
@@ -478,6 +479,7 @@ export default function SubscriptionScreen(): JSX.Element {
 
   const [purchasingTier, setPurchasingTier] = useState<SubscriptionTier | null>(null);
   const [purchaseSuccess, setPurchaseSuccess] = useState(false);
+  const [purchaseStatusMsg, setPurchaseStatusMsg] = useState<string | null>(null);
 
   const currentTier: SubscriptionTier = useMemo(
     () => effectiveSubscriptionTier,
@@ -622,13 +624,51 @@ export default function SubscriptionScreen(): JSX.Element {
             }
           }
 
+          // ── Verify the package resolves to an Apple Store product, not Test Store ──
+          const productId = resolvedPkg.product.identifier;
+          const isTestStoreProduct = productId === "pro_sub" || productId === "oracle_elite_sub" || productId === "syndicate_sub"
+            || productId === "test_pro_sub" || productId === "test_oracle_elite_sub" || productId === "test_syndicate_sub";
+          if (isTestStoreProduct) {
+            console.warn(`[Subscription] CONFIGURATION BLOCKER: Test Store product ${productId} returned in native build — refusing to purchase.`);
+            Alert.alert(
+              "Configuration Error",
+              "A Test Store product was returned instead of an App Store product. This is a RevenueCat configuration issue — please contact support.",
+            );
+            return;
+          }
+          console.log(`[Subscription] Purchasing: packageId=${resolvedPkg.identifier} productId=${productId}`);
+
           // ── Purchase the resolved package ────────────────────────
+          setPurchaseStatusMsg("Completing your App Store purchase...");
           const purchaseResult = await rcPurchase(resolvedPkg);
           const activeEntitlements = purchaseResult.customerInfo.entitlements?.active;
           const entitlementKeys = activeEntitlements ? Object.keys(activeEntitlements) : [];
           console.log(`[Subscription] Purchase success — active entitlements: ${entitlementKeys.join(", ") || "none"}`);
 
+          // ── Verify the expected entitlement is active BEFORE reporting success ──
+          const expectedEntitlementId = SUBSCRIPTION_ENTITLEMENT_IDS[tier];
+          const hasExpectedEntitlement = entitlementKeys.includes(expectedEntitlementId);
+
+          if (!hasExpectedEntitlement) {
+            // RevenueCat did not confirm the entitlement — do NOT change Supabase,
+            // do NOT grant neurons, show verification error
+            console.warn(`[Subscription] Entitlement verification failed: expected ${expectedEntitlementId}, got [${entitlementKeys.join(", ")}], productId=${productId}`);
+            Alert.alert(
+              "Purchase Verification Failed",
+              "We could not verify this subscription purchase. You were not charged by EAGOH.\n\nUse Restore Purchases if Apple completed the transaction.",
+            );
+            return;
+          }
+
+          // ── Entitlement confirmed — wait for backend sync ──
+          setPurchaseStatusMsg("Activating your subscription and adding neurons...");
+          // The RevenueCatProvider's purchaseMutation.onSuccess already fires the
+          // backend sync. Give it a moment to complete, then refresh local state.
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          await refreshAll();
+
           setPurchaseSuccess(true);
+          setPurchaseStatusMsg("Subscription activated. Your neurons are ready.");
 
           const tierLabel = TIER_LABELS[tier];
           Alert.alert(
@@ -660,17 +700,23 @@ export default function SubscriptionScreen(): JSX.Element {
         }
       } finally {
         setPurchasingTier(null);
+        setPurchaseStatusMsg(null);
       }
     },
-    [user?.id, rcPurchase, rcConfigured, h, handleTestSubscribe],
+    [user?.id, rcPurchase, rcConfigured, h, handleTestSubscribe, refreshAll],
   );
 
   const handleRestore = useCallback(async (): Promise<void> => {
     h.medium();
     try {
       const customerInfo = await rcRestore();
-      const activeCount = customerInfo?.activeSubscriptions?.length ?? 0;
-      if (activeCount > 0) {
+      const activeEntitlements = customerInfo?.entitlements?.active;
+      const entitlementKeys = activeEntitlements ? Object.keys(activeEntitlements) : [];
+      if (entitlementKeys.length > 0) {
+        // Backend sync is triggered by restoreMutation.onSuccess in the provider.
+        // Wait for it, then refresh.
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        await refreshAll();
         const tier = revenueCatTier;
         const tierLabel = TIER_LABELS[tier];
         Alert.alert(
@@ -684,7 +730,7 @@ export default function SubscriptionScreen(): JSX.Element {
       const msg = err instanceof Error ? err.message : "Restore failed";
       Alert.alert("Restore Failed", msg);
     }
-  }, [rcRestore, revenueCatTier, h]);
+  }, [rcRestore, revenueCatTier, h, refreshAll]);
 
   const handleRetry = useCallback((): void => {
     refreshAll();
@@ -837,7 +883,17 @@ export default function SubscriptionScreen(): JSX.Element {
           <View style={styles.successBanner}>
             <BadgeCheck color={palette.success} size={18} />
             <Text style={styles.successText}>
-              Subscription activated successfully! Your benefits are now live.
+              {purchaseStatusMsg ?? "Subscription activated successfully! Your benefits are now live."}
+            </Text>
+          </View>
+        ) : null}
+
+        {/* In-progress status banner */}
+        {!purchaseSuccess && purchaseStatusMsg && purchasingTier ? (
+          <View style={styles.successBanner}>
+            <ActivityIndicator color={palette.cyan} size="small" />
+            <Text style={[styles.successText, { color: palette.cyan }]}>
+              {purchaseStatusMsg}
             </Text>
           </View>
         ) : null}

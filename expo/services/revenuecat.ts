@@ -89,13 +89,19 @@ function resolveRevenueCatConfig(): {
   }
 
   const expoGo = isExpoGoRuntime();
+  const testStoreEnabled = isRevenueCatTestStoreEnabled();
 
-  // Test Store explicitly enabled — allowed in any environment including Expo Go
-  if (isRevenueCatTestStoreEnabled()) {
+  // Test Store explicitly enabled — only honoured for web or Expo Go / Rork
+  // preview environments. On a native iOS/Android build (TestFlight, App Store,
+  // Play Store) we MUST use the platform's real store even when the env flag is
+  // set; otherwise the Test Store product IDs (pro_sub, oracle_elite_sub, ...)
+  // leak into production and purchases never register a real entitlement.
+  // (The web branch above already returned, so here Platform.OS is never "web".)
+  if (testStoreEnabled && expoGo) {
     const testKey = process.env.EXPO_PUBLIC_REVENUECAT_TEST_API_KEY ?? "";
     if (testKey) {
       if (__DEV__) {
-        console.log("[RevenueCat] key mode: test-store (env flag)");
+        console.log("[RevenueCat] key mode: test-store (preview/web)");
       }
       return { apiKey: testKey, keyMode: "test-store", runtimeMode: "test-store" };
     }
@@ -103,6 +109,14 @@ function resolveRevenueCatConfig(): {
       console.warn("[RevenueCat] Test Store flag set but no test API key — disabled");
     }
     return { apiKey: "", keyMode: "unavailable", runtimeMode: "unconfigured" };
+  }
+
+  // If the Test Store flag was set but we're on a native build, ignore it and
+  // fall through to the platform-specific path.
+  if (testStoreEnabled && !expoGo) {
+    if (__DEV__) {
+      console.warn("[RevenueCat] Test Store flag ignored on native build — using real store");
+    }
   }
 
   // Expo Go / Rork preview — cannot use native StoreKit

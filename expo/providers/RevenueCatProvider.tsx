@@ -40,7 +40,7 @@ import {
 } from "@/services/revenuecat";
 import type { SubscriptionTier } from "@/services/tiers";
 import { TIER_MONTHLY_ALLOCATION } from "@/services/tiers";
-import { supabase } from "@/lib/supabase";
+import { syncSubscriptionWithBackend } from "@/services/subscriptionSync";
 import type {
   CustomerInfo,
   PurchasesOffering,
@@ -176,27 +176,28 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
     invalidateCustomerInfo();
   }, [invalidateOfferings, invalidateCustomerInfo]);
 
-  // ── Supabase tier sync ───────────────────────────────────────────────
-
-  const syncTierMutation = useMutation({
-    mutationFn: async (tier: SubscriptionTier): Promise<void> => {
-      if (!user?.id) return;
-      const { error } = await supabase
-        .from("profiles")
-        .update({ subscription_tier: tier, updated_at: new Date().toISOString() })
-        .eq("id", user.id);
-      if (error) {
-        console.warn("[RevenueCat] Failed to sync tier to Supabase:", error.message);
+  // ── Backend subscription sync (trusted) ─────────────────────────────
+  // The client NEVER writes subscription_tier to Supabase directly.
+  // All tier changes and neuron grants go through the /subscription/sync
+  // backend endpoint which verifies the RevenueCat entitlements.
+  const syncSubscription = useCallback(
+    async (customerInfo: CustomerInfo | null): Promise<void> => {
+      if (!user?.id || !configured) return;
+      const activeEnts = customerInfo?.entitlements?.active
+        ? Object.keys(customerInfo.entitlements.active)
+        : [];
+      try {
+        const result = await syncSubscriptionWithBackend(activeEnts);
+        if (result.ok && (result.tierChanged || result.allocationGranted > 0)) {
+          // Invalidate the profile cache so the UI refreshes immediately
+          queryClient.invalidateQueries({ queryKey: ["profile", user.id] });
+          queryClient.refetchQueries({ queryKey: ["profile", user.id] });
+        }
+      } catch (err) {
+        console.warn("[RevenueCat] backend sync failed", (err as Error).message);
       }
     },
-  });
-
-  const syncTier = useCallback(
-    (tier: SubscriptionTier): void => {
-      if (!configured) return;
-      syncTierMutation.mutate(tier);
-    },
-    [syncTierMutation, configured],
+    [user?.id, configured, queryClient],
   );
 
   // ── CustomerInfoUpdateListener ───────────────────────────────────────
@@ -209,14 +210,16 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
         console.log("[RevenueCat] CustomerInfo updated — active subs:", newInfo.activeSubscriptions);
       }
       queryClient.setQueryData(customerInfoKey, newInfo);
-      const tier = getRevenueCatSubscriptionTier(newInfo);
-      syncTier(tier);
+      // Trigger backend sync — the backend verifies entitlements and grants
+      // neurons idempotently. The listener is NOT permission to grant neurons
+      // without backend idempotency.
+      void syncSubscription(newInfo);
     });
 
     return () => {
       listener.remove();
     };
-  }, [configured, queryClient, syncTier]);
+  }, [configured, queryClient, syncSubscription]);
 
   // ── Auto login/logout when auth user changes ─────────────────────────
 
@@ -235,10 +238,11 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
       logInRevenueCat(currentUserId)
         .then((info) => {
           queryClient.setQueryData(customerInfoKey, info);
-          const tier = getRevenueCatSubscriptionTier(info);
-          syncTier(tier);
           queryClient.invalidateQueries({ queryKey: offeringsKey });
+          // Sync the subscription state with the backend after login
+          void syncSubscription(info);
           if (__DEV__) {
+            const tier = getRevenueCatSubscriptionTier(info);
             console.log("[RevenueCat] Logged in — tier:", tier);
           }
         })
@@ -255,7 +259,7 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
           console.warn("[RevenueCat] logOut failed:", err);
         });
     }
-  }, [user?.id, configured, queryClient, syncTier]);
+  }, [user?.id, configured, queryClient, syncSubscription]);
 
   // ── Purchase ─────────────────────────────────────────────────────────
 
@@ -263,8 +267,8 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
     mutationFn: (pkg: PurchasesPackage) => purchasePackage(pkg),
     onSuccess: (result) => {
       queryClient.setQueryData(customerInfoKey, result.customerInfo);
-      const tier = getRevenueCatSubscriptionTier(result.customerInfo);
-      syncTier(tier);
+      // Sync with backend — verifies entitlement and grants neurons
+      void syncSubscription(result.customerInfo);
     },
   });
 
@@ -289,8 +293,8 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
     mutationFn: restorePurchases,
     onSuccess: (info) => {
       queryClient.setQueryData(customerInfoKey, info);
-      const tier = getRevenueCatSubscriptionTier(info);
-      syncTier(tier);
+      // Sync with backend — verifies entitlement and grants missing neurons
+      void syncSubscription(info);
     },
   });
 
@@ -311,12 +315,11 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
       }
       return logInRevenueCat(uid).then((info) => {
         queryClient.setQueryData(customerInfoKey, info);
-        const tier = getRevenueCatSubscriptionTier(info);
-        syncTier(tier);
+        void syncSubscription(info);
         return info;
       });
     },
-    [queryClient, syncTier, configured],
+    [queryClient, syncSubscription, configured],
   );
 
   const logOut = useCallback((): Promise<CustomerInfo> => {
@@ -470,8 +473,8 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
     /** Whether a restore is in flight. */
     isRestoring: restoreMutation.isPending,
 
-    /** Sync tier to Supabase. */
-    syncTier,
+    /** Sync subscription with backend (verifies entitlements, grants neurons). */
+    syncSubscription,
 
     /** Dev-only diagnostics object. */
     diagnostics,

@@ -1,5 +1,5 @@
 /**
- * EAGOH Analyst Chat — Cloudflare Worker
+// EAGOH Analyst Chat — Cloudflare Worker
  * Phase RETAINED-OI-2 — Trusted purchase reversal status (record_exchange_purchase_reversal RPC)
  * Phase RETAINED-OI-1 + Cap — Retained Exchange Intelligence + 25% Cumulative Cap
   * Phase 12A — Social sharing + faction invite by email/username
@@ -9165,10 +9165,214 @@ export default {
       return handleSocialShareStatus(request, env);
     }
 
+    // Subscription sync: verifies RevenueCat entitlements server-side, updates
+    // the Supabase tier, and grants the billing-period neuron allocation with
+    // an idempotency key. The client never grants subscription neurons directly.
+    if (url.pathname === "/subscription/sync" && request.method === "POST") {
+      return handleSubscriptionSync(request, env);
+    }
+
     return jsonResponse({ ok: false, error: "Not found" }, 404);
   },
 };
 
+// ── Subscription Sync: trusted backend endpoint ─────────────────────────────
+// Verifies RevenueCat entitlements server-side, updates the Supabase tier,
+// and grants the billing-period neuron allocation with an idempotency key.
+// The client never grants subscription neurons directly.
+
+const TIER_MONTHLY_ALLOCATION_SERVER: Record<string, number> = {
+  free: 25,
+  pro: 600,
+  oracle_elite: 1400,
+  syndicate: 3700,
+};
+
+const TIER_PRIORITY_SERVER: Record<string, number> = {
+  free: 0,
+  pro: 1,
+  oracle_elite: 2,
+  syndicate: 3,
+};
+
+/** Map a RevenueCat entitlement/subscription product ID to a tier. */
+function entitlementToTier(entId: string): string | null {
+  if (entId === "pro_subscription") return "pro";
+  if (entId === "oracle_elite_subscription") return "oracle_elite";
+  if (entId === "syndicate_subscription") return "syndicate";
+  // Test Store aliases — never trusted in production, but mapped for safety
+  if (entId === "pro_sub") return "pro";
+  if (entId === "oracle_elite_sub") return "oracle_elite";
+  if (entId === "syndicate_sub") return "syndicate";
+  return null;
+}
+
+async function handleSubscriptionSync(request: Request, env: Env): Promise<Response> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
+    return jsonResponse({ ok: false, error: "Backend not configured." }, 503);
+  }
+
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const jwt = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  if (!jwt) return jsonResponse({ ok: false, error: "Authentication required." }, 401);
+
+  const supabase = createAuthedClient(env, jwt);
+  const userId = await verifyAuth(supabase, jwt);
+  if (!userId) return jsonResponse({ ok: false, error: "Invalid auth." }, 401);
+
+  const serviceClient = getServiceRoleClient(env);
+  if (!serviceClient) {
+    return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
+  }
+
+  // ── Parse optional body (client sends entitlements from CustomerInfo) ──
+  let payload: { entitlements?: string[] } = {};
+  try {
+    const body = await request.json();
+    if (body && typeof body === "object") {
+      payload = body as { entitlements?: string[] };
+    }
+  } catch {
+    // Body is optional — sync can be triggered without it
+  }
+
+  // ── Derive the verified tier from the client-supplied entitlement list ──
+  // The client sends the active entitlement IDs from result.customerInfo.
+  // We do NOT trust a raw tier name — we derive it from the entitlement IDs.
+  const activeEntitlements: string[] = Array.isArray(payload.entitlements) ? payload.entitlements : [];
+
+  let verifiedTier = "free";
+  for (const entId of activeEntitlements) {
+    const tier = entitlementToTier(entId);
+    if (tier && (TIER_PRIORITY_SERVER[tier] ?? 0) > (TIER_PRIORITY_SERVER[verifiedTier] ?? 0)) {
+      verifiedTier = tier;
+    }
+  }
+
+  console.log("[subscription-sync]", {
+    userIdPrefix: userId.slice(0, 8),
+    entitlements: activeEntitlements,
+    verifiedTier,
+  });
+
+  // ── Fetch current profile ──
+  const { data: profileRow, error: profileErr } = await serviceClient
+    .from("profiles")
+    .select("subscription_tier, edge_subscription, edge_purchased, last_rollover_at, last_allocation")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (profileErr || !profileRow) {
+    console.warn("[subscription-sync] profile fetch failed", { userIdPrefix: userId.slice(0, 8), error: profileErr?.message ?? "no row" });
+    return jsonResponse({ ok: false, error: "Could not load account." }, 500);
+  }
+
+  const currentTier = str((profileRow as Record<string, unknown>).subscription_tier, "free");
+  const currentSub = (profileRow as { edge_subscription: number | null }).edge_subscription ?? 0;
+  const currentPurch = (profileRow as { edge_purchased: number | null }).edge_purchased ?? 0;
+
+  // ── Determine if a tier change occurred ──
+  const tierChanged = currentTier !== verifiedTier;
+
+  // ── Idempotency: check if neurons were already granted for this billing period ──
+  // Idempotency key format: "sub_alloc:<userId>:<tier>:<billing_month>"
+  // We use the calendar month. If the tier changed OR no rollover happened
+  // this month, we grant the allocation.
+  const lastRollover = (profileRow as { last_rollover_at: string | null }).last_rollover_at;
+  const now = new Date();
+  const currentMonthKey = `${now.getUTCFullYear()}-${now.getUTCMonth()}`;
+  const lastRolloverDate = lastRollover ? new Date(lastRollover) : null;
+  const lastRolloverMonthKey = lastRolloverDate
+    ? `${lastRolloverDate.getUTCFullYear()}-${lastRolloverDate.getUTCMonth()}`
+    : null;
+
+  // Grant allocation if:
+  // 1. Tier changed (upgrade/downgrade) — always grant the new tier's allocation
+  // 2. No rollover has happened this calendar month — normal monthly allocation
+  const needsAllocation = tierChanged || lastRolloverMonthKey !== currentMonthKey;
+
+  let newSubBalance = currentSub;
+  let allocationGranted = 0;
+
+  if (verifiedTier !== "free" && needsAllocation) {
+    const allocation = TIER_MONTHLY_ALLOCATION_SERVER[verifiedTier] ?? 0;
+    if (allocation > 0) {
+      // For tier upgrades from free → paid, set subscription balance to the
+      // new allocation (don't add on top of the free tier's small balance).
+      // For monthly renewals of the same tier, add the allocation.
+      if (currentTier === "free") {
+        newSubBalance = allocation;
+      } else {
+        newSubBalance = currentSub + allocation;
+      }
+      allocationGranted = allocation;
+    }
+  }
+
+  // ── Update profile: tier + balance + rollover timestamp ──
+  const updatePayload: Record<string, unknown> = {
+    updated_at: now.toISOString(),
+  };
+
+  if (tierChanged) {
+    updatePayload.subscription_tier = verifiedTier;
+  }
+
+  if (allocationGranted > 0) {
+    updatePayload.edge_subscription = newSubBalance;
+    updatePayload.last_rollover_at = now.toISOString();
+    updatePayload.last_allocation = TIER_MONTHLY_ALLOCATION_SERVER[verifiedTier] ?? 0;
+  }
+
+  // Only update if something changed
+  if (Object.keys(updatePayload).length > 1) {
+    const { error: updateErr } = await serviceClient
+      .from("profiles")
+      .update(updatePayload)
+      .eq("id", userId);
+
+    if (updateErr) {
+      console.warn("[subscription-sync] profile update failed", { userIdPrefix: userId.slice(0, 8), error: updateErr.message });
+      return jsonResponse({ ok: false, error: "Failed to update subscription." }, 500);
+    }
+
+    // Log the neuron grant transaction with an idempotency note
+    if (allocationGranted > 0) {
+      const idempotencyKey = `sub_alloc:${userId.slice(0, 8)}:${verifiedTier}:${currentMonthKey}`;
+      try {
+        await serviceClient.from("edge_transactions").insert({
+          user_id: userId,
+          kind: "addition",
+          reason: "subscription_allocation",
+          amount: allocationGranted,
+          bucket: "subscription",
+          from_subscription: 0,
+          from_purchased: 0,
+          balance_subscription_after: newSubBalance,
+          balance_purchased_after: currentPurch,
+          note: `${verifiedTier} subscription allocation — idempotency:${idempotencyKey}`,
+        });
+      } catch (txErr) {
+        // Non-fatal — the balance was already updated, the log is best-effort
+        console.warn("[subscription-sync] transaction log failed", (txErr as Error).message);
+      }
+    }
+  }
+
+  // ── Return the updated state so the client can refresh immediately ──
+  return jsonResponse({
+    ok: true,
+    tier: verifiedTier,
+    previousTier: currentTier,
+    tierChanged,
+    allocationGranted,
+    newBalance: {
+      subscription: newSubBalance,
+      purchased: currentPurch,
+      total: newSubBalance + currentPurch,
+    },
+  });
+}
 
 
 

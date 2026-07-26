@@ -86,10 +86,14 @@ export async function getLeaderboard(
   limit: number = 25,
   offset: number = 0,
 ): Promise<{ entries: LeaderboardEntry[]; total: number }> {
-  // Build the base query: reputation + eagohs + profiles
+  // Build the base query: reputation + eagohs (inner join).
+  // NOTE: profiles and fanatic_teams are fetched separately in bulk below —
+  // the previous embedded query used an invalid `profiles!eagohs` relationship
+  // (no FK from eagohs → profiles) and a non-existent `fanatic_teams` column on
+  // eagohs, causing HTTP 400 from PostgREST.
   let query = supabase
     .from("eagoh_reputation")
-    .select(`*, eagohs!inner(id, name, user_id, domain, dna, fanatic_teams, image_thumb_url, created_at), profiles!eagohs(user_id)!inner(username)`, {
+    .select(`*, eagohs!inner(id, name, user_id, domain, dna, image_thumb_url, created_at)`, {
       count: "exact",
     });
 
@@ -183,21 +187,50 @@ export async function getLeaderboard(
 
   const rows = (data ?? []) as any[];
 
+  // ── Bulk fetch profiles and fanatic teams separately ──────────────────
+  // (replaces the invalid embedded query that caused HTTP 400)
+  const eagohIds = rows.map((r) => r.eagoh_id).filter(Boolean);
+  const ownerIds = [...new Set(rows.map((r) => r.eagohs?.user_id).filter(Boolean))] as string[];
+
+  const [profileRes, teamRes] = await Promise.all([
+    ownerIds.length > 0
+      ? supabase.from("profiles").select("id, username").in("id", ownerIds)
+      : Promise.resolve({ data: [], error: null } as { data: { id: string; username: string | null }[] | null; error: { message: string } | null }),
+    eagohIds.length > 0
+      ? supabase.from("eagoh_fanatic_teams").select("eagoh_id, team_id").in("eagoh_id", eagohIds)
+      : Promise.resolve({ data: [], error: null } as { data: { eagoh_id: string; team_id: string }[] | null; error: { message: string } | null }),
+  ]);
+
+  if (profileRes.error) console.warn("[leaderboards] profiles bulk error", profileRes.error.message);
+  if (teamRes.error) console.warn("[leaderboards] fanatic teams bulk error", teamRes.error.message);
+  const profileRows = (profileRes.data ?? []) as { id: string; username: string | null }[];
+  const teamRows = (teamRes.data ?? []) as { eagoh_id: string; team_id: string }[];
+
+  const profileMap = new Map<string, string | null>();
+  for (const p of profileRows) profileMap.set(p.id, p.username);
+
+  const teamsMap = new Map<string, string[]>();
+  for (const t of teamRows) {
+    const arr = teamsMap.get(t.eagoh_id) ?? [];
+    arr.push(t.team_id);
+    teamsMap.set(t.eagoh_id, arr);
+  }
+
   // ── Map to LeaderboardEntry ─────────────────────────────────────────
   const entries: LeaderboardEntry[] = rows.map((row, index) => {
     const eagoh = row.eagohs ?? {};
-    const profile = row.profiles ?? {};
+    const ownerId = eagoh.user_id ?? "";
     return {
       rank: offset + index + 1,
       eagoh_id: row.eagoh_id,
       eagoh_name: eagoh.name ?? "Unnamed",
-      owner_username: profile.username ?? "Anonymous",
-      owner_id: eagoh.user_id ?? "",
+      owner_username: profileMap.get(ownerId) ?? "Anonymous",
+      owner_id: ownerId,
       domain: eagoh.domain ?? "unknown",
       rank_tier: (row.rank as RankTier) ?? "Activated",
       reputation_score: row.reputation_score ?? 0,
       primary_dna: Array.isArray(eagoh.dna) ? eagoh.dna.slice(0, 3) : [],
-      fanatic_teams: Array.isArray(eagoh.fanatic_teams) ? eagoh.fanatic_teams : [],
+      fanatic_teams: teamsMap.get(row.eagoh_id) ?? [],
       marketplace_trust: row.marketplace_trust ?? 0,
       faction_influence: row.faction_influence ?? 0,
       intelligence_quality: row.intelligence_quality ?? 0,
