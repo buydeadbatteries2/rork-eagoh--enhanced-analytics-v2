@@ -79,6 +79,7 @@ import {
   deleteEagohCredentials,
   type EagohCredentialsRow,
 } from "@/services/eagohCredentials";
+import { validateForgeFields, type BrandGuardField } from "@/services/brandGuard";
 import { getCredibilityTagsForDomain } from "@/data/credibilityTags";
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -1043,6 +1044,35 @@ export default function ForgeScreen(): JSX.Element {
       setCurrentStepIndex(1);
       return;
     }
+
+    // ── Brand/logo guard: validate ALL user-entered customization fields
+    //    before charging neurons or calling the image-generation endpoint.
+    const brandFields: BrandGuardField[] = [
+      { label: "Name", value: name },
+      { label: "Style Notes", value: styleNotes },
+      { label: "Headwear", value: appearance.headwear ?? "" },
+      { label: "Body Gear", value: appearance.body ?? "" },
+      { label: "Footwear", value: appearance.footwear ?? "" },
+      { label: "Accessories", value: appearance.accessories ?? "" },
+    ];
+    const brandCheck = validateForgeFields(brandFields);
+    if (brandCheck.blocked) {
+      // Identify the wizard step the user needs to edit
+      const fieldStepMap: Record<string, number> = {
+        name: 0,
+        style_notes: 9,
+        headwear: 4,
+        body_gear: 5,
+        footwear: 6,
+        accessories: 7,
+      };
+      const stepIndex = fieldStepMap[brandCheck.fieldKey ?? ""] ?? currentStepIndex;
+      setForgeError(`${brandCheck.message}\n${brandCheck.suggestion}`);
+      setCurrentStepIndex(stepIndex);
+      h.error();
+      return;
+    }
+
     setForgeError(null);
     setSheetError(null);
     setForgeSuccess(false);
@@ -1139,6 +1169,7 @@ export default function ForgeScreen(): JSX.Element {
           limit: "You've reached your tier's EAGOH limit. Upgrade to forge more.",
           image: "Image generation failed. Your Neurons were not charged.",
           persist: "Something went wrong saving your EAGOH. No Neurons were charged.",
+          brand_logo: "Real company, brand, team, or organization logos cannot be added to an EAGOH. You can use original designs and color schemes instead.\nTry describing the colors, materials, or style without naming or recreating the logo.",
         };
         const msg = friendly[result.reason] ?? result.error;
         setSheetError(msg);

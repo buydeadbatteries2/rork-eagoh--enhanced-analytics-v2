@@ -42,7 +42,7 @@ export type RunForgeResult =
   | { ok: true; eagoh: EagohRecord; imageUrl: string; thumbUrl: string | null; prompt: string }
   | { ok: false; reason: ForgeErrorReason; error: string };
 
-export type ForgeErrorReason = "limit" | "image" | "persist" | "auth" | "balance";
+export type ForgeErrorReason = "limit" | "image" | "persist" | "auth" | "balance" | "brand_logo";
 
 function toPromptInput(draft: EagohDraft, tier?: SubscriptionTier): ForgePromptInput {
   return {
@@ -91,6 +91,7 @@ export async function runForge(input: RunForgeInput): Promise<RunForgeResult> {
     if (/insufficient|balance|neurons|edge store/i.test(msg)) reason = "balance";
     else if (/forge requires|pro or higher|limit|upgrade|tier/i.test(msg)) reason = "limit";
     else if (/auth|sign in|session|expired/i.test(msg)) reason = "auth";
+    else if (/prohibited brand|real company|brand.*logo|PROHIBITED_BRAND/i.test(msg)) reason = "brand_logo";
     else if (/create|persist|update|eagoh|save/i.test(msg)) reason = "persist";
     return { ok: false, reason, error: msg };
   }

@@ -9142,6 +9142,440 @@ async function handleSocialShareStatus(request: Request, env: Env): Promise<Resp
   });
 }
 
+// ── Phase 12D: Brand & Logo Guard (server-side) ─────────────────────────────
+//
+// Centralized prohibited-mark validation and post-generation image review.
+// The server is the source of truth — a modified client cannot bypass these
+// checks. No neurons are charged when validation fails.
+
+/** Mandatory anti-logo instruction appended to every generation prompt. */
+const ANTI_LOGO_PROMPT_SUFFIX_S =
+  "Do not include any real company logos, brand marks, sports-team logos, league logos, school logos, designer monograms, sponsor marks, copyrighted character insignias, watermarks, or recognizable trademarked symbols. All clothing, equipment, emblems, patterns, shoes, accessories, and insignias must be original and unbranded. Brand-inspired color combinations are allowed, but do not reproduce distinctive logos or protected visual identities. Do not include readable real brand names, logo-shaped chest emblems, branded hat symbols, branded shoe marks, branded jersey patches, sponsor graphics, or designer repeating patterns.";
+
+/** Stronger anti-logo instruction used for the automatic safe regeneration. */
+const ANTI_LOGO_RETRY_SUFFIX_S =
+  "CRITICAL: The previous image contained a recognizable real-world logo or brand mark. You must NOT reproduce any real company logo, brand mark, sports team logo, league logo, school logo, designer monogram, sponsor mark, trademarked emblem, or recognizable brand symbol. Replace ALL logos with original fictional emblems. Remove ALL readable brand names. Replace ALL branded chest emblems, hat symbols, shoe marks, jersey patches, and sponsor graphics with original non-branded alternatives. All clothing, equipment, patterns, and accessories must be completely original and unbranded.";
+
+/** Maximum regeneration attempts when the post-generation review detects a logo. */
+const FORGE_MAX_REGENERATIONS = 1;
+
+/** Prohibited brand entries — canonical name + aliases + descriptors. */
+type BrandEntryS = {
+  canonical: string;
+  aliases: string[];
+  descriptors: string[];
+};
+
+const PROHIBITED_BRANDS_S: BrandEntryS[] = [
+  // ── Athletic / Sportswear ──
+  { canonical: "nike", aliases: ["nike", "nke", "nik3", "n1ke", "nikey", "nyke", "nikee"], descriptors: ["swoosh", "check-shaped athletic logo", "checkmark athletic logo", "nike swoosh", "swoosh logo", "the swoosh"] },
+  { canonical: "adidas", aliases: ["adidas", "adiddas", "ad1das", "adiads", "addidas"], descriptors: ["three stripes", "three adidas-style stripes", "trefoil", "adidas stripes", "three parallel stripes", "three-stripe design"] },
+  { canonical: "jordan", aliases: ["jordan", "jordann", "j0rdan", "jumpman", "jordan brand", "air jordan", "jordans"], descriptors: ["jumpman silhouette", "jumpman logo", "jumpman-style silhouette", "jumpman symbol", "basketball player silhouette logo", "flying basketball player logo"] },
+  { canonical: "under armour", aliases: ["under armour", "underarmour", "under armor", "underarmor", "ua logo"], descriptors: ["under armour logo", "interlocking ua", "ua connected logo"] },
+  { canonical: "puma", aliases: ["puma", "pumaa", "p0ma", "pumma"], descriptors: ["puma leaping cat", "puma cat logo", "leaping cat logo", "puma formstrip"] },
+  { canonical: "reebok", aliases: ["reebok", "reebokk", "r33bok", "reebook"], descriptors: ["reebok logo", "reebok vector", "delta logo reebok"] },
+  { canonical: "new balance", aliases: ["new balance", "newbalance", "nb logo"], descriptors: ["new balance logo", "nb stacked logo"] },
+  { canonical: "champion", aliases: ["champion", "chamption", "champ1on"], descriptors: ["champion logo", "c logo champion"] },
+  // ── Luxury / Fashion ──
+  { canonical: "gucci", aliases: ["gucci", "gucc1", "guccci", "guccy"], descriptors: ["gucci pattern", "gg monogram", "gucci monogram", "interlocking g logo", "green red green stripe gucci", "gucci snake"] },
+  { canonical: "louis vuitton", aliases: ["louis vuitton", "louisvuitton", "louie vuitton", "louis vutton", "luis vuitton", "lv monogram"], descriptors: ["lv monogram", "louis vuitton monogram", "lv-style monogram", "lv pattern", "lv logo", "louis vuitton pattern", "lv flower pattern"] },
+  { canonical: "prada", aliases: ["prada", "prad4", "pradaa"], descriptors: ["prada logo", "prada triangle logo", "inverted triangle prada"] },
+  { canonical: "hermes", aliases: ["hermes", "hermès", "h3rmes"], descriptors: ["hermes logo", "hermes horse carriage", "hermes h logo"] },
+  { canonical: "burberry", aliases: ["burberry", "burb3rry", "burbery"], descriptors: ["burberry check", "burberry plaid", "burberry pattern", "nova check"] },
+  { canonical: "versace", aliases: ["versace", "v3rsace", "versache"], descriptors: ["versace logo", "medusa head versace", "versace medusa", "greek key versace"] },
+  { canonical: "balenciaga", aliases: ["balenciaga", "bal3nciaga"], descriptors: ["balenciaga logo", "balenciaga font logo"] },
+  { canonical: "dior", aliases: ["dior", "d1or", "diorr"], descriptors: ["dior logo", "cd logo dior", "dior oblique pattern"] },
+  { canonical: "fendi", aliases: ["fendi", "f3ndi", "fendii"], descriptors: ["fendi logo", "ff logo fendi", "fendi zucca pattern"] },
+  { canonical: "supreme", aliases: ["supreme", "supr3me", "supremee", "supream"], descriptors: ["supreme logo", "supreme box logo", "red box logo supreme"] },
+  // ── Tech ──
+  { canonical: "apple", aliases: ["apple", "appl3", "apple inc"], descriptors: ["apple logo", "bitten apple symbol", "bitten apple logo", "apple emblem", "apple symbol on chest", "apple icon"] },
+  { canonical: "microsoft", aliases: ["microsoft", "m1crosoft", "msft"], descriptors: ["microsoft logo", "windows logo", "four color squares microsoft", "windows flag"] },
+  { canonical: "google", aliases: ["google", "g00gle", "googl", "google inc"], descriptors: ["google logo", "google g logo", "google colors logo"] },
+  { canonical: "samsung", aliases: ["samsung", "samsng", "s4msung"], descriptors: ["samsung logo", "samsung wordmark"] },
+  { canonical: "playstation", aliases: ["playstation", "play station", "ps5", "ps4", "ps3"], descriptors: ["playstation logo", "ps logo", "p s logo", "playstation symbols", "circle triangle cross square logo"] },
+  { canonical: "xbox", aliases: ["xbox", "x-box", "xboxx"], descriptors: ["xbox logo", "xbox green sphere", "xbox sphere logo"] },
+  { canonical: "nintendo", aliases: ["nintendo", "n1ntendo", "nintend0"], descriptors: ["nintendo logo", "nintendo switch logo", "nintendo wordmark"] },
+  // ── Social Media ──
+  { canonical: "facebook", aliases: ["facebook", "faceb00k", "fb logo"], descriptors: ["facebook logo", "f logo facebook", "blue f logo"] },
+  { canonical: "x twitter", aliases: ["twitter", "x twitter", "x logo", "twitter logo", "tw1tter"], descriptors: ["x logo", "twitter logo", "blue bird social media logo", "twitter bird", "x social media logo"] },
+  { canonical: "instagram", aliases: ["instagram", "insta", "instgram", "ig logo"], descriptors: ["instagram logo", "instagram camera icon", "instagram gradient logo"] },
+  { canonical: "tiktok", aliases: ["tiktok", "tik tok", "tik-tok", "tiktokk"], descriptors: ["tiktok logo", "tiktok music note logo", "tiktok symbol"] },
+  { canonical: "youtube", aliases: ["youtube", "you tube", "youtub", "yt logo"], descriptors: ["youtube logo", "youtube play button", "red play button logo", "youtube subscribe button"] },
+  { canonical: "snapchat", aliases: ["snapchat", "snap chat"], descriptors: ["snapchat logo", "snapchat ghost", "ghost logo snapchat"] },
+  { canonical: "linkedin", aliases: ["linkedin", "linked in"], descriptors: ["linkedin logo", "in logo linkedin"] },
+  { canonical: "threads", aliases: ["threads", "threadss"], descriptors: ["threads logo", "threads app logo", "at symbol threads"] },
+  // ── Sports Leagues ──
+  { canonical: "nfl", aliases: ["nfl", "n.f.l.", "national football league"], descriptors: ["nfl logo", "nfl shield", "football league shield logo", "nfl shield logo"] },
+  { canonical: "nba", aliases: ["nba", "n.b.a.", "national basketball association"], descriptors: ["nba logo", "basketball player silhouette logo", "blue red nba logo", "nba emblem"] },
+  { canonical: "mlb", aliases: ["mlb", "m.l.b.", "major league baseball"], descriptors: ["mlb logo", "baseball batter silhouette logo", "mlb emblem"] },
+  { canonical: "nhl", aliases: ["nhl", "n.h.l.", "national hockey league"], descriptors: ["nhl logo", "nhl shield"] },
+  { canonical: "mls", aliases: ["mls", "m.l.s.", "major league soccer"], descriptors: ["mls logo", "mls shield"] },
+  { canonical: "fifa", aliases: ["fifa", "f1fa"], descriptors: ["fifa logo", "fifa emblem"] },
+  { canonical: "uefa", aliases: ["uefa", "u.e.f.a."], descriptors: ["uefa logo", "uefa emblem"] },
+  { canonical: "ncaa", aliases: ["ncaa", "n.c.a.a."], descriptors: ["ncaa logo", "college sports logo"] },
+  // ── Sports Teams ──
+  { canonical: "new york yankees", aliases: ["yankees", "n y yankees", "new york yankees", "yankeees"], descriptors: ["yankees logo", "yankees cap logo", "ny interlocking logo", "yankees emblem", "yankee logo"] },
+  { canonical: "los angeles lakers", aliases: ["lakers", "la lakers", "los angeles lakers", "lak3rs"], descriptors: ["lakers logo", "lakers emblem", "purple gold lakers logo"] },
+  { canonical: "chicago bulls", aliases: ["bulls", "chicago bulls", "chi bulls", "bullss"], descriptors: ["bulls logo", "angry bull logo", "chicago bulls emblem", "bull head logo"] },
+  { canonical: "boston celtics", aliases: ["celtics", "boston celtics", "celticss"], descriptors: ["celtics logo", "leprechaun logo celtics", "clover logo celtics"] },
+  { canonical: "golden state warriors", aliases: ["warriors", "golden state warriors", "gs warriors", "warriorss"], descriptors: ["warriors logo", "golden state warriors emblem", "bay bridge logo warriors"] },
+  { canonical: "dallas cowboys", aliases: ["cowboys", "dallas cowboys", "dal cowboys", "cowboyss"], descriptors: ["cowboys logo", "dallas star logo", "cowboys star", "lone star logo cowboys"] },
+  { canonical: "new england patriots", aliases: ["patriots", "new england patriots", "ne patriots"], descriptors: ["patriots logo", "patriot head logo", "minuteman logo"] },
+  { canonical: "green bay packers", aliases: ["packers", "green bay packers", "gb packers"], descriptors: ["packers logo", "g logo packers", "green bay g logo"] },
+  { canonical: "miami heat", aliases: ["heat", "miami heat", "mia heat"], descriptors: ["miami heat logo", "heat flame logo"] },
+  { canonical: "real madrid", aliases: ["real madrid", "realmadrid", "real mdrid"], descriptors: ["real madrid logo", "real madrid crest", "real madrid emblem"] },
+  { canonical: "barcelona", aliases: ["barcelona", "fc barcelona", "barca", "barcelona fc"], descriptors: ["barcelona logo", "barca crest", "fc barcelona emblem"] },
+  { canonical: "manchester united", aliases: ["manchester united", "man utd", "manu", "man united", "manchester utd"], descriptors: ["manchester united logo", "man utd crest", "red devil logo man united"] },
+  { canonical: "liverpool", aliases: ["liverpool", "liverpool fc", "lfc", "liverpoo"], descriptors: ["liverpool logo", "liverpool crest", "liverpool bird emblem"] },
+  // ── Entertainment ──
+  { canonical: "disney", aliases: ["disney", "d1sney", "disneey", "walt disney"], descriptors: ["disney logo", "disney castle", "disney wordmark", "disney emblem"] },
+  { canonical: "marvel", aliases: ["marvel", "m4rvel", "marvell", "marvel studios"], descriptors: ["marvel logo", "marvel studios logo", "marvel red logo", "marvel emblem"] },
+  { canonical: "dc comics", aliases: ["dc comics", "dc", "d.c."], descriptors: ["dc logo", "dc comics logo", "dc emblem"] },
+  { canonical: "warner bros", aliases: ["warner bros", "warner brothers", "wb logo", "w b logo"], descriptors: ["warner bros logo", "wb shield logo", "warner brothers emblem"] },
+  { canonical: "pixar", aliases: ["pixar", "p1xar", "pixarr"], descriptors: ["pixar logo", "pixar lamp", "luxo lamp logo"] },
+  { canonical: "netflix", aliases: ["netflix", "netfl1x", "netflixx", "nflix"], descriptors: ["netflix logo", "netflix n logo", "red n logo netflix"] },
+  { canonical: "hbo", aliases: ["hbo", "h.b.o."], descriptors: ["hbo logo", "hbo max logo"] },
+  { canonical: "spotify", aliases: ["spotify", "spot1fy", "spotifyy"], descriptors: ["spotify logo", "spotify green circle logo", "three sound waves logo"] },
+  // ── Food / Beverage / Retail ──
+  { canonical: "coca cola", aliases: ["coca cola", "cocacola", "coca-cola", "coke", "c0ca c0la"], descriptors: ["coca cola logo", "coke logo", "coca cola script logo", "coca cola wordmark"] },
+  { canonical: "pepsi", aliases: ["pepsi", "p3psi", "pepsii"], descriptors: ["pepsi logo", "pepsi circle logo", "red blue white circle logo pepsi"] },
+  { canonical: "starbucks", aliases: ["starbucks", "starbuckss", "star bucks", "starbux"], descriptors: ["starbucks logo", "starbucks siren", "green mermaid logo starbucks", "starbucks siren logo"] },
+  { canonical: "mcdonalds", aliases: ["mcdonalds", "mcdonald's", "mcd", "mc donalds", "mcdonaldss"], descriptors: ["mcdonalds logo", "golden arches logo", "m arches logo", "mcdonalds arches"] },
+  // ── Automotive ──
+  { canonical: "ferrari", aliases: ["ferrari", "f3rrari", "ferrarri"], descriptors: ["ferrari logo", "ferrari prancing horse", "prancing horse logo", "ferrari emblem", "yellow shield ferrari"] },
+  { canonical: "lamborghini", aliases: ["lamborghini", "lamborghni", "lambo", "lamborgh1ni"], descriptors: ["lamborghini logo", "lamborghini bull", "charging bull logo lamborghini"] },
+  { canonical: "porsche", aliases: ["porsche", "porshe", "p0rsche"], descriptors: ["porsche logo", "porsche crest", "stuttgart coat of arms porsche"] },
+  { canonical: "mercedes benz", aliases: ["mercedes", "mercedes benz", "mercedez", "merc"], descriptors: ["mercedes logo", "three point star logo", "mercedes star", "mercedes emblem"] },
+  { canonical: "bmw", aliases: ["bmw", "b.m.w.", "b m w"], descriptors: ["bmw logo", "bmw roundel", "blue white circle logo bmw", "bmw emblem"] },
+  { canonical: "tesla", aliases: ["tesla", "t3sla", "teslaa"], descriptors: ["tesla logo", "tesla t logo", "tesla emblem"] },
+];
+
+/** Generic logo-shaped descriptor phrases blocked without naming a brand. */
+const GENERIC_LOGO_PHRASES_S: string[] = [
+  "logo on chest", "logo on the chest", "brand logo", "branded logo", "brand mark",
+  "brand symbol", "trademarked logo", "trademark logo", "copyrighted logo",
+  "sponsor logo", "sponsor mark", "official logo", "real logo", "actual logo",
+  "branded emblem", "branded symbol", "branded patch", "branded jersey", "branded hat",
+  "branded shoes", "branded uniform", "designer logo", "designer monogram",
+  "designer pattern", "designer emblem", "real brand", "real company logo",
+  "real team logo", "real team uniform", "real jersey", "official team jersey",
+  "official team uniform", "team logo", "league logo", "school logo", "university logo",
+  "watermark", "copyrighted character", "copyrighted character insignia",
+  "branded text", "readable brand name", "brand name on", "brand name text",
+];
+
+/**
+ * Normalize text for brand detection: lowercase, collapse whitespace,
+ * apply leet-speak substitutions, remove spaces between letters.
+ */
+function normalizeForBrandCheckS(raw: string): string {
+  let s = (raw ?? "").toLowerCase().trim();
+  s = s.replace(/\s+/g, " ");
+  // Leet-speak substitutions
+  s = s
+    .replace(/3/g, "e").replace(/1/g, "i").replace(/0/g, "o").replace(/@/g, "a")
+    .replace(/\$/g, "s").replace(/7/g, "t").replace(/4/g, "a").replace(/8/g, "b")
+    .replace(/9/g, "g").replace(/2/g, "z");
+  // Remove non-alphanumeric except spaces and hyphens
+  s = s.replace(/[^a-z0-9 \-]/g, " ");
+  s = s.replace(/\s+/g, " ").trim();
+  // Collapse spaces between single letters: "n i k e" → "nike"
+  s = s.replace(/([a-z]) ([a-z]) ([a-z]) ([a-z])/g, "$1$2$3$4");
+  s = s.replace(/([a-z]) ([a-z]) ([a-z])/g, "$1$2$3");
+  s = s.replace(/([a-z]) ([a-z])/g, "$1$2");
+  // Collapse hyphens: "n-i-k-e" → "nike"
+  s = s.replace(/([a-z])-([a-z])-([a-z])-([a-z])/g, "$1$2$3$4");
+  s = s.replace(/([a-z])-([a-z])-([a-z])/g, "$1$2$3");
+  s = s.replace(/([a-z])-([a-z])/g, "$1$2");
+  // Collapse 3+ repeated chars to 2
+  s = s.replace(/(.)\1{2,}/g, "$1$1");
+  return s.replace(/\s+/g, " ").trim();
+}
+
+/** Detect a prohibited brand in a normalized text string. */
+function detectBrandInTextS(normalized: string): { canonical: string; category: string } | null {
+  for (const brand of PROHIBITED_BRANDS_S) {
+    if (normalized.includes(brand.canonical)) {
+      return { canonical: brand.canonical, category: "brand_name" };
+    }
+    for (const alias of brand.aliases) {
+      if (alias.length >= 2 && normalized.includes(alias)) {
+        return { canonical: brand.canonical, category: "brand_alias" };
+      }
+    }
+    for (const desc of brand.descriptors) {
+      if (desc.length >= 3 && normalized.includes(normalizeForBrandCheckS(desc))) {
+        return { canonical: brand.canonical, category: "brand_descriptor" };
+      }
+    }
+  }
+  for (const phrase of GENERIC_LOGO_PHRASES_S) {
+    const np = normalizeForBrandCheckS(phrase);
+    if (np.length >= 3 && normalized.includes(np)) {
+      return { canonical: phrase, category: "generic_logo_phrase" };
+    }
+  }
+  return null;
+}
+
+type BrandGuardResultS = {
+  blocked: boolean;
+  fieldLabel: string | null;
+  category: string | null;
+};
+
+/**
+ * Validate all user-entered Forge draft fields for prohibited brand/logo content.
+ * Inspects raw text fields AND the combined prompt.
+ */
+function validateForgeDraftS(
+  draft: Record<string, unknown>,
+  prompt: string,
+): BrandGuardResultS {
+  // Check individual draft fields
+  const fieldsToCheck: Array<{ label: string; value: string }> = [
+    { label: "name", value: str(draft.name) },
+    { label: "styleNotes", value: str(draft.styleNotes) },
+    { label: "pose", value: str(draft.pose) },
+  ];
+
+  // Check appearance fields (headwear, body, footwear, accessories)
+  const appearance = draft.appearance;
+  if (appearance && typeof appearance === "object") {
+    const appMap = appearance as Record<string, string>;
+    for (const key of ["headwear", "body", "footwear", "accessories"]) {
+      if (typeof appMap[key] === "string") {
+        fieldsToCheck.push({ label: key, value: appMap[key] });
+      }
+    }
+  }
+
+  for (const field of fieldsToCheck) {
+    const val = (field.value ?? "").trim();
+    if (val.length === 0) continue;
+    const normalized = normalizeForBrandCheckS(val);
+    const detection = detectBrandInTextS(normalized);
+    if (detection) {
+      return { blocked: true, fieldLabel: field.label, category: detection.category };
+    }
+  }
+
+  // Also check the combined prompt (catches anything injected via style instructions)
+  const normalizedPrompt = normalizeForBrandCheckS(prompt);
+  const promptDetection = detectBrandInTextS(normalizedPrompt);
+  if (promptDetection) {
+    return { blocked: true, fieldLabel: "prompt", category: promptDetection.category };
+  }
+
+  return { blocked: false, fieldLabel: null, category: null };
+}
+
+// ── Post-generation image review ───────────────────────────────────────────
+
+type ForgeImageReviewResult = {
+  approved: boolean;
+  recognizable_logo_detected: boolean;
+  brand_name_detected: string | null;
+  logo_location: string | null;
+  confidence: number;
+  reason: string | null;
+};
+
+/**
+ * Use OpenAI vision (gpt-4o-mini) to inspect a generated EAGOH image for
+ * recognizable real-world logos or brand marks. Returns structured JSON.
+ * Returns null if the AI call fails (fail-open is NOT used — the caller
+ * handles null by retrying or blocking).
+ */
+async function reviewForgeImageForLogos(
+  base64Image: string,
+  env: Env,
+): Promise<ForgeImageReviewResult | null> {
+  if (!env.OPENAI_API_KEY) return null;
+
+  const systemPrompt = [
+    "You are an expert image reviewer for the EAGOH app.",
+    "You inspect generated EAGOH character images for prohibited real-world logos and brand marks.",
+    "",
+    "You MUST return ONLY valid JSON with this exact schema — no markdown, no explanation:",
+    "{",
+    "  \"approved\": boolean,  // true if NO recognizable real-world logos or brand marks are present",
+    "  \"recognizable_logo_detected\": boolean,  // true if any real-world logo, brand mark, or trademarked symbol is visible",
+    "  \"brand_name_detected\": string | null,  // the brand name if detected, or null",
+    "  \"logo_location\": string | null,  // where on the image the logo appears (e.g. 'chest', 'hat', 'shoes', 'jersey patch'), or null",
+    "  \"confidence\": number,  // 0.0 to 1.0 — your confidence in the assessment",
+    "  \"reason\": string | null  // null if approved, otherwise a short reason why it was rejected",
+    "}",
+    "",
+    "RULES:",
+    "1. APPROVE images with NO recognizable real-world logos or brand marks.",
+    "2. REJECT if you see any recognizable: company logo, brand mark, sports-team logo, league logo, school logo, designer monogram, branded text, sponsor mark, trademarked emblem, copyrighted character insignia, or suspicious logo-like symbol strongly resembling a real brand.",
+    "3. APPROVE original fictional emblems, original letter marks, generic clothing, generic equipment, generic patterns, and color combinations — these are allowed.",
+    "4. REJECT if you see readable real brand names as text on the image.",
+    "5. REJECT logo-shaped chest emblems, branded hat symbols, branded shoe marks, branded jersey patches, or sponsor graphics that resemble real brands.",
+    "6. Set confidence to 0.0 if you cannot determine the result.",
+    "7. Return ONLY the JSON object — no other text.",
+  ].join("\n");
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        temperature: 0,
+        max_tokens: 200,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: systemPrompt },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Review this EAGOH character image for prohibited real-world logos or brand marks. Return the review JSON." },
+              { type: "image_url", image_url: { url: `data:image/png;base64,${base64Image}`, detail: "high" } },
+            ],
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      console.warn("[forge:logo-review] OpenAI non-ok", response.status);
+      return null;
+    }
+
+    const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) return null;
+
+    const parsed = JSON.parse(content) as Partial<ForgeImageReviewResult>;
+    return {
+      approved: typeof parsed.approved === "boolean" ? parsed.approved : false,
+      recognizable_logo_detected: typeof parsed.recognizable_logo_detected === "boolean" ? parsed.recognizable_logo_detected : false,
+      brand_name_detected: typeof parsed.brand_name_detected === "string" ? parsed.brand_name_detected : null,
+      logo_location: typeof parsed.logo_location === "string" ? parsed.logo_location : null,
+      confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0,
+      reason: typeof parsed.reason === "string" ? parsed.reason : null,
+    };
+  } catch (err) {
+    console.warn("[forge:logo-review] AI call failed", String(err).slice(0, 200));
+    return null;
+  }
+}
+
+/**
+ * Generate an EAGOH image via OpenAI, append the anti-logo prompt suffix,
+ * and review the result for prohibited logos. If a logo is detected and
+ * retries remain, regenerate with a stronger anti-logo instruction.
+ *
+ * Returns the base64 image if approved, or an error result if all attempts fail.
+ */
+async function generateAndReviewForgeImage(
+  basePrompt: string,
+  size: string,
+  env: Env,
+): Promise<{ ok: true; base64Image: string; review: ForgeImageReviewResult; regenerated: boolean } | { ok: false; error: string; reviewResult: "rejected" | "review_failed" }> {
+  // ── Attempt 1: standard prompt + anti-logo suffix ──
+  const fullPrompt = `${basePrompt} — ${ANTI_LOGO_PROMPT_SUFFIX_S}`;
+
+  let base64Image: string;
+  try {
+    base64Image = await callOpenAiImageGen(fullPrompt, size, env);
+  } catch (err) {
+    console.warn("[forge] image generation error (attempt 1)", { message: err instanceof Error ? err.message : "unknown" });
+    return { ok: false, error: "Image generation could not be completed.", reviewResult: "review_failed" };
+  }
+
+  // ── Review attempt 1 ──
+  const review1 = await reviewForgeImageForLogos(base64Image, env);
+
+  if (review1 && review1.approved && review1.confidence >= 0.85) {
+    console.log("[forge:logo-review] attempt 1 approved", { confidence: review1.confidence });
+    return { ok: true, base64Image, review: review1, regenerated: false };
+  }
+
+  if (review1 && !review1.approved) {
+    console.log("[forge:logo-review] attempt 1 rejected", {
+      brand: review1.brand_name_detected,
+      location: review1.logo_location,
+      confidence: review1.confidence,
+    });
+  } else if (!review1) {
+    console.warn("[forge:logo-review] attempt 1 review failed (AI call returned null)");
+  }
+
+  // ── Attempt 2: stronger anti-logo retry suffix ──
+  const retryPrompt = `${basePrompt} — ${ANTI_LOGO_RETRY_SUFFIX_S}`;
+  let retryBase64: string;
+  try {
+    retryBase64 = await callOpenAiImageGen(retryPrompt, size, env);
+  } catch (err) {
+    console.warn("[forge] image generation error (retry)", { message: err instanceof Error ? err.message : "unknown" });
+    // If the first image was reviewed but failed, and retry generation also failed, block.
+    if (review1 && !review1.approved) {
+      return { ok: false, error: "We detected a real-world logo in the generated image and removed it. Please try a more generic description.", reviewResult: "rejected" };
+    }
+    return { ok: false, error: "Image generation could not be completed.", reviewResult: "review_failed" };
+  }
+
+  // ── Review attempt 2 ──
+  const review2 = await reviewForgeImageForLogos(retryBase64, env);
+
+  if (review2 && review2.approved && review2.confidence >= 0.85) {
+    console.log("[forge:logo-review] attempt 2 (regeneration) approved", { confidence: review2.confidence });
+    return { ok: true, base64Image: retryBase64, review: review2, regenerated: true };
+  }
+
+  if (review2 && !review2.approved) {
+    console.log("[forge:logo-review] attempt 2 rejected", {
+      brand: review2.brand_name_detected,
+      location: review2.logo_location,
+      confidence: review2.confidence,
+    });
+    return { ok: false, error: "We detected a real-world logo in the generated image and removed it. Please try a more generic description.", reviewResult: "rejected" };
+  }
+
+  // review2 was null (AI call failed on second review)
+  console.warn("[forge:logo-review] attempt 2 review failed (AI call returned null)");
+  if (review1 && !review1.approved) {
+    return { ok: false, error: "We detected a real-world logo in the generated image and removed it. Please try a more generic description.", reviewResult: "rejected" };
+  }
+  // If both reviews failed (null), we cannot safely approve — block to be safe.
+  return { ok: false, error: "Image review could not be completed. Please try again.", reviewResult: "review_failed" };
+}
+
+/** Low-level OpenAI image generation call. Returns base64 string. */
+async function callOpenAiImageGen(prompt: string, size: string, env: Env): Promise<string> {
+  const imageResponse = await fetch("https://api.openai.com/v1/images/generations", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-image-1",
+      prompt,
+      n: 1,
+      size,
+      background: "transparent",
+    }),
+  });
+
+  if (!imageResponse.ok) {
+    const errText = await imageResponse.text().catch(() => "");
+    console.warn("[forge] OpenAI image gen failed", { status: imageResponse.status, detail: errText.slice(0, 300) });
+    throw new Error(`OpenAI image generation failed: ${imageResponse.status}`);
+  }
+
+  const imageData = (await imageResponse.json()) as { data?: Array<{ b64_json?: string }> };
+  const b64 = imageData.data?.[0]?.b64_json ?? "";
+  if (!b64) throw new Error("No image data in OpenAI response");
+  return b64;
+}
+
 async function handleForgeGenerate(request: Request, env: Env): Promise<Response> {
   if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
     return jsonResponse({ ok: false, error: "Backend not configured." }, 503);
@@ -9176,6 +9610,26 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
     return jsonResponse({ ok: false, error: "Draft is required." }, 400);
   }
   const size = str(payload.size, "1024x1536");
+
+  // ── Phase 12D: Server-side brand/logo validation ──
+  // Inspect raw user input, normalized input, and the combined prompt for
+  // prohibited brand/logo references. This is the authoritative check — a
+  // modified client cannot bypass it. No neurons are charged on failure.
+  const brandCheck = validateForgeDraftS(draft, prompt);
+  if (brandCheck.blocked) {
+    console.log("[forge] blocked by brand guard", {
+      userIdPrefix: "",
+      field: brandCheck.fieldLabel,
+      category: brandCheck.category,
+    });
+    return jsonResponse({
+      ok: false,
+      error: "Real company, brand, team, or organization logos cannot be added to an EAGOH. You can use original designs and color schemes instead.",
+      code: "PROHIBITED_BRAND_OR_LOGO",
+      suggestion: "Try describing the colors, materials, or style without naming or recreating the logo.",
+    }, 422);
+  }
+
   // ── Forge cost is always server-controlled — client-supplied edgeCost is ignored ──
   // For initial forge: flat 250. For full_reforge: calculated from changed sections.
   let edgeCost = FORGE_EDGE_COSTS_SERVER[mode];
@@ -9376,41 +9830,22 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
     }, 402);
   }
 
-  // ── Generate image via OpenAI ──
-  let base64Image: string;
-  try {
-    const imageResponse = await fetch("https://api.openai.com/v1/images/generations", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-image-1",
-        prompt,
-        n: 1,
-        size,
-        background: "transparent",
-      }),
+  // ── Generate image with post-generation logo review ──
+  // The image is generated, then reviewed by OpenAI vision for prohibited
+  // logos. If a logo is detected, one automatic safe regeneration is
+  // attempted with stronger anti-logo instructions. No neurons are charged
+  // until the final image passes review AND is saved.
+  const genResult = await generateAndReviewForgeImage(prompt, size, env);
+  if (!genResult.ok) {
+    console.log("[forge] image rejected or review failed", {
+      userIdPrefix: userId.slice(0, 8),
+      reviewResult: genResult.reviewResult,
     });
-
-    if (!imageResponse.ok) {
-      const errText = await imageResponse.text().catch(() => "");
-      console.warn("[forge] image generation failed", { userIdPrefix: userId.slice(0, 8), status: imageResponse.status, detail: errText.slice(0, 300) });
-      return jsonResponse({ ok: false, error: "Image generation could not be completed." }, 502);
-    }
-
-    const imageData = (await imageResponse.json()) as { data?: Array<{ b64_json?: string }> };
-    base64Image = imageData.data?.[0]?.b64_json ?? "";
-    if (!base64Image) {
-      console.warn("[forge] no image data in response", { userIdPrefix: userId.slice(0, 8) });
-      return jsonResponse({ ok: false, error: "Image generation could not be completed." }, 502);
-    }
-  } catch (err) {
-    console.warn("[forge] image generation error", { userIdPrefix: userId.slice(0, 8), message: err instanceof Error ? err.message : "unknown" });
-    return jsonResponse({ ok: false, error: "Image generation could not be completed." }, 502);
+    const status = genResult.reviewResult === "rejected" ? 422 : 502;
+    return jsonResponse({ ok: false, error: genResult.error }, status);
   }
 
+  const base64Image = genResult.base64Image;
   const imageUrl = `data:image/png;base64,${base64Image}`;
   const now = new Date().toISOString();
 
@@ -9610,6 +10045,139 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
   });
 }
 
+// ── Phase 12D: Existing EAGOH image audit for prohibited logos ───────────────
+
+/**
+ * POST /forge/audit-images
+ *
+ * Administrative endpoint that scans existing EAGOH images for prohibited
+ * real-world logos using the OpenAI vision model. Does NOT delete images —
+ * only flags suspicious ones for review by setting `logo_audit_status = 'flagged'`.
+ *
+ * Requires service-role authentication (private endpoint, not JWT-authed).
+ * Processes a batch of un-audited or stale-audited EAGOHs.
+ *
+ * Body: { batchSize?: number, forceReaudit?: boolean }
+ * Returns: { ok, audited, flagged, clean, errors, details: [...] }
+ */
+async function handleForgeAuditImages(request: Request, env: Env): Promise<Response> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
+    return jsonResponse({ ok: false, error: "Backend not configured." }, 503);
+  }
+  if (!env.OPENAI_API_KEY) {
+    return jsonResponse({ ok: false, error: "Image review is not configured." }, 503);
+  }
+
+  // ── Simple admin auth: require a shared secret header ──
+  // This is a private administrative endpoint, not user-facing.
+  const adminSecret = request.headers.get("X-Admin-Secret") ?? "";
+  if (!adminSecret || adminSecret !== (env as Record<string, unknown>).ADMIN_SECRET as string) {
+    return jsonResponse({ ok: false, error: "Unauthorized." }, 403);
+  }
+
+  let payload: { batchSize?: unknown; forceReaudit?: unknown };
+  try {
+    payload = (await request.json()) as typeof payload;
+  } catch {
+    return jsonResponse({ ok: false, error: "Invalid request." }, 400);
+  }
+
+  const batchSize = Math.min(Math.max(typeof payload.batchSize === "number" ? payload.batchSize : 20, 1), 50);
+  const forceReaudit = payload.forceReaudit === true;
+
+  const serviceClient = getServiceRoleClient(env);
+  if (!serviceClient) {
+    return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
+  }
+
+  // ── Fetch EAGOHs with images that need auditing ──
+  let query = serviceClient
+    .from("eagohs")
+    .select("id, name, image_url")
+    .not("image_url", "is", null)
+    .limit(batchSize);
+
+  if (!forceReaudit) {
+    // Only audit EAGOHs that have never been audited (logo_audit_status is null)
+    query = query.is("logo_audit_status", null);
+  }
+
+  const { data: eagohs, error: fetchErr } = await query;
+
+  if (fetchErr) {
+    console.warn("[forge:audit] fetch failed", { error: fetchErr.message });
+    return jsonResponse({ ok: false, error: "Could not fetch EAGOHs for audit." }, 500);
+  }
+
+  if (!eagohs || eagohs.length === 0) {
+    return jsonResponse({ ok: true, audited: 0, flagged: 0, clean: 0, errors: 0, details: [] });
+  }
+
+  const details: Array<{ eagohId: string; status: string; brandDetected: string | null; confidence: number }> = [];
+  let flagged = 0;
+  let clean = 0;
+  let errors = 0;
+
+  for (const eagoh of eagohs) {
+    const eagohId = (eagoh as { id: string }).id;
+    const imageUrl = (eagoh as { image_url: string }).image_url;
+
+    // Extract base64 from data URI
+    const base64Match = imageUrl.match(/^data:image\/[^;]+;base64,(.+)$/);
+    if (!base64Match) {
+      // Not a data URI — can't audit remote URLs with vision API easily
+      await serviceClient.from("eagohs").update({ logo_audit_status: "skipped", logo_audit_at: new Date().toISOString() }).eq("id", eagohId).then(() => {}).catch(() => {});
+      details.push({ eagohId, status: "skipped", brandDetected: null, confidence: 0 });
+      errors++;
+      continue;
+    }
+
+    const base64Image = base64Match[1];
+    const review = await reviewForgeImageForLogos(base64Image, env);
+
+    if (!review) {
+      // AI call failed — mark as pending (will be retried next batch)
+      await serviceClient.from("eagohs").update({ logo_audit_status: "pending", logo_audit_at: new Date().toISOString() }).eq("id", eagohId).then(() => {}).catch(() => {});
+      details.push({ eagohId, status: "pending", brandDetected: null, confidence: 0 });
+      errors++;
+      continue;
+    }
+
+    if (review.approved && review.confidence >= 0.85) {
+      // Clean image
+      await serviceClient.from("eagohs").update({
+        logo_audit_status: "clean",
+        logo_audit_at: new Date().toISOString(),
+        logo_audit_confidence: review.confidence,
+      }).eq("id", eagohId).then(() => {}).catch(() => {});
+      details.push({ eagohId, status: "clean", brandDetected: null, confidence: review.confidence });
+      clean++;
+    } else {
+      // Flagged — suspected logo detected
+      await serviceClient.from("eagohs").update({
+        logo_audit_status: "flagged",
+        logo_audit_at: new Date().toISOString(),
+        logo_audit_confidence: review.confidence,
+        logo_audit_brand: review.brand_name_detected,
+      }).eq("id", eagohId).then(() => {}).catch(() => {});
+      details.push({ eagohId, status: "flagged", brandDetected: review.brand_name_detected, confidence: review.confidence });
+      flagged++;
+      console.log("[forge:audit] flagged", { eagohId: eagohId.slice(0, 8), brand: review.brand_name_detected, confidence: review.confidence });
+    }
+  }
+
+  console.log("[forge:audit] batch complete", { audited: eagohs.length, flagged, clean, errors });
+
+  return jsonResponse({
+    ok: true,
+    audited: eagohs.length,
+    flagged,
+    clean,
+    errors,
+    details,
+  });
+}
+
 // ── Export ───────────────────────────────────────────────────────────────────
 
 export default {
@@ -9741,6 +10309,11 @@ export default {
     // Forge: secure image generation (auth + tier + balance + OpenAI + atomic deduction)
     if (url.pathname === "/forge/generate" && request.method === "POST") {
       return handleForgeGenerate(request, env);
+    }
+
+    // Phase 12D: Administrative audit of existing EAGOH images for prohibited logos
+    if (url.pathname === "/forge/audit-images" && request.method === "POST") {
+      return handleForgeAuditImages(request, env);
     }
 
     // Phase RETAINED-OI-1: Create retained exchange intelligence after verified purchase
