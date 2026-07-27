@@ -361,7 +361,14 @@ export async function submitEntry(input: SubmitEntryInput): Promise<SubmitEntryR
         console.warn("[oi/create] DEBUG diagnostics", JSON.stringify(data.debug, null, 2));
       }
     }
-    return { ok: false, error: data.error ?? "Entry could not be saved. No Neurons were charged." };
+    // Map server errors to user-friendly messages. Never expose raw DB errors.
+    const serverErr = data.error ?? "";
+    let userError = "Entry could not be saved. Your neurons were not charged.";
+    if (serverErr.includes("SELF_PURCHASE")) userError = "You cannot purchase your own EAGOH listing.";
+    else if (serverErr.includes("Insufficient") || serverErr.includes("insufficient")) userError = "You do not have enough neurons to save this entry.";
+    else if (serverErr.includes("session") || serverErr.includes("Authentication") || serverErr.includes("auth")) userError = "Your session expired. Please sign in again.";
+    else if (serverErr.includes("character limit") || serverErr.includes("empty") || serverErr.includes("does not meet") || serverErr.includes("EAGOH") || serverErr.includes("domain")) userError = "This entry does not meet the Open Intelligence requirements.";
+    return { ok: false, error: userError };
   }
 
   // Record recently used tags (best-effort)

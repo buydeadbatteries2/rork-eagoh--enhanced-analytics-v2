@@ -101,3 +101,38 @@ export async function getBulkHasCredentials(
   }
   return new Set((data ?? []).map((r: { user_id: string }) => r.user_id));
 }
+
+/** Public-safe fields displayed in the vendor profile modal. */
+export type PublicKnowledgeCredential = {
+  public_title: string | null;
+  domain_expertise: string | null;
+  experience_summary: string | null;
+  accolades: string | null;
+  relevant_background: string | null;
+  years_experience: number | null;
+  credibility_tags: string[];
+};
+
+/**
+ * Fetch a user's PUBLIC knowledge credentials (for vendor profile modal).
+ * Only returns rows where is_public = true. Never exposes private evidence,
+ * proof documents, moderation notes, rejected credentials, or internal IDs.
+ *
+ * Respects RLS: the ukc_marketplace_select policy allows any authenticated
+ * user to read credentials for vendors with active marketplace listings.
+ */
+export async function getPublicKnowledgeCredentials(
+  userId: string,
+): Promise<PublicKnowledgeCredential | null> {
+  const { data, error } = await supabase
+    .from("user_knowledge_credentials")
+    .select("public_title, domain_expertise, experience_summary, accolades, relevant_background, years_experience, credibility_tags")
+    .eq("user_id", userId)
+    .eq("is_public", true)
+    .maybeSingle();
+  if (error) {
+    console.warn("[knowledgeCredentials] public fetch failed", error.message);
+    throw error;
+  }
+  return (data as PublicKnowledgeCredential | null) ?? null;
+}

@@ -880,7 +880,14 @@ export async function purchaseSync(
   const listingRow = listing as MarketplaceListingRow;
 
   if (!listingRow.active) return { ok: false, error: "This listing is no longer active." };
-  if (listingRow.vendor_id === buyerId) return { ok: false, error: "You cannot purchase your own listing." };
+  // ── Server-side self-purchase guard ──
+  // This is the authoritative check — the client button is disabled for own
+  // listings, but we MUST reject here too to prevent bypassed requests, stale
+  // cached listings, direct API calls, deep links, and modified client requests.
+  if (listingRow.vendor_id === buyerId) {
+    console.warn("[marketplace] self-purchase blocked — buyer=vendor", { userIdPrefix: buyerId.slice(0, 8) });
+    return { ok: false, error: "SELF_PURCHASE_NOT_ALLOWED: You cannot purchase your own EAGOH listing." };
+  }
 
   const totalCost = computeTotalCost(listingRow, syncLevel, days);
   if (totalCost <= 0) return { ok: false, error: "This sync level has no price set." };

@@ -651,11 +651,13 @@ export default function SubscriptionScreen(): JSX.Element {
 
           if (!hasExpectedEntitlement) {
             // RevenueCat did not confirm the entitlement — do NOT change Supabase,
-            // do NOT grant neurons, show verification error
+            // do NOT grant neurons. This handles the case where Apple/RevenueCat
+            // are replaying receipts after an outage. The user may have a
+            // temporary entitlement that hasn't fully registered yet.
             console.warn(`[Subscription] Entitlement verification failed: expected ${expectedEntitlementId}, got [${entitlementKeys.join(", ")}], productId=${productId}`);
             Alert.alert(
-              "Purchase Verification Failed",
-              "We could not verify this subscription purchase. You were not charged by EAGOH.\n\nUse Restore Purchases if Apple completed the transaction.",
+              "Purchase Verification Pending",
+              "Your App Store purchase is still being verified. This can happen during Apple receipt processing.\n\nUse Restore Purchases in a few minutes to complete activation.",
             );
             return;
           }

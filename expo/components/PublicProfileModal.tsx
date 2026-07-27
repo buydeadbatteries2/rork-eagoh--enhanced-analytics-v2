@@ -50,6 +50,10 @@ import {
   type PublicEagohSummary,
   type PublicListingSummary,
 } from "@/services/publicProfile";
+import {
+  getPublicKnowledgeCredentials,
+  type PublicKnowledgeCredential,
+} from "@/services/knowledgeCredentials";
 import { INTELLIGENCE_DOMAINS } from "@/services/domains";
 import { PLATFORM_DISPLAY, PLATFORM_BASE_URL, type SocialPlatform } from "@/services/socialVerification";
 import { rankColor as repRankColor } from "@/services/reputation";
@@ -531,6 +535,9 @@ export default function PublicProfileModal({
     rank: string;
     syncSuccessScore: number;
   } | null>(null);
+  const [credentials, setCredentials] = useState<PublicKnowledgeCredential | null>(null);
+  const [credentialsLoading, setCredentialsLoading] = useState(false);
+  const [credentialsError, setCredentialsError] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -545,12 +552,15 @@ export default function PublicProfileModal({
     setEagohs([]);
     setListings([]);
     setVendorStats(null);
+    setCredentials(null);
+    setCredentialsError(false);
 
     try {
       // Base profile query — REQUIRED; its result drives the UI state
       const profileResult: PublicProfileLoadResult = await getPublicProfile(uid, isSelf);
 
       // Launch optional queries in parallel (best-effort — failures don't block the profile)
+      // Credentials are fetched separately so a credentials failure doesn't block the profile.
       const [socials, eagohData, listingData, vendorData] = await Promise.all([
         getPublicSocialAccounts(uid).catch(() => [] as PublicSocialAccount[]),
         getPublicEagohs(uid).catch(() => [] as PublicEagohSummary[]),
@@ -597,6 +607,8 @@ export default function PublicProfileModal({
         setEagohs([]);
         setListings([]);
         setVendorStats(null);
+        setCredentials(null);
+        setCredentialsError(false);
         setError(null);
       }
       return;
@@ -613,6 +625,27 @@ export default function PublicProfileModal({
       setEagohs([]);
       setListings([]);
       setVendorStats(null);
+      setCredentials(null);
+      setCredentialsError(false);
+
+      // Fetch credentials in parallel with profile — separate try/catch so a
+      // credentials failure does NOT fail the whole modal.
+      setCredentialsLoading(true);
+      getPublicKnowledgeCredentials(userId)
+        .then((row) => {
+          if (cancelled) return;
+          if (__DEV__) console.log("[PublicProfileModal] credentials fetched", { hasRow: !!row });
+          setCredentials(row);
+          setCredentialsError(false);
+        })
+        .catch((err: unknown) => {
+          if (cancelled) return;
+          console.warn("[PublicProfileModal] credentials fetch failed", (err as Error).message);
+          setCredentialsError(true);
+        })
+        .finally(() => {
+          if (!cancelled) setCredentialsLoading(false);
+        });
 
       try {
         const profileResult: PublicProfileLoadResult = await getPublicProfile(userId, isSelf);
@@ -1082,14 +1115,62 @@ export default function PublicProfileModal({
                 </View>
               </View>
 
-              {/* Credentials indicator */}
+              {/* Knowledge Credentials */}
               <View style={[styles.section, { marginBottom: 30 }]}>
                 <SectionHeader
                   title="Knowledge Credentials"
                   icon={<BrainCircuit color={palette.gold} size={14} />}
                 />
                 <View style={styles.sectionBody}>
-                  <Text style={styles.emptyText}>No public credentials added.</Text>
+                  {credentialsLoading ? (
+                    <View style={{ flexDirection: "row" as const, alignItems: "center" as const, gap: 8, paddingVertical: 4 }}>
+                      <ActivityIndicator color={palette.cyan} size="small" />
+                      <Text style={styles.emptyText}>Loading knowledge credentials...</Text>
+                    </View>
+                  ) : credentialsError ? (
+                    <Text style={[styles.emptyText, { color: palette.ember }]}>Knowledge credentials could not be loaded.</Text>
+                  ) : credentials ? (
+                    <View style={{ gap: 8 }}>
+                      {credentials.public_title ? (
+                        <View style={styles.statRow}>
+                          <Text style={styles.statLabel}>Title</Text>
+                          <Text style={styles.statValue}>{credentials.public_title}</Text>
+                        </View>
+                      ) : null}
+                      {credentials.domain_expertise ? (
+                        <View style={styles.statRow}>
+                          <Text style={styles.statLabel}>Domain</Text>
+                          <Text style={styles.statValue}>{credentials.domain_expertise}</Text>
+                        </View>
+                      ) : null}
+                      {credentials.years_experience != null ? (
+                        <View style={styles.statRow}>
+                          <Text style={styles.statLabel}>Experience</Text>
+                          <Text style={styles.statValue}>{credentials.years_experience} years</Text>
+                        </View>
+                      ) : null}
+                      {credentials.experience_summary ? (
+                        <Text style={[styles.bio, { marginTop: 2 }]}>{credentials.experience_summary}</Text>
+                      ) : null}
+                      {credentials.accolades ? (
+                        <Text style={[styles.bio, { marginTop: 2 }]}>{credentials.accolades}</Text>
+                      ) : null}
+                      {credentials.relevant_background ? (
+                        <Text style={[styles.bio, { marginTop: 2 }]}>{credentials.relevant_background}</Text>
+                      ) : null}
+                      {credentials.credibility_tags && credentials.credibility_tags.length > 0 ? (
+                        <View style={styles.domainChipWrap}>
+                          {credentials.credibility_tags.map((tag) => (
+                            <View key={tag} style={styles.domainChip}>
+                              <Text style={styles.domainChipText}>{tag.replace(/_/g, " ")}</Text>
+                            </View>
+                          ))}
+                        </View>
+                      ) : null}
+                    </View>
+                  ) : (
+                    <Text style={styles.emptyText}>No public knowledge credentials yet.</Text>
+                  )}
                 </View>
               </View>
             </ScrollView>

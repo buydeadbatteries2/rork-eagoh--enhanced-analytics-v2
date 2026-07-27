@@ -426,6 +426,7 @@ function FilterPanel({
 const ListingCard = memo(function ListingCard({
   item,
   isPaid,
+  currentUserId,
   onPurchase,
   reputation,
   onViewVendorProfile,
@@ -434,12 +435,14 @@ const ListingCard = memo(function ListingCard({
 }: {
   item: EnrichedListing;
   isPaid: boolean;
+  currentUserId: string | null | undefined;
   onPurchase: (listing: EnrichedListing) => void;
   reputation: ReputationRow | undefined;
   onViewVendorProfile: (vendorId: string) => void;
   vendorMetrics?: VendorQualityMetrics | null;
   vendorRep?: PublicReputation | null;
 }): JSX.Element {
+  const isOwnListing = !!(currentUserId && item.vendor_id === currentUserId);
   const eagoh = item.eagoh;
   const domain = eagoh?.domain ?? eagoh?.sport ?? "Unknown";
   const minPrice = [item.price_25_per_day, item.price_50_per_day, item.price_75_per_day, item.price_100_per_day]
@@ -658,16 +661,17 @@ const ListingCard = memo(function ListingCard({
             From {minPrice ?? "—"} EC/day
           </Text>
           <Pressable
-            onPress={() => isPaid && onPurchase(item)}
+            onPress={() => { if (isPaid && !isOwnListing) onPurchase(item); }}
+            disabled={isOwnListing}
             style={({ pressed }) => [
               styles.buyButton,
-              !isPaid && styles.buyButtonDisabled,
+              (!isPaid || isOwnListing) && styles.buyButtonDisabled,
               pressed && styles.pressed,
             ]}
           >
-            <Tag color={isPaid ? palette.void : palette.muted} size={13} />
-            <Text style={[styles.buyButtonText, !isPaid && styles.buyButtonTextDisabled]}>
-              {isPaid ? "Purchase" : "Browse"}
+            <Tag color={isOwnListing ? palette.muted : isPaid ? palette.void : palette.muted} size={13} />
+            <Text style={[styles.buyButtonText, (!isPaid || isOwnListing) && styles.buyButtonTextDisabled]}>
+              {isOwnListing ? "Your Listing" : isPaid ? "Purchase" : "Browse"}
             </Text>
           </Pressable>
         </View>
@@ -713,18 +717,15 @@ function PurchaseModal({
 
   useEffect(() => {
     if (showSourceInfo && listing) {
-      console.log("[PurchaseModal] Loading credentials for eagoh:", listing.eagoh_id);
       setCredentials(null);
       setLoadingCredentials(true);
+      let cancelled = false;
       getPublicEagohCredentials(listing.eagoh_id)
-        .then((row) => { setCredentials(row); setLoadingCredentials(false); })
-        .catch(() => setLoadingCredentials(false));
+        .then((row) => { if (!cancelled) { setCredentials(row); setLoadingCredentials(false); } })
+        .catch(() => { if (!cancelled) setLoadingCredentials(false); });
+      return () => { cancelled = true; };
     }
   }, [showSourceInfo, listing?.eagoh_id]);
-
-  useEffect(() => {
-    console.log("[PurchaseModal] visible:", visible, "listing:", listing?.id, "showSourceInfo:", showSourceInfo, "purchasing:", purchasing);
-  }, [visible, listing?.id, showSourceInfo, purchasing]);
 
   if (!listing) return <></>;
 
@@ -2317,6 +2318,13 @@ export default function MarketplaceScreen(): JSX.Element {
 
   const handlePurchaseConfirm = useCallback(async (level: SyncLevel, days: number) => {
     if (!user?.id || !profile || !purchaseModal) return;
+    // ── Client-side self-purchase guard (defense-in-depth; backend also enforces) ──
+    if (purchaseModal.vendor_id === user.id) {
+      console.warn("[Exchange] self-purchase blocked at confirm — vendor_id matches user.id");
+      Alert.alert("Purchase Not Allowed", "You cannot purchase your own EAGOH listing.");
+      setPurchaseModal(null);
+      return;
+    }
     setPurchasing(true);
     try {
       const result = await purchaseSync(user.id, profile, purchaseModal.id, level, days);
@@ -2498,6 +2506,7 @@ export default function MarketplaceScreen(): JSX.Element {
                       key={item.id}
                       item={item}
                       isPaid={isPaid}
+                      currentUserId={user?.id}
                       onPurchase={handlePurchasePress}
                       reputation={repMap.get(item.eagoh_id)}
                       onViewVendorProfile={handleViewVendorProfile}
@@ -2544,6 +2553,7 @@ export default function MarketplaceScreen(): JSX.Element {
                     key={item.id}
                     item={item}
                     isPaid={isPaid}
+                    currentUserId={user?.id}
                     onPurchase={handlePurchasePress}
                     reputation={repMap.get(item.eagoh_id)}
                     onViewVendorProfile={handleViewVendorProfile}
@@ -2747,10 +2757,10 @@ export default function MarketplaceScreen(): JSX.Element {
       <PurchaseModal
         visible={!!purchaseModal}
         listing={purchaseModal}
-        onClose={() => { console.log("[Exchange] Closing purchase modal, resetting showSourceInfo"); setPurchaseModal(null); setShowSourceInfo(false); }}
+        onClose={() => { setPurchaseModal(null); setShowSourceInfo(false); }}
         onConfirm={handlePurchaseConfirm}
         showSourceInfo={showSourceInfo}
-        onToggleSourceInfo={() => { console.log("[Exchange] Toggling source info, current:", showSourceInfo); setShowSourceInfo((v) => !v); }}
+        onToggleSourceInfo={() => setShowSourceInfo((v) => !v)}
         purchasing={purchasing}
         reputation={repMap.get(purchaseModal?.eagoh_id ?? "")}
         onViewVendorProfile={(vendorId) => setPublicProfileVendorId(vendorId)}

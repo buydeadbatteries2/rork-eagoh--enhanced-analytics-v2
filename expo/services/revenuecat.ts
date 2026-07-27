@@ -242,6 +242,17 @@ export function getRevenueCatConfigError(): string | null {
  *   pro_subscription → pro
  *   oracle_elite_subscription → oracle_elite
  *   syndicate_subscription → syndicate
+ *
+ * TEMPORARY ENTITLEMENTS: RevenueCat may grant short-lived temporary
+ * entitlements during Apple receipt-server outages. The entitlement
+ * IDENTIFIER is still pro_subscription / oracle_elite_subscription /
+ * syndicate_subscription — we resolve the tier from that exact identifier
+ * regardless of whether the entitlement is temporary or permanent. We NEVER
+ * convert a higher tier (Oracle Elite, Syndicate) to Pro.
+ *
+ * UNRECOGNIZED ENTITLEMENTS: If an active entitlement's identifier is not
+ * recognized, we do NOT default to Pro. The caller should preserve the
+ * user's last verified tier and show a verification-pending message.
  */
 export function getRevenueCatSubscriptionTier(
   customerInfo: CustomerInfo | null,
@@ -256,9 +267,15 @@ export function getRevenueCatSubscriptionTier(
       const tier = subscriptionTierFromEntitlementId(entId);
       if (tier && tier !== "free") entResolved.add(tier);
     }
+    // Priority order — highest recognized tier wins. Never default to Pro
+    // for unrecognized entitlements.
     if (entResolved.has("syndicate")) return "syndicate";
     if (entResolved.has("oracle_elite")) return "oracle_elite";
     if (entResolved.has("pro")) return "pro";
+    // If there are active entitlements but none are recognized, return "free"
+    // here — the backend sync will preserve the current paid tier temporarily.
+    // This prevents force-granting Pro for unknown entitlement identifiers.
+    if (Object.keys(activeEntitlements).length > 0) return "free";
   }
 
   // ── 2. Fall back to active subscription product IDs ────────────────────
@@ -277,6 +294,50 @@ export function getRevenueCatSubscriptionTier(
   if (resolved.has("pro")) return "pro";
 
   return "free";
+}
+
+/**
+ * Safe diagnostics for the current CustomerInfo entitlement state.
+ * Logs only non-sensitive data: entitlement identifiers, product identifiers,
+ * active status, expiration presence, and resolved tier. NEVER logs receipts,
+ * transaction IDs, access tokens, API keys, or full user IDs.
+ */
+export function logEntitlementDiagnostics(
+  customerInfo: CustomerInfo | null,
+  context: string,
+): void {
+  if (!customerInfo) {
+    if (__DEV__) console.log(`[RevenueCat] ${context} — no customerInfo`);
+    return;
+  }
+  const activeEntitlements = customerInfo.entitlements?.active;
+  const entKeys = activeEntitlements ? Object.keys(activeEntitlements) : [];
+  const resolvedTier = getRevenueCatSubscriptionTier(customerInfo);
+
+  // Collect safe per-entitlement diagnostics
+  const entDetails = entKeys.map((id) => {
+    const info = activeEntitlements![id];
+    return {
+      identifier: id,
+      productId: info?.productIdentifier ?? "unknown",
+      isActive: info?.isActive ?? false,
+      hasExpiration: info?.expirationDate != null,
+      willRenew: info?.willRenew ?? false,
+      store: info?.store ?? "unknown",
+    };
+  });
+
+  const hasTemporary = entDetails.some(
+    (e) => e.isActive && e.hasExpiration && !e.willRenew,
+  );
+
+  console.log(`[RevenueCat] ${context} — entitlement diagnostics`, {
+    activeEntitlements: entKeys,
+    resolvedTier,
+    temporaryEntitlementDetected: hasTemporary,
+    entitlements: entDetails,
+    activeSubscriptions: customerInfo.activeSubscriptions ?? [],
+  });
 }
 
 // ── Package / product mapping ───────────────────────────────────────────────

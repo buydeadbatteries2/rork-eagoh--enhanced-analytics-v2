@@ -2874,23 +2874,37 @@ begin
   );
   new.influence_score := greatest(0, least(100, v_influence));
 
-  -- Content hash
+  -- Content hash (optional column — wrapped in exception handler for schemas
+  -- where content_hash/duplicate_flag/version_number haven't been added yet)
   v_new_hash := 'ch_' || substring(md5(lower(regexp_replace(v_text, '[^a-zA-Z0-9]', '', 'g'))) from 1 for 16);
-  new.content_hash := v_new_hash;
+  begin
+    new.content_hash := v_new_hash;
+  exception when others then
+    -- content_hash column does not exist yet — skip
+  end;
 
   -- Duplicate detection (same user, other entries)
-  select id into v_dup_entry_id
-  from public.open_intelligence
-  where user_id = new.user_id
-    and id != new.id
-    and content_hash = v_new_hash
-  limit 1;
-  new.duplicate_flag := v_dup_entry_id is not null;
+  -- Wrapped in exception handler: content_hash column may not exist yet.
+  begin
+    select id into v_dup_entry_id
+    from public.open_intelligence
+    where user_id = new.user_id
+      and id != new.id
+      and content_hash = v_new_hash
+    limit 1;
+    new.duplicate_flag := v_dup_entry_id is not null;
+  exception when others then
+    -- content_hash or duplicate_flag column does not exist yet — skip
+  end;
 
   -- Ensure version_number starts at 1 on insert
-  if TG_OP = 'INSERT' and new.version_number is null then
-    new.version_number := 1;
-  end if;
+  begin
+    if TG_OP = 'INSERT' and new.version_number is null then
+      new.version_number := 1;
+    end if;
+  exception when others then
+    -- version_number column does not exist yet — skip
+  end;
 
   return new;
 end;

@@ -30,6 +30,7 @@ import {
   getRevenueCatSubscriptionTier,
   isExpoGoRuntime,
   isRevenueCatConfigured,
+  logEntitlementDiagnostics,
   logInRevenueCat,
   logOutRevenueCat,
   NEURON_PRODUCT_AMOUNTS,
@@ -209,6 +210,10 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
       if (__DEV__) {
         console.log("[RevenueCat] CustomerInfo updated — active subs:", newInfo.activeSubscriptions);
       }
+      // Safe diagnostics — logs entitlement identifiers, product IDs, active
+      // status, temporary entitlement detection, and resolved tier. No receipts,
+      // transaction IDs, tokens, or full user IDs.
+      logEntitlementDiagnostics(newInfo, "CustomerInfoListener");
       queryClient.setQueryData(customerInfoKey, newInfo);
       // Trigger backend sync — the backend verifies entitlements and grants
       // neurons idempotently. The listener is NOT permission to grant neurons

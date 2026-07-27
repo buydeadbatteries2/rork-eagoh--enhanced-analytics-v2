@@ -1,5 +1,5 @@
 /**
-// EAGOH Analyst Chat — Cloudflare Worker
+// EAGOH Analyst Chat — Cloudflare Worker (v2)
  * Phase RETAINED-OI-2 — Trusted purchase reversal status (record_exchange_purchase_reversal RPC)
  * Phase RETAINED-OI-1 + Cap — Retained Exchange Intelligence + 25% Cumulative Cap
   * Phase 12A — Social sharing + faction invite by email/username
@@ -3909,11 +3909,18 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
           attemptedColumns: ["user_id", "eagoh_id", "intelligence_domain", "entry_type", "tag", "content", "character_count_no_spaces", "confidence_level"],
         }));
 
-        // Return diagnostic info so we can see the exact error without guessing.
-        // This is temporary — production should not expose raw DB errors.
+        // Map known Supabase error codes to user-friendly messages.
+        // Never expose raw DB errors, stack traces, or schema details to users.
+        const minCode = minimalErr.code ?? null;
+        let userError = "Entry could not be saved. Your neurons were not charged.";
+        if (minCode === "42501") userError = "Your session expired. Please sign in again.";
+        else if (minCode === "23505") userError = "This entry was already saved.";
+        else if (minCode === "23503") userError = "This EAGOH could not be found.";
+        else if (minCode === "42703") userError = "This entry does not meet the Open Intelligence requirements.";
+
         return jsonResponse({
           ok: false,
-          error: "Entry could not be saved. No Neurons were charged.",
+          error: userError,
           debug: {
             fullInsertErr: {
               code: insertErr.code ?? null,
@@ -3942,7 +3949,7 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
         console.warn("[oi/create] minimal insert returned no row");
         return jsonResponse({
           ok: false,
-          error: "Entry could not be saved. No Neurons were charged.",
+          error: "Entry could not be saved. Your neurons were not charged.",
           debug: { cause: "minimal_insert_no_row", rpcErrCode: rpcErr?.code ?? null, rpcErrMsg: rpcErr?.message ?? null },
         }, 500);
       }
@@ -3956,7 +3963,7 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
       if (DEBUG_OI) console.warn("[oi/create] fallback insert returned no row");
       return jsonResponse({
         ok: false,
-        error: "Entry could not be saved. No Neurons were charged.",
+        error: "Entry could not be saved. Your neurons were not charged.",
         debug: { cause: "full_insert_no_row", rpcErrCode: rpcErr?.code ?? null, rpcErrMsg: rpcErr?.message ?? null },
       }, 500);
     }
@@ -3996,7 +4003,7 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
       return jsonResponse({ ok: false, error: "Entry cannot be empty." }, 400);
     }
     console.warn("[oi/create] RPC rejected", errCode);
-    return jsonResponse({ ok: false, error: "Entry could not be saved. No Neurons were charged." }, 500);
+    return jsonResponse({ ok: false, error: "Entry could not be saved. Your neurons were not charged." }, 500);
   }
 
   // ── Duplicate (already created) — return the existing entry ──
@@ -4021,7 +4028,7 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
   const newEntryId = rpcResult.entry_id;
   if (!newEntryId) {
     console.warn("[oi/create] RPC succeeded but no entry_id returned");
-    return jsonResponse({ ok: false, error: "Entry could not be saved. No Neurons were charged." }, 500);
+    return jsonResponse({ ok: false, error: "Entry could not be saved. Your neurons were not charged." }, 500);
   }
 
   // ── Fetch the created entry (with trigger-computed quality/influence/hash) ──
@@ -9239,23 +9246,30 @@ async function handleSubscriptionSync(request: Request, env: Env): Promise<Respo
   // ── Derive the verified tier from the client-supplied entitlement list ──
   // The client sends the active entitlement IDs from result.customerInfo.
   // We do NOT trust a raw tier name — we derive it from the entitlement IDs.
+  //
+  // IMPORTANT: This handles temporary entitlements correctly. RevenueCat may
+  // grant short-lived temporary entitlements during Apple receipt-server
+  // outages. The entitlement IDENTIFIER is still pro_subscription,
+  // oracle_elite_subscription, or syndicate_subscription — we resolve the tier
+  // from that exact identifier regardless of whether the entitlement is
+  // temporary or permanent. We NEVER convert a higher tier to Pro.
+  //
+  // If the entitlement identifier is not recognized, we do NOT default to Pro.
+  // We preserve the user's current tier and let the client show a verification
+  // pending message. Apple/RevenueCat will replay the receipt later.
   const activeEntitlements: string[] = Array.isArray(payload.entitlements) ? payload.entitlements : [];
 
-  let verifiedTier = "free";
+  let resolvedTier = "free";
+  let recognizedEntitlementId: string | null = null;
   for (const entId of activeEntitlements) {
     const tier = entitlementToTier(entId);
-    if (tier && (TIER_PRIORITY_SERVER[tier] ?? 0) > (TIER_PRIORITY_SERVER[verifiedTier] ?? 0)) {
-      verifiedTier = tier;
+    if (tier && (TIER_PRIORITY_SERVER[tier] ?? 0) > (TIER_PRIORITY_SERVER[resolvedTier] ?? 0)) {
+      resolvedTier = tier;
+      recognizedEntitlementId = entId;
     }
   }
 
-  console.log("[subscription-sync]", {
-    userIdPrefix: userId.slice(0, 8),
-    entitlements: activeEntitlements,
-    verifiedTier,
-  });
-
-  // ── Fetch current profile ──
+  // ── Fetch current profile (BEFORE tier preservation logic) ──
   const { data: profileRow, error: profileErr } = await serviceClient
     .from("profiles")
     .select("subscription_tier, edge_subscription, edge_purchased, last_rollover_at, last_allocation")
@@ -9270,6 +9284,31 @@ async function handleSubscriptionSync(request: Request, env: Env): Promise<Respo
   const currentTier = str((profileRow as Record<string, unknown>).subscription_tier, "free");
   const currentSub = (profileRow as { edge_subscription: number | null }).edge_subscription ?? 0;
   const currentPurch = (profileRow as { edge_purchased: number | null }).edge_purchased ?? 0;
+
+  // If no recognized entitlement was found but the user previously had a paid
+  // tier, PRESERVE the existing tier temporarily (receipt replay in progress).
+  // Do NOT downgrade to free or force-grant Pro. The idempotency check below
+  // prevents duplicate neuron grants when the replayed receipt arrives.
+  let verifiedTier = resolvedTier;
+  if (resolvedTier === "free" && currentTier !== "free") {
+    const hasUnrecognizedEnt = activeEntitlements.length > 0 && !recognizedEntitlementId;
+    if (hasUnrecognizedEnt) {
+      verifiedTier = currentTier;
+      console.log("[subscription-sync] unrecognized entitlement — preserving current tier", {
+        userIdPrefix: userId.slice(0, 8),
+        currentTier,
+        entitlements: activeEntitlements,
+      });
+    }
+  }
+
+  console.log("[subscription-sync]", {
+    userIdPrefix: userId.slice(0, 8),
+    entitlements: activeEntitlements,
+    recognizedEntitlementId,
+    resolvedTier,
+    verifiedTier,
+  });
 
   // ── Determine if a tier change occurred ──
   const tierChanged = currentTier !== verifiedTier;
