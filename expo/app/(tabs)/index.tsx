@@ -209,10 +209,14 @@ const SponsoredBanner = React.memo(function SponsoredBanner({ item, userId, repu
 
 const HeroSection = React.memo(function HeroSection({ onEdgePress }: { onEdgePress: () => void }): JSX.Element {
   const { balances, monthlyAllocation } = useEdge();
-  const { effectiveSubscriptionTier } = useProfile();
+  const { effectiveSubscriptionTier, isLoading: isProfileLoading } = useProfile();
   const { eagohs } = useEagohs();
   const isFree = effectiveSubscriptionTier === "free";
   const userForged = (eagohs ?? []).filter((e) => !e.is_default_shell);
+  // Show actual subscription balance remaining, NOT the monthly allocation amount.
+  // monthlyAllocation is the tier's monthly grant amount (e.g. 600 for Pro), not the
+  // spendable balance. The spendable subscription balance is balances.subscription.
+  const subBalanceLabel = isProfileLoading ? "…" : balances.subscription.toLocaleString();
 
   return (
     <View style={styles.heroShell}>
@@ -235,18 +239,18 @@ const HeroSection = React.memo(function HeroSection({ onEdgePress }: { onEdgePre
       )}
       <View style={styles.statRow}>
         <View style={styles.stat}>
-          <Text style={styles.statValue}>{balances.total.toLocaleString()}</Text>
+          <Text style={styles.statValue}>{isProfileLoading ? "…" : balances.total.toLocaleString()}</Text>
           <Text style={styles.statLabel}>Neurons</Text>
         </View>
         <View style={styles.stat}>
-          <Text style={styles.statValue}>{monthlyAllocation.toLocaleString()}</Text>
-          <Text style={styles.statLabel}>Monthly</Text>
+          <Text style={styles.statValue}>{subBalanceLabel}</Text>
+          <Text style={styles.statLabel}>Subscription</Text>
         </View>
       </View>
       <Pressable onPress={onEdgePress} style={({ pressed }) => [styles.edgeBalance, pressed && { opacity: 0.8 }]}>
         <WalletCards color={palette.gold} size={20} />
         <Text style={styles.edgeText}>Neuron Balance</Text>
-        <Text style={styles.edgeAmount}>{balances.total.toLocaleString()} Neurons</Text>
+        <Text style={styles.edgeAmount}>{isProfileLoading ? "…" : balances.total.toLocaleString()} Neurons</Text>
         <ChevronRight color={palette.gold} size={14} style={{ opacity: 0.6 }} />
       </Pressable>
     </View>

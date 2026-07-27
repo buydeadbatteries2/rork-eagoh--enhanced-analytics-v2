@@ -546,6 +546,7 @@ export default function ForgeScreen(): JSX.Element {
 
   const handleSaveCredentials = useCallback(async (): Promise<void> => {
     if (!user?.id || !selectedEagohId) return;
+    Keyboard.dismiss();
     setCredentialsSaving(true);
     try {
       const row = await upsertEagohCredentials(user.id, selectedEagohId, {
@@ -572,6 +573,7 @@ export default function ForgeScreen(): JSX.Element {
 
   const handleDeleteCredentials = useCallback(async (): Promise<void> => {
     if (!selectedEagohId) return;
+    Keyboard.dismiss();
     try {
       await deleteEagohCredentials(selectedEagohId);
       setCredentials(null);
@@ -1010,23 +1012,27 @@ export default function ForgeScreen(): JSX.Element {
 
   const goNext = useCallback((): void => {
     if (!validateCurrentStep()) return;
+    Keyboard.dismiss();
     h.selection();
     setCurrentStepIndex((prev) => Math.min(prev + 1, wizardSteps.length - 1));
   }, [validateCurrentStep, wizardSteps.length, h]);
 
   const goBack = useCallback((): void => {
+    Keyboard.dismiss();
     h.selection();
     setForgeError(null);
     setCurrentStepIndex((prev) => Math.max(prev - 1, 0));
   }, [h]);
 
   const goToStep = useCallback((index: number): void => {
+    Keyboard.dismiss();
     h.selection();
     setForgeError(null);
     setCurrentStepIndex(index);
   }, []);
 
   const handleForge = useCallback((): void => {
+    Keyboard.dismiss();
     if (!name.trim()) {
       setForgeError("Name your EAGOH first.");
       setCurrentStepIndex(0);
@@ -1122,6 +1128,7 @@ export default function ForgeScreen(): JSX.Element {
   }, [goNext, handleForge, isLastStep]);
 
   const handleConfirm = useCallback((): void => {
+    Keyboard.dismiss();
     setSheetError(null);
     confirmForge().then((result) => {
       if (!result.ok) {
@@ -1152,12 +1159,14 @@ export default function ForgeScreen(): JSX.Element {
   }, [confirmForge, cancelForge, h]);
 
   const handleCancel = useCallback((): void => {
+    Keyboard.dismiss();
     cancelForge();
     setSheetError(null);
     setForgeSuccess(false);
   }, [cancelForge]);
 
   const handleGetEdge = useCallback((): void => {
+    Keyboard.dismiss();
     h.selection();
     router.push("/edge-store" as never);
   }, [h, router]);
@@ -2005,7 +2014,7 @@ export default function ForgeScreen(): JSX.Element {
       {/* --- EAGOH Picker Overlay --- */}
       {showPicker ? (
         <View style={styles.pickerOverlay}>
-          <Pressable style={StyleSheet.absoluteFill} onPress={(): void => setShowPicker(false)} />
+          <Pressable style={StyleSheet.absoluteFill} onPress={(): void => { Keyboard.dismiss(); setShowPicker(false); }} />
           <View style={styles.pickerSheet}>
             <LinearGradient colors={["rgba(14,24,37,0.98)", "rgba(8,15,26,0.98)"]} style={StyleSheet.absoluteFill} />
             <Text style={styles.pickerTitle}>Select EAGOH to Edit</Text>
@@ -2016,6 +2025,7 @@ export default function ForgeScreen(): JSX.Element {
                 {/* Create New option */}
                 <Pressable
                   onPress={(): void => {
+                    Keyboard.dismiss();
                     setSelectedEagohId("");
                     setName("");
                     setGender("neutral");
@@ -2089,6 +2099,7 @@ export default function ForgeScreen(): JSX.Element {
                     <View key={eagoh.id} style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
                       <Pressable
                         onPress={(): void => {
+                          Keyboard.dismiss();
                           setSelectedEagohId(eagoh.id);
                           setShowPicker(false);
                         }}
@@ -2128,7 +2139,7 @@ export default function ForgeScreen(): JSX.Element {
       {/* --- Rename Confirmation Modal --- */}
       {showRenameModal ? (
         <View style={styles.confirmOverlay}>
-          <Pressable style={StyleSheet.absoluteFill} onPress={(): void => { setShowRenameModal(false); setRenameError(null); }} />
+          <Pressable style={StyleSheet.absoluteFill} onPress={(): void => { Keyboard.dismiss(); setShowRenameModal(false); setRenameError(null); }} />
           <View style={styles.confirmCard}>
             <LinearGradient colors={["rgba(16,27,42,0.98)", "rgba(8,15,26,0.98)"]} style={StyleSheet.absoluteFill} />
             <Text style={styles.confirmHeader}>RENAME EAGOH</Text>
@@ -2154,7 +2165,7 @@ export default function ForgeScreen(): JSX.Element {
             )}
             <View style={styles.confirmActions}>
               <Pressable
-                onPress={(): void => { setShowRenameModal(false); setRenameError(null); }}
+                onPress={(): void => { Keyboard.dismiss(); setShowRenameModal(false); setRenameError(null); }}
                 style={({ pressed }) => [styles.confirmCancel, pressed && styles.pressed]}
               >
                 <Text style={styles.confirmCancelText}>Cancel</Text>
@@ -2163,6 +2174,7 @@ export default function ForgeScreen(): JSX.Element {
                 <Pressable
                   onPress={async (): Promise<void> => {
                     if (!renameNameInput.trim() || !selectedEagohId) return;
+                    Keyboard.dismiss();
                     setIsRenaming(true);
                     try {
                       await spend(RENAME_EDGE_COST, "rename_eagoh", `Rename EAGOH to ${renameNameInput.trim()}`);
@@ -2196,7 +2208,7 @@ export default function ForgeScreen(): JSX.Element {
       {/* ── Knowledge Credentials Modal ──────────────────────── */}
       {showCredentialsModal ? (
         <View style={styles.credModalOverlay}>
-          <Pressable style={StyleSheet.absoluteFill} onPress={(): void => setShowCredentialsModal(false)} />
+          <Pressable style={StyleSheet.absoluteFill} onPress={(): void => { Keyboard.dismiss(); setShowCredentialsModal(false); }} />
           <KeyboardAvoidingView
             behavior={Platform.OS === "ios" ? "padding" : "height"}
             style={{ width: "100%" }}
@@ -2221,7 +2233,7 @@ export default function ForgeScreen(): JSX.Element {
                     </Text>
                   </View>
                 </View>
-                <Pressable onPress={(): void => setShowCredentialsModal(false)} hitSlop={8}>
+                <Pressable onPress={(): void => { Keyboard.dismiss(); setShowCredentialsModal(false); }} hitSlop={8}>
                   <X color={palette.muted} size={20} />
                 </Pressable>
               </View>

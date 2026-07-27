@@ -408,7 +408,7 @@ export default function EdgeStoreScreen(): JSX.Element {
   const h = useHaptics();
   const router = useRouter();
   const { user } = useAuth();
-  const { profile, effectiveSubscriptionTier } = useProfile();
+  const { profile, effectiveSubscriptionTier, isLoading: isProfileLoading } = useProfile();
   const { balances, purchase: creditEdge, isMutating } = useEdge();
   const {
     configured: rcConfigured,
@@ -627,10 +627,11 @@ export default function EdgeStoreScreen(): JSX.Element {
     }
   }, [rcRestore, h]);
 
-  // Total Edge
-  const totalEdge = balances.total.toLocaleString();
-  const subEdge = balances.subscription.toLocaleString();
-  const purchasedEdge = balances.purchased.toLocaleString();
+  // Total Edge — show loading placeholder until the profile is fetched from Supabase
+  // so the store never displays 0 before the server returns the real balance.
+  const totalEdge = isProfileLoading ? "…" : balances.total.toLocaleString();
+  const subEdge = isProfileLoading ? "…" : balances.subscription.toLocaleString();
+  const purchasedEdge = isProfileLoading ? "…" : balances.purchased.toLocaleString();
 
   // Disable when a mutation is in flight
   const disabled = isMutating || purchasing || isPurchasing;

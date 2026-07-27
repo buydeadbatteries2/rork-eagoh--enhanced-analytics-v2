@@ -1,5 +1,5 @@
 /**
-// EAGOH Analyst Chat — Cloudflare Worker (v2)
+// EAGOH Analyst Chat — Cloudflare Worker (v3)
  * Phase RETAINED-OI-2 — Trusted purchase reversal status (record_exchange_purchase_reversal RPC)
  * Phase RETAINED-OI-1 + Cap — Retained Exchange Intelligence + 25% Cumulative Cap
   * Phase 12A — Social sharing + faction invite by email/username
@@ -7682,9 +7682,51 @@ type ForgeMode = "initial" | "full_reforge" | "partial_reforge";
 
 const FORGE_EDGE_COSTS_SERVER: Record<ForgeMode, number> = {
   initial: 250,
-  full_reforge: 500,
-  partial_reforge: 100,
+  // full_reforge and partial_reforge costs are calculated dynamically
+  // by calculateReforgeCostServer() based on which sections changed.
+  // These are only used as upper-bound fallbacks.
+  full_reforge: 70, // max: 6 sections × 15 = 90, but bundle caps at 70
+  partial_reforge: 100, // scoped partial reforge
 };
+
+// ── Reforge cost calculation (server-side, mirrors client logic) ──────────
+// Approved pricing: 15 per changed section, bundle discounts at 4/5/6 sections.
+// 1-3 sections: N × 15. 4→50, 5→60, 6→70.
+const REFORGE_SECTION_COST_SERVER = 15;
+const REFORGE_BUNDLE_COSTS_SERVER: Record<number, number> = {
+  4: 50,
+  5: 60,
+  6: 70,
+};
+
+/**
+ * Compare old and new EAGOH state to determine the reforge cost.
+ * Only these 6 sections are compared: headwear, body, footwear, accessories,
+ * styleNotes, pose. Returns 0 if nothing changed (no charge, no generation).
+ */
+function calculateReforgeCostServer(
+  oldAppearance: Record<string, string> | null,
+  newAppearance: Record<string, string> | null,
+  oldStyleNotes: string,
+  newStyleNotes: string,
+  oldPose: string,
+  newPose: string,
+): { changedSections: string[]; edgeCost: number } {
+  const oldApp = oldAppearance ?? {};
+  const newApp = newAppearance ?? {};
+  const changed: string[] = [];
+
+  if ((oldApp.headwear ?? "") !== (newApp.headwear ?? "")) changed.push("headwear");
+  if ((oldApp.body ?? "") !== (newApp.body ?? "")) changed.push("body");
+  if ((oldApp.footwear ?? "") !== (newApp.footwear ?? "")) changed.push("footwear");
+  if ((oldApp.accessories ?? "") !== (newApp.accessories ?? "")) changed.push("accessories");
+  if ((oldStyleNotes ?? "") !== (newStyleNotes ?? "")) changed.push("styleNotes");
+  if ((oldPose ?? "") !== (newPose ?? "")) changed.push("pose");
+
+  const count = changed.length;
+  const edgeCost = REFORGE_BUNDLE_COSTS_SERVER[count] ?? count * REFORGE_SECTION_COST_SERVER;
+  return { changedSections: changed, edgeCost };
+}
 
 const TIER_EAGOH_LIMITS_SERVER: Record<string, number> = {
   free: 0,
@@ -8652,7 +8694,12 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
   }
   const size = str(payload.size, "1024x1536");
   // ── Forge cost is always server-controlled — client-supplied edgeCost is ignored ──
-  const edgeCost = FORGE_EDGE_COSTS_SERVER[mode];
+  // For initial forge: flat 250. For full_reforge: calculated from changed sections.
+  let edgeCost = FORGE_EDGE_COSTS_SERVER[mode];
+  let reforgeChangedSections: string[] = [];
+  let oldEagohAppearance: Record<string, string> | null = null;
+  let oldEagohStyleNotes = "";
+  let oldEagohPose = "";
 
   // ── Authenticate ──
   const authHeader = request.headers.get("Authorization") ?? "";
@@ -8754,7 +8801,7 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
     }
   }
 
-  // ── For reforge: verify ownership ──
+  // ── For reforge: verify ownership and fetch current state for cost calculation ──
   let existingEagohId: string | null = null;
   if (mode !== "initial") {
     const eagohId = str(payload.eagohId);
@@ -8766,6 +8813,50 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
       return jsonResponse({ ok: false, error: "EAGOH not found or access denied." }, 404);
     }
     existingEagohId = eagohId;
+
+    // Fetch the current EAGOH state to calculate the reforge cost server-side.
+    // Only the 6 reforge sections matter: headwear, body, footwear, accessories,
+    // styleNotes, pose. The cost is 15/section with bundle discounts.
+    if (mode === "full_reforge") {
+      const { data: eagohRow } = await serviceClient
+        .from("eagohs")
+        .select("style_notes, pose")
+        .eq("id", eagohId)
+        .maybeSingle();
+      oldEagohStyleNotes = str((eagohRow as Record<string, unknown> | null)?.style_notes);
+      oldEagohPose = str((eagohRow as Record<string, unknown> | null)?.pose);
+
+      const { data: customRow } = await serviceClient
+        .from("eagoh_customization")
+        .select("appearance")
+        .eq("eagoh_id", eagohId)
+        .maybeSingle();
+      oldEagohAppearance = ((customRow as { appearance?: Record<string, string> } | null)?.appearance) ?? {};
+
+      const newAppearance = (draft.appearance && typeof draft.appearance === "object")
+        ? (draft.appearance as Record<string, string>)
+        : {};
+      const newStyleNotes = str(draft.styleNotes);
+      const newPose = str(draft.pose, "calm-sentinel");
+
+      const reforgeCalc = calculateReforgeCostServer(
+        oldEagohAppearance, newAppearance,
+        oldEagohStyleNotes, newStyleNotes,
+        oldEagohPose, newPose,
+      );
+      reforgeChangedSections = reforgeCalc.changedSections;
+      edgeCost = reforgeCalc.edgeCost;
+
+      if (reforgeChangedSections.length === 0) {
+        return jsonResponse({ ok: false, error: "No modifications detected. No Neurons charged." }, 400);
+      }
+
+      console.log("[forge] reforge cost calculated", {
+        userIdPrefix: userId.slice(0, 8),
+        changedSections: reforgeChangedSections,
+        edgeCost,
+      });
+    }
   }
 
   // ── Verify the profile row belongs to the authenticated user ──
@@ -8900,15 +8991,31 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
     }
   } else {
     eagohId = existingEagohId!;
+
+    // ── Build the reforge update payload: always update image + save the
+    //    edited styleNotes and pose so the DB matches what the user sees.
+    const reforgeUpdate: Record<string, unknown> = {
+      image_url: imageUrl,
+      image_thumb_url: imageUrl,
+      image_prompt: prompt,
+      image_generated_at: now,
+      updated_at: now,
+    };
+
+    // Save styleNotes and pose on full reforge (they're part of the 6 reforge sections)
+    if (mode === "full_reforge") {
+      const newStyleNotes = str(draft.styleNotes);
+      const newPose = str(draft.pose, "calm-sentinel");
+      reforgeUpdate.style_notes = newStyleNotes || null;
+      reforgeUpdate.pose = newPose;
+      // Also save body_type and cybernetic_intensity if provided
+      if (str(draft.bodyType)) reforgeUpdate.body_type = str(draft.bodyType);
+      if (str(draft.cyberneticIntensity)) reforgeUpdate.cybernetic_intensity = str(draft.cyberneticIntensity);
+    }
+
     const { data: updated, error: updateErr } = await serviceClient
       .from("eagohs")
-      .update({
-        image_url: imageUrl,
-        image_thumb_url: imageUrl,
-        image_prompt: prompt,
-        image_generated_at: now,
-        updated_at: now,
-      })
+      .update(reforgeUpdate)
       .eq("id", eagohId)
       .select("*")
       .single();
@@ -8919,6 +9026,16 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
     }
 
     eagohRecord = updated as Record<string, unknown>;
+
+    // ── Save appearance customization on full reforge ──
+    if (mode === "full_reforge") {
+      const appearance = draft.appearance;
+      if (appearance && typeof appearance === "object") {
+        await serviceClient.from("eagoh_customization")
+          .upsert({ eagoh_id: eagohId, appearance: appearance, updated_at: now })
+          .then(() => {}).catch(() => {});
+      }
+    }
 
     // Partial reforge: update customization field (best-effort)
     const scope = str(payload.scope, "full");
