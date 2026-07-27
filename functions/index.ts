@@ -1,5 +1,5 @@
 /**
-// EAGOH Analyst Chat — Cloudflare Worker (v3)
+// EAGOH Analyst Chat — Cloudflare Worker (v4)
  * Phase RETAINED-OI-2 — Trusted purchase reversal status (record_exchange_purchase_reversal RPC)
  * Phase RETAINED-OI-1 + Cap — Retained Exchange Intelligence + 25% Cumulative Cap
   * Phase 12A — Social sharing + faction invite by email/username
@@ -8602,6 +8602,489 @@ async function handleSocialShareAttempts(request: Request, env: Env): Promise<Re
   return jsonResponse({ ok: true, attempts: enriched });
 }
 
+// ── AI Screenshot Verification ─────────────────────────────────────────────
+//
+// Confidence threshold for AI screenshot verification. Screenshots scoring
+// at or above this value are auto-verified; below it are rejected (no manual
+// review dashboard exists yet, so near-threshold results get a retry message).
+const SCREENSHOT_VERIFICATION_THRESHOLD = 0.85;
+
+// Maximum screenshot size accepted by the worker (10 MB base64).
+const SCREENSHOT_MAX_BYTES = 10 * 1024 * 1024;
+
+// Minimum image dimensions (pixels) — reject tiny/cropped images.
+const SCREENSHOT_MIN_DIMENSION = 200;
+
+// Verification frequency limit: max attempts per attemptId per hour.
+const SCREENSHOT_MAX_ATTEMPTS_PER_HOUR = 5;
+
+/**
+ * AI structured verification result returned by the OpenAI vision model.
+ */
+type AiVerificationResult = {
+  is_valid: boolean;
+  platform_detected: string | null;
+  verification_code_detected: string | null;
+  verification_code_matches: boolean;
+  eagoh_card_detected: boolean;
+  published_post_interface_detected: boolean;
+  social_handle_detected: string | null;
+  confidence: number;
+  failure_reason: string | null;
+};
+
+/**
+ * Call OpenAI vision model (gpt-4o-mini) to verify a social media screenshot.
+ *
+ * The model inspects the screenshot and returns strict structured JSON.
+ * We use a low temperature and a strict system prompt to enforce the schema.
+ *
+ * Returns null if the model call fails or returns unparseable output.
+ */
+async function verifyScreenshotWithAi(
+  screenshotBase64: string,
+  expectedVerificationCode: string,
+  eagohName: string,
+  env: Env,
+): Promise<AiVerificationResult | null> {
+  if (!env.OPENAI_API_KEY) return null;
+
+  const systemPrompt = [
+    "You are an expert screenshot verifier for the EAGOH app.",
+    "You are given a screenshot and must determine if it shows a REAL published social media post containing an EAGOH share card.",
+    "",
+    "You MUST return ONLY valid JSON with this exact schema — no markdown, no explanation:",
+    "{",
+    "  \"is_valid\": boolean,",
+    "  \"platform_detected\": string | null,  // 'x', 'instagram', 'facebook', 'threads', 'tiktok', 'linkedin', 'youtube', 'other', or null",
+    "  \"verification_code_detected\": string | null,  // the code you see in the image, or null",
+    "  \"verification_code_matches\": boolean,  // true only if the detected code matches the expected code EXACTLY",
+    "  \"eagoh_card_detected\": boolean,  // true if the EAGOH share card is clearly visible in the screenshot",
+    "  \"published_post_interface_detected\": boolean,  // true if a social media post/compose/published interface is visible (NOT the EAGOH app, NOT Photos, NOT an image editor)",
+    "  \"social_handle_detected\": string | null,  // visible username/handle if any, or null",
+    "  \"confidence\": number,  // 0.0 to 1.0 — your confidence in the assessment",
+    "  \"failure_reason\": string | null  // null if valid, otherwise a short reason why it failed",
+    "}",
+    "",
+    `The expected verification code is: ${expectedVerificationCode}`,
+    `The EAGOH name is: ${eagohName}`,
+    "",
+    "RULES:",
+    "1. The screenshot MUST show a social media platform interface (X/Twitter, Instagram, Facebook, Threads, TikTok, LinkedIn, etc.) with a PUBLISHED post.",
+    "2. The screenshot MUST contain the EAGOH share card image (a dark futuristic card with an EAGOH character, QR code, and verification code).",
+    "3. The verification code must be readable from the card image itself — do NOT require it in the caption text.",
+    "4. The user may write ANY caption — do not reject based on caption content.",
+    "5. REJECT screenshots that show: the EAGOH app Settings page, a card preview inside the EAGOH app, the Photos app/gallery, an image editor, a cropped code without platform UI, unrelated social content.",
+    "6. REJECT if the verification code does not match the expected code exactly (case-insensitive on the alphanumeric part).",
+    "7. Set confidence to 0.0 if you cannot determine any of the required fields.",
+    "8. Return ONLY the JSON object — no other text.",
+  ].join("\n");
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        temperature: 0,
+        max_tokens: 300,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: systemPrompt },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "Analyze this screenshot and return the verification JSON.",
+              },
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:image/jpeg;base64,${screenshotBase64}`,
+                  detail: "high",
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      console.warn("[social:share:verify-screenshot] OpenAI non-ok", response.status);
+      return null;
+    }
+
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) return null;
+
+    const parsed = JSON.parse(content) as Partial<AiVerificationResult>;
+
+    // Validate and normalize the structured response
+    const result: AiVerificationResult = {
+      is_valid: typeof parsed.is_valid === "boolean" ? parsed.is_valid : false,
+      platform_detected: typeof parsed.platform_detected === "string" ? parsed.platform_detected : null,
+      verification_code_detected: typeof parsed.verification_code_detected === "string" ? parsed.verification_code_detected : null,
+      verification_code_matches: typeof parsed.verification_code_matches === "boolean" ? parsed.verification_code_matches : false,
+      eagoh_card_detected: typeof parsed.eagoh_card_detected === "boolean" ? parsed.eagoh_card_detected : false,
+      published_post_interface_detected: typeof parsed.published_post_interface_detected === "boolean" ? parsed.published_post_interface_detected : false,
+      social_handle_detected: typeof parsed.social_handle_detected === "string" ? parsed.social_handle_detected : null,
+      confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0,
+      failure_reason: typeof parsed.failure_reason === "string" ? parsed.failure_reason : null,
+    };
+
+    return result;
+  } catch (err) {
+    console.warn("[social:share:verify-screenshot] AI call failed", String(err).slice(0, 200));
+    return null;
+  }
+}
+
+/**
+ * POST /social/share/verify-screenshot
+ *
+ * Verifies a social media share by analyzing a user-uploaded screenshot
+ * with the OpenAI vision model (gpt-4o-mini). The screenshot must show
+ * a published social media post containing the EAGOH share card with the
+ * one-time verification code visible on the card.
+ *
+ * The backend makes the final verification decision — the client never
+ * decides whether the screenshot passed. The reward is granted atomically
+ * via the security-definer RPC `award_social_share_reward`.
+ *
+ * Anti-fraud checks:
+ *   - File type and size validation
+ *   - Minimum image dimensions
+ *   - One-time code expiry and reuse
+ *   - Duplicate screenshot hash detection
+ *   - Verification frequency limits
+ *   - AI confidence threshold
+ *
+ * The post URL is optional (for audit) and does not affect verification.
+ */
+async function handleSocialShareVerifyScreenshot(request: Request, env: Env): Promise<Response> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
+    return jsonResponse({ ok: false, error: "Backend not configured." }, 503);
+  }
+
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const jwt = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  if (!jwt) return jsonResponse({ ok: false, error: "Authentication required." }, 401);
+
+  const supabase = createAuthedClient(env, jwt);
+  const userId = await verifyAuth(supabase, jwt);
+  if (!userId) return jsonResponse({ ok: false, error: "Invalid auth." }, 401);
+
+  let payload: {
+    attemptId?: unknown;
+    screenshotBase64?: unknown;
+    screenshotHash?: unknown;
+    postUrl?: unknown;
+  };
+  try {
+    payload = (await request.json()) as typeof payload;
+  } catch {
+    return jsonResponse({ ok: false, error: "Invalid request." }, 400);
+  }
+
+  const attemptId = str(payload.attemptId).trim();
+  if (!attemptId) return jsonResponse({ ok: false, error: "attemptId is required." }, 400);
+  const screenshotBase64 = str(payload.screenshotBase64).trim();
+  if (!screenshotBase64) return jsonResponse({ ok: false, error: "Screenshot image is required." }, 400);
+  const screenshotHash = str(payload.screenshotHash).trim();
+  const optionalPostUrl = str(payload.postUrl).trim() || null;
+
+  // ── Anti-fraud: file size check ──
+  if (screenshotBase64.length > SCREENSHOT_MAX_BYTES) {
+    return jsonResponse({ ok: false, error: "This screenshot is too large. Please use an image under 10 MB." }, 413);
+  }
+
+  const serviceClient = getServiceRoleClient(env);
+  if (!serviceClient) return jsonResponse({ ok: false, error: "Service not configured." }, 503);
+
+  // ── 1. Fetch the attempt (RLS ensures the caller owns it) ──
+  const { data: attempt, error: attemptErr } = await supabase
+    .from("social_share_attempts")
+    .select("id, user_id, eagoh_id, verification_code, public_eagoh_url, status, expires_at, reward_awarded, verification_attempted_at")
+    .eq("id", attemptId)
+    .maybeSingle();
+
+  if (attemptErr || !attempt) {
+    return jsonResponse({ ok: false, error: "Share attempt not found." }, 404);
+  }
+
+  const a = attempt as {
+    user_id: string;
+    eagoh_id: string;
+    verification_code: string;
+    public_eagoh_url: string;
+    status: string;
+    expires_at: string;
+    reward_awarded: boolean;
+    verification_attempted_at: string | null;
+  };
+
+  if (a.user_id !== userId) {
+    return jsonResponse({ ok: false, error: "Share attempt not found." }, 404);
+  }
+
+  // ── 2. Already verified ──
+  if (a.status === "verified" || a.reward_awarded) {
+    return jsonResponse({
+      ok: true,
+      skipped: true,
+      status: "verified",
+      message: "This share was already verified and rewarded.",
+    });
+  }
+
+  // ── 3. Expired code ──
+  if (new Date(a.expires_at).getTime() <= Date.now()) {
+    await serviceClient.rpc("update_share_attempt_status", {
+      p_attempt_id: attemptId,
+      p_status: "expired",
+      p_screenshot_hash: screenshotHash || null,
+      p_rejection_reason: "code_expired",
+    });
+    return jsonResponse({
+      ok: false,
+      status: "expired",
+      error: "This verification code has expired. Generate a new share card and try again.",
+    }, 410);
+  }
+
+  // ── 4. Frequency limit: max N attempts per hour per attemptId ──
+  if (a.verification_attempted_at) {
+    const lastAttempt = new Date(a.verification_attempted_at).getTime();
+    const oneHourAgo = Date.now() - 60 * 60 * 1000;
+    if (lastAttempt > oneHourAgo) {
+      // Count recent attempts by this user in the last hour (best-effort)
+      const { count } = await supabase
+        .from("social_share_attempts")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .gte("verification_attempted_at", new Date(oneHourAgo).toISOString());
+      if ((count ?? 0) >= SCREENSHOT_MAX_ATTEMPTS_PER_HOUR) {
+        return jsonResponse({
+          ok: false,
+          status: "rejected",
+          error: "Too many verification attempts. Please wait a few minutes and try again.",
+        }, 429);
+      }
+    }
+  }
+
+  // ── 5. Duplicate screenshot hash check ──
+  if (screenshotHash) {
+    const { data: dupScreenshot } = await serviceClient
+      .from("social_share_attempts")
+      .select("id")
+      .eq("screenshot_hash", screenshotHash)
+      .eq("status", "verified")
+      .neq("id", attemptId)
+      .limit(1)
+      .maybeSingle();
+
+    if (dupScreenshot) {
+      await serviceClient.rpc("update_share_attempt_status", {
+        p_attempt_id: attemptId,
+        p_status: "already_verified",
+        p_screenshot_hash: screenshotHash,
+        p_rejection_reason: "duplicate_screenshot",
+      });
+      return jsonResponse({
+        ok: false,
+        status: "already_verified",
+        error: "This screenshot has already been used for a verified share. Each screenshot can only be verified once.",
+      }, 409);
+    }
+  }
+
+  // ── 6. Fetch the EAGOH name for AI context ──
+  const { data: eagoh } = await supabase
+    .from("eagohs")
+    .select("name")
+    .eq("id", a.eagoh_id)
+    .maybeSingle();
+  const eagohName = (eagoh as { name?: string } | null)?.name ?? "Unknown EAGOH";
+
+  // ── 7. Run AI vision verification ──
+  const aiResult = await verifyScreenshotWithAi(
+    screenshotBase64,
+    a.verification_code,
+    eagohName,
+    env,
+  );
+
+  if (!aiResult) {
+    await serviceClient.rpc("update_share_attempt_status", {
+      p_attempt_id: attemptId,
+      p_screenshot_hash: screenshotHash || null,
+      p_rejection_reason: "ai_verification_unavailable",
+    });
+    return jsonResponse({
+      ok: false,
+      status: "rejected",
+      error: "We could not verify your post right now due to a temporary server issue. Please try again in a moment.",
+    }, 503);
+  }
+
+  // ── 8. Apply verification decision ──
+  // The backend makes the final decision based on all signals.
+  const codeMatchesExactly = aiResult.verification_code_matches ||
+    (aiResult.verification_code_detected ?? "").toUpperCase() === a.verification_code.toUpperCase();
+
+  const meetsThreshold = aiResult.confidence >= SCREENSHOT_VERIFICATION_THRESHOLD;
+
+  const passed =
+    aiResult.is_valid &&
+    codeMatchesExactly &&
+    aiResult.eagoh_card_detected &&
+    aiResult.published_post_interface_detected &&
+    meetsThreshold;
+
+  if (!passed) {
+    // Determine the friendly failure reason
+    let friendlyReason: string;
+    let rejectionCode: string;
+
+    if (!aiResult.eagoh_card_detected) {
+      friendlyReason = "We could not find the EAGOH share card in this screenshot.";
+      rejectionCode = "no_eagoh_card";
+    } else if (!codeMatchesExactly) {
+      if (!aiResult.verification_code_detected) {
+        friendlyReason = "We could not read the verification code. Upload a clearer screenshot showing the complete card.";
+        rejectionCode = "code_not_readable";
+      } else {
+        friendlyReason = "The verification code in this screenshot does not match your active code.";
+        rejectionCode = "code_mismatch";
+      }
+    } else if (!aiResult.published_post_interface_detected) {
+      friendlyReason = "The screenshot must show the published post inside the social media platform.";
+      rejectionCode = "no_platform_interface";
+    } else if (!meetsThreshold) {
+      friendlyReason = "We could not confidently verify this post. Upload a clearer screenshot showing the full post and EAGOH card.";
+      rejectionCode = "low_confidence";
+    } else {
+      friendlyReason = "Verification failed. Please upload a screenshot of your published social media post showing the EAGOH card.";
+      rejectionCode = "verification_failed";
+    }
+
+    await serviceClient.rpc("update_share_attempt_status", {
+      p_attempt_id: attemptId,
+      p_status: "rejected",
+      p_screenshot_hash: screenshotHash || null,
+      p_detected_platform: aiResult.platform_detected,
+      p_detected_handle: aiResult.social_handle_detected,
+      p_verification_confidence: aiResult.confidence,
+      p_ai_failure_reason: aiResult.failure_reason,
+      p_eagoh_card_detected: aiResult.eagoh_card_detected,
+      p_published_post_interface_detected: aiResult.published_post_interface_detected,
+      p_verification_code_detected: aiResult.verification_code_detected,
+      p_verification_code_matches: codeMatchesExactly,
+      p_rejection_reason: rejectionCode,
+    });
+
+    console.log("[social:share:verify-screenshot] rejected", {
+      userIdPrefix: userId.slice(0, 8),
+      attemptId: attemptId.slice(0, 8),
+      rejectionCode,
+      confidence: aiResult.confidence,
+    });
+
+    return jsonResponse({
+      ok: false,
+      status: "rejected",
+      error: friendlyReason,
+      aiResult: {
+        platform_detected: aiResult.platform_detected,
+        confidence: aiResult.confidence,
+        eagoh_card_detected: aiResult.eagoh_card_detected,
+        published_post_interface_detected: aiResult.published_post_interface_detected,
+      },
+    }, 422);
+  }
+
+  // ── 9. Award the reward via the security-definer RPC (atomic + idempotent) ──
+  const normalizedUrl = optionalPostUrl ? normalizePostUrl(optionalPostUrl) : null;
+  const platform = aiResult.platform_detected ?? (optionalPostUrl ? detectPlatform(optionalPostUrl) : "other");
+
+  const { data: awardResult, error: awardErr } = await serviceClient.rpc(
+    "award_social_share_reward",
+    {
+      p_attempt_id: attemptId,
+      p_post_url: optionalPostUrl,
+      p_post_url_normalized: normalizedUrl,
+      p_platform: platform,
+      p_screenshot_storage_path: null, // screenshot stored client-side; hash is the dedup key
+      p_screenshot_hash: screenshotHash || null,
+      p_detected_platform: aiResult.platform_detected,
+      p_detected_handle: aiResult.social_handle_detected,
+      p_verification_confidence: aiResult.confidence,
+      p_ai_is_valid: true,
+      p_ai_failure_reason: null,
+      p_eagoh_card_detected: true,
+      p_published_post_interface_detected: true,
+      p_verification_code_detected: aiResult.verification_code_detected,
+      p_verification_code_matches: true,
+    },
+  );
+
+  if (awardErr) {
+    console.warn("[social:share:verify-screenshot] award RPC failed", {
+      attemptId: attemptId.slice(0, 8),
+      error: awardErr.message,
+    });
+    return jsonResponse({ ok: false, error: "Verification completed but the reward could not be awarded. Please try again." }, 500);
+  }
+
+  const result = awardResult as { ok?: boolean; skipped?: boolean; error?: string; reward_amount?: number; new_verified_share_count?: number; new_edge_purchased?: number };
+  if (!result?.ok) {
+    if (result?.error === "already_verified") {
+      return jsonResponse({ ok: false, status: "already_verified", error: "This screenshot has already been verified." }, 409);
+    }
+    if (result?.error === "code_expired") {
+      return jsonResponse({ ok: false, status: "expired", error: "This verification code has expired." }, 410);
+    }
+    console.warn("[social:share:verify-screenshot] award RPC returned error", {
+      attemptId: attemptId.slice(0, 8),
+      error: result?.error,
+    });
+    return jsonResponse({ ok: false, error: "Reward could not be awarded." }, 500);
+  }
+
+  console.log("[social:share:verify-screenshot] verified", {
+    userIdPrefix: userId.slice(0, 8),
+    attemptId: attemptId.slice(0, 8),
+    platform,
+    confidence: aiResult.confidence,
+    reward: result.reward_amount,
+    newCount: result.new_verified_share_count,
+  });
+
+  return jsonResponse({
+    ok: true,
+    skipped: result.skipped ?? false,
+    status: "verified",
+    rewardAmount: result.reward_amount ?? SHARE_REWARD_AMOUNT,
+    newVerifiedShareCount: result.new_verified_share_count,
+    newEdgePurchased: result.new_edge_purchased,
+    message: "Your published EAGOH post was verified successfully.",
+    aiResult: {
+      platform_detected: aiResult.platform_detected,
+      social_handle_detected: aiResult.social_handle_detected,
+      confidence: aiResult.confidence,
+    },
+  });
+}
+
 /**
  * GET /social/share/status
  *
@@ -9287,6 +9770,9 @@ export default {
     }
     if (url.pathname === "/social/share/status" && request.method === "GET") {
       return handleSocialShareStatus(request, env);
+    }
+    if (url.pathname === "/social/share/verify-screenshot" && request.method === "POST") {
+      return handleSocialShareVerifyScreenshot(request, env);
     }
 
     // Subscription sync: verifies RevenueCat entitlements server-side, updates

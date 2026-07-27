@@ -1,15 +1,23 @@
 /**
  * Social Share Verification service — allows a user to share one of their
- * EAGOHs on social media and verify the public post to earn 5 Neurons.
+ * EAGOHs on social media and verify the post to earn 5 Neurons.
+ *
+ * Verification uses AI-powered screenshot analysis (primary method). The
+ * user uploads a screenshot of their published social media post; the
+ * backend sends it to the OpenAI vision model which checks for the EAGOH
+ * share card, verification code, and a social platform interface.
+ *
+ * The legacy URL-based verifier remains as an optional secondary signal.
  *
  * All reward logic is server-side. The mobile client cannot mark a share
  * verified, award Neurons, or increment verified share count directly.
  *
  * Worker endpoints:
- *   POST /social/share/create   — create share attempt + verification code
- *   POST /social/share/verify   — verify a public post URL + award reward
- *   GET  /social/share/attempts — list caller's share attempt history
- *   GET  /social/share/status   — get verified share count + badge progress
+ *   POST /social/share/create             — create share attempt + verification code
+ *   POST /social/share/verify-screenshot  — AI screenshot verification (primary)
+ *   POST /social/share/verify             — URL-based verification (legacy/optional)
+ *   GET  /social/share/attempts           — list caller's share attempt history
+ *   GET  /social/share/status             — get verified share count + badge progress
  */
 
 import { supabase } from "@/lib/supabase";
@@ -86,6 +94,24 @@ export type VerifyShareResult = {
   skipped?: boolean;
 };
 
+export type VerifyScreenshotResult = {
+  ok: boolean;
+  status: ShareAttemptStatus | "verified";
+  rewardAmount?: number;
+  newVerifiedShareCount?: number;
+  newEdgePurchased?: number;
+  message?: string;
+  error?: string;
+  skipped?: boolean;
+  aiResult?: {
+    platform_detected?: string | null;
+    social_handle_detected?: string | null;
+    confidence?: number;
+    eagoh_card_detected?: boolean;
+    published_post_interface_detected?: boolean;
+  };
+};
+
 // ── API helpers ─────────────────────────────────────────────────────────
 
 async function postAuthed(path: string, body: Record<string, unknown>): Promise<Response> {
@@ -126,13 +152,39 @@ export async function createShareAttempt(eagohId: string): Promise<CreateShareRe
   return data;
 }
 
-/** Verify a public social post URL and award the reward if valid. */
+/** Verify a public social post URL and award the reward if valid. (Legacy) */
 export async function verifyShareAttempt(
   attemptId: string,
   postUrl: string,
 ): Promise<VerifyShareResult> {
   const resp = await postAuthed("/social/share/verify", { attemptId, postUrl });
   const data = (await resp.json()) as VerifyShareResult;
+  return data;
+}
+
+/**
+ * Verify a social share by uploading a screenshot of the published post.
+ * The backend uses the OpenAI vision model to inspect the screenshot and
+ * make the final verification decision. The post URL is optional (audit only).
+ *
+ * @param attemptId         The share attempt ID from createShareAttempt()
+ * @param screenshotBase64  Raw base64-encoded image (no data: prefix)
+ * @param screenshotHash    Hash for duplicate detection
+ * @param postUrl           Optional public post URL for audit purposes
+ */
+export async function verifyShareScreenshot(
+  attemptId: string,
+  screenshotBase64: string,
+  screenshotHash: string,
+  postUrl?: string,
+): Promise<VerifyScreenshotResult> {
+  const resp = await postAuthed("/social/share/verify-screenshot", {
+    attemptId,
+    screenshotBase64,
+    screenshotHash,
+    postUrl: postUrl ?? null,
+  });
+  const data = (await resp.json()) as VerifyScreenshotResult;
   return data;
 }
 

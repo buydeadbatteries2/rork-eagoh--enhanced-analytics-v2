@@ -55,7 +55,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import type { ProfilePreferences } from "@/services/profile";
 import {
   createShareAttempt,
-  verifyShareAttempt,
+  verifyShareScreenshot,
   getShareAttempts,
   getShareStatus,
   statusLabel,
@@ -68,7 +68,7 @@ import {
 } from "@/services/socialShareVerification";
 import { useEagohs } from "@/providers/EagohProvider";
 import { Share as RNShare } from "react-native";
-import { CheckCircle2, Clock, Copy, Gift, Share2, Trophy, XCircle, QrCode, Sparkles, ChevronDown, RefreshCw, X as XIcon } from "lucide-react-native";
+import { CheckCircle2, Clock, Copy, Gift, Share2, Trophy, XCircle, QrCode, Sparkles, ChevronDown, RefreshCw, X as XIcon, ImagePlus, Camera as CameraIcon, ScanLine } from "lucide-react-native";
 import { copyToClipboard } from "@/services/sharing";
 import * as ImagePicker from "expo-image-picker";
 import { File as ExpoFile } from "expo-file-system";
@@ -606,6 +606,9 @@ const SocialVerificationPanel = memo(function SocialVerificationPanel({
   const [imagesReady, setImagesReady] = useState(false);
   const [shareError, setShareError] = useState<string | null>(null);
   const cardRef = useRef<View>(null);
+  const [screenshotUri, setScreenshotUri] = useState<string | null>(null);
+  const [screenshotBase64, setScreenshotBase64] = useState<string | null>(null);
+  const [screenshotHash, setScreenshotHash] = useState<string>("");
   const [postUrlInput, setPostUrlInput] = useState("");
   const [verifying, setVerifying] = useState(false);
   const [verifyResult, setVerifyResult] = useState<{ ok: boolean; status: string; message?: string; rewardAmount?: number } | null>(null);
@@ -614,6 +617,7 @@ const SocialVerificationPanel = memo(function SocialVerificationPanel({
   const [verifiedCount, setVerifiedCount] = useState(0);
   const [loadingData, setLoadingData] = useState(true);
   const [showVerifySection, setShowVerifySection] = useState(false);
+  const [uploadingScreenshot, setUploadingScreenshot] = useState(false);
 
   const userForgedEagohs = useMemo(() => eagohs.filter((e) => !e.is_default_shell), [eagohs]);
   const currentBadgeName = useMemo(() => badgeForCount(verifiedCount)?.name ?? null, [verifiedCount]);
@@ -764,32 +768,133 @@ const SocialVerificationPanel = memo(function SocialVerificationPanel({
     setShowVerifySection(false);
   }, [h]);
 
+  // ── Screenshot selection ─────────────────────────────────────────────
+  const handlePickScreenshot = useCallback(async () => {
+    h.selection();
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert("Permission Required", "Photo library access is needed to upload a screenshot.");
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsEditing: false,
+      quality: 0.8,
+      base64: true,
+    });
+    if (result.canceled || !result.assets?.[0]) return;
+    const asset = result.assets[0];
+    const uri = asset.uri;
+    const b64 = asset.base64 ?? null;
+    if (!b64) {
+      Alert.alert("Upload Failed", "Could not read the selected image. Please try a different screenshot.");
+      return;
+    }
+    // Validate file size (10 MB max)
+    const maxBytes = 10 * 1024 * 1024;
+    const byteLen = Math.floor((b64.length * 3) / 4);
+    if (byteLen > maxBytes) {
+      Alert.alert("File Too Large", "This screenshot is over 10 MB. Please select a smaller image.");
+      return;
+    }
+    // Compute a simple hash for duplicate detection (FNV-1a on the base64)
+    let hash = 2166136261;
+    for (let i = 0; i < b64.length; i += 47) {
+      const chunk = b64.slice(i, i + 47);
+      for (let j = 0; j < chunk.length; j++) {
+        hash ^= chunk.charCodeAt(j);
+        hash = Math.imul(hash, 16777619);
+      }
+    }
+    const hashStr = `h_${(hash >>> 0).toString(16).padStart(8, "0")}_${byteLen}`;
+    setScreenshotUri(uri);
+    setScreenshotBase64(b64);
+    setScreenshotHash(hashStr);
+    setVerifyResult(null);
+  }, [h]);
+
+  const handleTakeScreenshot = useCallback(async () => {
+    h.selection();
+    const camPerm = await ImagePicker.requestCameraPermissionsAsync();
+    if (!camPerm.granted) {
+      Alert.alert("Permission Required", "Camera access is needed to take a photo.");
+      return;
+    }
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ["images"],
+      allowsEditing: false,
+      quality: 0.8,
+      base64: true,
+    });
+    if (result.canceled || !result.assets?.[0]) return;
+    const asset = result.assets[0];
+    const b64 = asset.base64 ?? null;
+    if (!b64) return;
+    const maxBytes = 10 * 1024 * 1024;
+    const byteLen = Math.floor((b64.length * 3) / 4);
+    if (byteLen > maxBytes) {
+      Alert.alert("File Too Large", "This photo is over 10 MB. Please try again with less detail.");
+      return;
+    }
+    let hash = 2166136261;
+    for (let i = 0; i < b64.length; i += 47) {
+      const chunk = b64.slice(i, i + 47);
+      for (let j = 0; j < chunk.length; j++) {
+        hash ^= chunk.charCodeAt(j);
+        hash = Math.imul(hash, 16777619);
+      }
+    }
+    const hashStr = `h_${(hash >>> 0).toString(16).padStart(8, "0")}_${byteLen}`;
+    setScreenshotUri(asset.uri);
+    setScreenshotBase64(b64);
+    setScreenshotHash(hashStr);
+    setVerifyResult(null);
+  }, [h]);
+
+  const handleRemoveScreenshot = useCallback(() => {
+    h.selection();
+    setScreenshotUri(null);
+    setScreenshotBase64(null);
+    setScreenshotHash("");
+    setVerifyResult(null);
+  }, [h]);
+
   const handleVerify = useCallback(async () => {
-    if (!activeAttempt || verifying || !postUrlInput.trim()) return;
+    if (!activeAttempt || verifying || !screenshotBase64) return;
     setVerifying(true);
     setVerifyResult(null);
     try {
-      const result = await verifyShareAttempt(activeAttempt.attemptId, postUrlInput.trim());
-      setVerifyResult({ ok: result.ok, status: result.status, message: result.message ?? result.error, rewardAmount: result.rewardAmount });
+      const result = await verifyShareScreenshot(
+        activeAttempt.attemptId,
+        screenshotBase64,
+        screenshotHash,
+        postUrlInput.trim() || undefined,
+      );
+      setVerifyResult({
+        ok: result.ok,
+        status: result.status,
+        message: result.message ?? result.error,
+        rewardAmount: result.rewardAmount,
+      });
       if (result.ok && result.status === "verified") {
         h.success();
         setPostUrlInput("");
+        setScreenshotUri(null);
+        setScreenshotBase64(null);
+        setScreenshotHash("");
         await loadData(); // refresh history + count
-      } else if (result.status === "manual_review") {
-        h.warning();
-        await loadData();
       } else {
         h.warning();
         await loadData();
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Verification failed.";
+      const msg = err instanceof Error ? err.message : "Verification failed. Please try again.";
       setVerifyResult({ ok: false, status: "rejected", message: msg });
       h.warning();
     } finally {
       setVerifying(false);
     }
-  }, [activeAttempt, verifying, postUrlInput, h, loadData]);
+  }, [activeAttempt, verifying, screenshotBase64, screenshotHash, postUrlInput, h, loadData]);
 
   const inlineStyles = useMemo(
     () => ({
@@ -1054,38 +1159,181 @@ const SocialVerificationPanel = memo(function SocialVerificationPanel({
         </View>
       )}
 
-      {/* 3. Verify My Share */}
+      {/* 3. Verify My Share — AI Screenshot Verification */}
       {showVerifySection && activeAttempt && (
-        <View style={{ gap: 8 }}>
+        <View style={{ gap: 10 }}>
           <Text style={inlineStyles.sectionTitle}>3. Verify Your Share</Text>
           <Text style={inlineStyles.sectionHint}>
-            Paste the public link to the social post you just shared. Make sure your post is public and contains both the EAGOH URL and the verification code.
+            Upload a screenshot of your published post. Make sure the EAGOH card and verification code are visible.
           </Text>
-          <TextInput
-            style={inlineStyles.textInput}
-            value={postUrlInput}
-            onChangeText={setPostUrlInput}
-            placeholder="Paste Public Social Post Link"
-            placeholderTextColor={pal.muted}
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="url"
-            multiline
-          />
+
+          {/* Helper: caption freedom */}
+          <View style={{
+            flexDirection: "row" as const,
+            alignItems: "flex-start" as const,
+            gap: 6,
+            padding: 8,
+            borderRadius: 5,
+            backgroundColor: pal.cyanSoft,
+            borderWidth: 1,
+            borderColor: `${pal.cyan}33`,
+          }}>
+            <Sparkles color={pal.cyan} size={12} style={{ marginTop: 1 }} />
+            <Text style={{ color: pal.cyan, fontSize: 10, fontWeight: "700", flex: 1, lineHeight: 15 }}>
+              You can write any caption you want. Your verification code only needs to be visible on the EAGOH card.
+            </Text>
+          </View>
+
+          {/* Screenshot upload area */}
+          {!screenshotUri ? (
+            <View style={{ gap: 8 }}>
+              <Pressable
+                onPress={() => void handlePickScreenshot()}
+                disabled={uploadingScreenshot}
+                style={({ pressed }) => [
+                  {
+                    minHeight: 120,
+                    borderRadius: 8,
+                    alignItems: "center" as const,
+                    justifyContent: "center" as const,
+                    gap: 8,
+                    backgroundColor: pal.graphite,
+                    borderWidth: 1.5,
+                    borderColor: `${pal.cyan}44`,
+                    borderStyle: "dashed" as const,
+                  },
+                  pressed && { opacity: 0.8 },
+                ]}
+              >
+                <ImagePlus color={pal.cyan} size={28} />
+                <Text style={{ color: pal.cyan, fontSize: 14, fontWeight: "900" }}>Upload Post Screenshot</Text>
+                <Text style={{ color: pal.muted, fontSize: 10, fontWeight: "600" }}>
+                  Select from Photos
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => void handleTakeScreenshot()}
+                disabled={uploadingScreenshot}
+                style={({ pressed }) => [
+                  {
+                    minHeight: 44,
+                    borderRadius: 5,
+                    alignItems: "center" as const,
+                    justifyContent: "center" as const,
+                    flexDirection: "row" as const,
+                    gap: 8,
+                    backgroundColor: pal.panel,
+                    borderWidth: 1,
+                    borderColor: pal.line,
+                  },
+                  pressed && { opacity: 0.8 },
+                ]}
+              >
+                <CameraIcon color={pal.text} size={16} />
+                <Text style={{ color: pal.text, fontSize: 12, fontWeight: "800" }}>Take Photo Instead</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <View style={{ gap: 8 }}>
+              {/* Screenshot preview */}
+              <View style={{
+                borderRadius: 8,
+                overflow: "hidden",
+                borderWidth: 1,
+                borderColor: pal.line,
+                backgroundColor: pal.graphite,
+              }}>
+                <ExpoImage
+                  source={{ uri: screenshotUri }}
+                  style={{ width: "100%", height: 240, backgroundColor: pal.graphite }}
+                  contentFit="contain"
+                  cachePolicy="none"
+                />
+              </View>
+
+              {/* Replace / Remove buttons */}
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <Pressable
+                  onPress={() => void handlePickScreenshot()}
+                  style={({ pressed }) => [
+                    {
+                      flex: 1,
+                      minHeight: 40,
+                      borderRadius: 5,
+                      alignItems: "center" as const,
+                      justifyContent: "center" as const,
+                      flexDirection: "row" as const,
+                      gap: 6,
+                      backgroundColor: pal.panel,
+                      borderWidth: 1,
+                      borderColor: pal.line,
+                    },
+                    pressed && { opacity: 0.8 },
+                  ]}
+                >
+                  <RefreshCw color={pal.cyan} size={14} />
+                  <Text style={{ color: pal.cyan, fontSize: 12, fontWeight: "800" }}>Replace</Text>
+                </Pressable>
+                <Pressable
+                  onPress={handleRemoveScreenshot}
+                  style={({ pressed }) => [
+                    {
+                      minHeight: 40,
+                      borderRadius: 5,
+                      alignItems: "center" as const,
+                      justifyContent: "center" as const,
+                      flexDirection: "row" as const,
+                      gap: 6,
+                      paddingHorizontal: 14,
+                      backgroundColor: pal.emberSoft,
+                      borderWidth: 1,
+                      borderColor: `${pal.ember}44`,
+                    },
+                    pressed && { opacity: 0.8 },
+                  ]}
+                >
+                  <Trash2 color={pal.ember} size={14} />
+                  <Text style={{ color: pal.ember, fontSize: 12, fontWeight: "800" }}>Remove</Text>
+                </Pressable>
+              </View>
+            </View>
+          )}
+
+          {/* Optional post URL */}
+          <View style={{ gap: 4, marginTop: 2 }}>
+            <Text style={{ color: pal.muted, fontSize: 10, fontWeight: "700", letterSpacing: 0.5 }}>
+              POST LINK — OPTIONAL
+            </Text>
+            <TextInput
+              style={[inlineStyles.textInput, { minHeight: 40 }]}
+              value={postUrlInput}
+              onChangeText={setPostUrlInput}
+              placeholder="Optional: paste your post URL for audit"
+              placeholderTextColor={pal.muted}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="url"
+            />
+          </View>
+
+          {/* Verify button */}
           <Pressable
             onPress={handleVerify}
-            disabled={verifying || !postUrlInput.trim()}
+            disabled={verifying || !screenshotBase64}
             style={({ pressed }) => [
               inlineStyles.verifyBtn,
-              { opacity: verifying || !postUrlInput.trim() ? 0.5 : 1 },
+              { opacity: verifying || !screenshotBase64 ? 0.5 : 1 },
               pressed && { opacity: 0.8 },
             ]}
           >
             {verifying ? (
-              <ActivityIndicator color={pal.void} size="small" />
+              <>
+                <ActivityIndicator color={pal.void} size="small" />
+                <Text style={inlineStyles.verifyBtnText}>AI is verifying your published post...</Text>
+              </>
             ) : (
               <>
-                <CheckCircle2 color={pal.void} size={16} />
+                <ScanLine color={pal.void} size={16} />
                 <Text style={inlineStyles.verifyBtnText}>Verify My Share</Text>
               </>
             )}
@@ -1104,7 +1352,7 @@ const SocialVerificationPanel = memo(function SocialVerificationPanel({
                 fontSize: 12,
                 fontWeight: "800",
               }}>
-                {verifyResult.status === "verified" ? "Verified!" : verifyResult.status === "manual_review" ? "Manual Review Required" : "Verification Failed"}
+                {verifyResult.status === "verified" ? "Share Verified" : verifyResult.status === "manual_review" ? "Needs Review" : "Verification Failed"}
               </Text>
               {verifyResult.message ? (
                 <Text style={{ color: pal.text, fontSize: 11, fontWeight: "600", lineHeight: 16 }}>
@@ -1142,7 +1390,7 @@ const SocialVerificationPanel = memo(function SocialVerificationPanel({
 
       <View style={inlineStyles.privacyHelper}>
         <Text style={{ color: pal.ember, fontSize: 10, fontWeight: "900" }}>
-          Verification is handled securely on our servers. You cannot directly mark a share as verified or award yourself Neurons. Duplicate posts and expired codes are automatically rejected.
+          Verification is handled securely on our servers using AI screenshot analysis. You cannot directly mark a share as verified or award yourself Neurons. Duplicate screenshots and expired codes are automatically rejected.
         </Text>
       </View>
     </View>
