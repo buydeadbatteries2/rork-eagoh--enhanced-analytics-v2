@@ -84,6 +84,13 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
   // Track previous user ID to detect login/logout transitions
   const prevUserId = useRef<string | null>(null);
 
+  // ── Post-purchase coordination lock ──────────────────────────────────
+  // Prevents duplicate backend sync when both the purchase success handler
+  // and the CustomerInfoUpdateListener fire for the same purchase event.
+  // The backend sync is idempotent, but the UI should avoid running the
+  // full activation flow twice simultaneously.
+  const syncInProgressRef = useRef<boolean>(false);
+
   // ── Lazy configure on mount ─────────────────────────────────────────
 
   useEffect(() => {
@@ -184,18 +191,30 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
   const syncSubscription = useCallback(
     async (customerInfo: CustomerInfo | null): Promise<void> => {
       if (!user?.id || !configured) return;
-      const activeEnts = customerInfo?.entitlements?.active
-        ? Object.keys(customerInfo.entitlements.active)
-        : [];
+      // ── Coordination lock: skip if a sync is already in flight ──
+      // This prevents duplicate execution when both the purchase handler
+      // and the CustomerInfoUpdateListener fire for the same event.
+      // The backend is idempotent, but we avoid duplicate UI work.
+      if (syncInProgressRef.current) {
+        if (__DEV__) console.log("[RevenueCat] sync already in progress — skipping duplicate");
+        return;
+      }
+      syncInProgressRef.current = true;
       try {
+        const activeEnts = customerInfo?.entitlements?.active
+          ? Object.keys(customerInfo.entitlements.active)
+          : [];
         const result = await syncSubscriptionWithBackend(activeEnts);
         if (result.ok && (result.tierChanged || result.allocationGranted > 0)) {
-          // Invalidate the profile cache so the UI refreshes immediately
+          // Invalidate the profile cache so the UI refreshes immediately.
+          // Use null-safe handling — the profile query may not be mounted.
           queryClient.invalidateQueries({ queryKey: ["profile", user.id] });
-          queryClient.refetchQueries({ queryKey: ["profile", user.id] });
+          queryClient.refetchQueries({ queryKey: ["profile", user.id] }).catch(() => {});
         }
       } catch (err) {
         console.warn("[RevenueCat] backend sync failed", (err as Error).message);
+      } finally {
+        syncInProgressRef.current = false;
       }
     },
     [user?.id, configured, queryClient],
@@ -271,8 +290,12 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
   const purchaseMutation = useMutation({
     mutationFn: (pkg: PurchasesPackage) => purchasePackage(pkg),
     onSuccess: (result) => {
+      // Update the customerInfo cache first — this is safe even if the
+      // subscription screen has unmounted (queryClient is global).
       queryClient.setQueryData(customerInfoKey, result.customerInfo);
-      // Sync with backend — verifies entitlement and grants neurons
+      // Sync with backend — verifies entitlement and grants neurons.
+      // The syncSubscription lock prevents duplicate execution when the
+      // CustomerInfoUpdateListener also fires for this same purchase.
       void syncSubscription(result.customerInfo);
     },
   });

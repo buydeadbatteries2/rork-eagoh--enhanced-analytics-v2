@@ -724,6 +724,42 @@ export default function ForgeScreen(): JSX.Element {
   const isTechnologyDomain = domain === "technology";
   const isHealthFitnessDomain = domain === "health-fitness";
 
+  /**
+   * Domain change handler — clears stale fields belonging only to the
+   * previous domain when the user switches Intelligence Domain.
+   *
+   * When switching away from sports:
+   *   - clears sport, teams, team focus mode, pro/college team focus
+   *
+   * When switching to sports:
+   *   - initializes sport to "football" if empty
+   *
+   * This prevents the confirmation modal from showing a stale
+   * "Sport: football" for a Business or Music EAGOH.
+   */
+  const handleDomainChange = useCallback((newDomain: string): void => {
+    const prevDomain = domain;
+    if (newDomain === prevDomain) return;
+
+    // ── Clear sports-only fields when leaving the sports domain ──
+    if (prevDomain === "sports" && newDomain !== "sports") {
+      setSport("");
+      setTeams([]);
+      setTeamFocusMode("none");
+      setProTeamFocusId("");
+      setProTeamFocusName("");
+      setCollegeTeamFocusId("");
+      setCollegeTeamFocusName("");
+    }
+
+    // ── Initialize sport when entering the sports domain ──
+    if (newDomain === "sports" && (!sport || sport.length === 0)) {
+      setSport("football");
+    }
+
+    setDomain(newDomain);
+  }, [domain, sport]);
+
   /** Display label for the current specialty / sport / genre. */
   const specialtyLabel: string | null = useMemo((): string | null => {
     if (isSportsDomain) {
@@ -1283,7 +1319,7 @@ export default function ForgeScreen(): JSX.Element {
                 key={d.id}
                 option={{ id: d.id, label: d.label, detail: d.description.slice(0, 48), tone: d.tone }}
                 selected={domain === d.id}
-                onPress={setDomain}
+                onPress={handleDomainChange}
               />
             ))}
           </View>
@@ -2060,6 +2096,7 @@ export default function ForgeScreen(): JSX.Element {
                     setSelectedEagohId("");
                     setName("");
                     setGender("neutral");
+                    setSport("football");
                     setDomain("sports");
                     setBodyType("average");
                     setStyleNotes("");

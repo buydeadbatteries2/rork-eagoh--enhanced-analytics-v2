@@ -196,13 +196,33 @@ export function buildForgePrompt(input: ForgePromptInput, options: ForgePromptOp
 
 /** Summary lines for the confirmation flow — never sent to the image model. */
 export function buildForgeSummary(input: ForgePromptInput): string[] {
-  return [
+  const lines: string[] = [
     `Name: ${input.name?.trim() || "Unnamed EAGOH"}`,
-    `Sport: ${input.sport}`,
+  ];
+
+  // ── Domain-specific specialization line ──
+  // Only show Sport for the sports domain. For all other domains, show
+  // the domain label instead. Never show a stale sport value for a
+  // non-sports EAGOH.
+  const domain = (input.domain ?? "").toLowerCase().trim();
+  if (domain === "sports") {
+    lines.push(`Sport: ${input.sport || "unspecified"}`);
+  } else if (domain) {
+    lines.push(`Domain: ${input.domain}`);
+  }
+
+  lines.push(
     `Cybernetic intensity: ${input.cyberneticIntensity}`,
     `Pose: ${input.pose.replace(/-/g, " ")}`,
     `DNA: ${input.dna.length ? input.dna.join(" + ") : "none selected"}`,
-    `Fanatic affinities: ${input.teams.length} selected`,
-    `Appearance layers: ${Object.keys(input.appearance).length}`,
-  ];
+  );
+
+  // Only show fanatic affinities for sports domain
+  if (domain === "sports") {
+    lines.push(`Fanatic affinities: ${input.teams.length} selected`);
+  }
+
+  lines.push(`Appearance layers: ${Object.keys(input.appearance).length}`);
+
+  return lines;
 }

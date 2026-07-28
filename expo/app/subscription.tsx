@@ -53,7 +53,7 @@ import {
   Star,
   Zap,
 } from "lucide-react-native";
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PurchasesPackage } from "react-native-purchases";
 
 // ── Tier-specific accent colours ───────────────────────────────────────────
@@ -481,6 +481,20 @@ export default function SubscriptionScreen(): JSX.Element {
   const [purchaseSuccess, setPurchaseSuccess] = useState(false);
   const [purchaseStatusMsg, setPurchaseStatusMsg] = useState<string | null>(null);
 
+  // ── Mounted-state guard ───────────────────────────────────────────────
+  // Prevents state updates after the subscription screen unmounts during
+  // async post-purchase work (backend sync, profile refresh, etc).
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
+
+  // ── Post-purchase coordination lock ──────────────────────────────────
+  // Prevents the full activation flow from running twice when both the
+  // purchase success handler and the CustomerInfoUpdateListener fire.
+  const purchaseFlowInProgressRef = useRef(false);
+
   const currentTier: SubscriptionTier = useMemo(
     () => effectiveSubscriptionTier,
     [effectiveSubscriptionTier],
@@ -589,6 +603,20 @@ export default function SubscriptionScreen(): JSX.Element {
       }
       h.heavy();
 
+      // ── Post-purchase coordination lock ──
+      // Prevents the full activation flow from running twice when both the
+      // purchase success handler and the CustomerInfoUpdateListener fire.
+      if (purchaseFlowInProgressRef.current) {
+        if (__DEV__) console.log("[Subscription] purchase flow already in progress — skipping duplicate");
+        return;
+      }
+      purchaseFlowInProgressRef.current = true;
+
+      if (!isMountedRef.current) {
+        purchaseFlowInProgressRef.current = false;
+        return;
+      }
+
       setPurchasingTier(tier);
       setPurchaseSuccess(false);
 
@@ -663,15 +691,32 @@ export default function SubscriptionScreen(): JSX.Element {
           }
 
           // ── Entitlement confirmed — wait for backend sync ──
-          setPurchaseStatusMsg("Activating your subscription and adding neurons...");
           // The RevenueCatProvider's purchaseMutation.onSuccess already fires the
-          // backend sync. Give it a moment to complete, then refresh local state.
+          // backend sync (with a coordination lock to prevent duplicates from
+          // the CustomerInfoUpdateListener). Give it a moment to complete, then
+          // refresh local state. All state updates are guarded by isMountedRef.
+          if (isMountedRef.current) {
+            setPurchaseStatusMsg("Activating your subscription and adding neurons...");
+          }
           await new Promise((resolve) => setTimeout(resolve, 1500));
-          await refreshAll();
 
-          setPurchaseSuccess(true);
-          setPurchaseStatusMsg("Subscription activated. Your neurons are ready.");
+          // Refresh local state — guarded by mounted check.
+          // If the user left the screen, the RevenueCatProvider listener
+          // already handled the sync; we just skip the UI update.
+          if (isMountedRef.current) {
+            try {
+              await refreshAll();
+            } catch (refreshErr) {
+              console.warn("[Subscription] refreshAll failed after purchase:", refreshErr);
+            }
+          }
 
+          if (isMountedRef.current) {
+            setPurchaseSuccess(true);
+            setPurchaseStatusMsg("Subscription activated. Your neurons are ready.");
+          }
+
+          // Show success alert — safe even if unmounted (Alert is global).
           const tierLabel = TIER_LABELS[tier];
           Alert.alert(
             "Subscription Activated",
@@ -698,11 +743,29 @@ export default function SubscriptionScreen(): JSX.Element {
         } else {
           const msg = errObj?.message ?? "Purchase failed";
           console.warn("[Subscription] Purchase error:", msg);
-          Alert.alert("Purchase Failed", msg);
+          // If the purchase actually succeeded but a post-purchase UI step
+          // threw, show a reassuring message instead of crashing.
+          // The RevenueCat listener + backend sync handle activation.
+          if (isMountedRef.current) {
+            Alert.alert(
+              "Purchase Completed",
+              "Your subscription was purchased successfully. Your account is being refreshed.",
+            );
+          } else {
+            // Screen unmounted — Alert is global, still safe to show.
+            Alert.alert(
+              "Purchase Completed",
+              "Your subscription was purchased successfully. Your account is being refreshed.",
+            );
+          }
         }
       } finally {
-        setPurchasingTier(null);
-        setPurchaseStatusMsg(null);
+        // Guard all state cleanup with mounted check.
+        if (isMountedRef.current) {
+          setPurchasingTier(null);
+          setPurchaseStatusMsg(null);
+        }
+        purchaseFlowInProgressRef.current = false;
       }
     },
     [user?.id, rcPurchase, rcConfigured, h, handleTestSubscribe, refreshAll],

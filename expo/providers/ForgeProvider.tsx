@@ -70,10 +70,13 @@ export const [ForgeProvider, useForge] = createContextHook(() => {
       options: { eagohId?: string; scope?: ForgePromptOptions["scope"]; edgeCost?: number } = {},
     ): ForgePending => {
       const scope: ForgePromptOptions["scope"] = options.scope ?? "full";
+      // ── For non-sports domains, pass empty sport so the prompt builder
+      //    doesn't use a stale "football" value for a Business or Music EAGOH.
+      const effectiveSport = draft.domain === "sports" ? draft.sport : "";
       const prompt = buildForgePrompt(
         {
           name: draft.name,
-          sport: draft.sport,
+          sport: effectiveSport,
           gender: draft.gender,
           dna: draft.dna,
           teams: draft.teams,
@@ -96,10 +99,8 @@ export const [ForgeProvider, useForge] = createContextHook(() => {
         cyberneticIntensity: draft.cyberneticIntensity,
         pose: draft.pose,
         lab: draft.lab,
+        domain: draft.domain,
       });
-      if (draft.domain) {
-        summary.push(`Domain: ${draft.domain}`);
-      }
       const edgeCost = options.edgeCost ?? getForgeCost(mode);
       const next: ForgePending = { mode, scope, draft, eagohId: options.eagohId, prompt, summary, edgeCost };
       setPending(next);
