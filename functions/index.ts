@@ -1,5 +1,5 @@
 /**
-// EAGOH Analyst Chat — Cloudflare Worker (v4)
+// EAGOH Analyst Chat — Cloudflare Worker (v4-relaxed-brandguard)
  * Phase RETAINED-OI-2 — Trusted purchase reversal status (record_exchange_purchase_reversal RPC)
  * Phase RETAINED-OI-1 + Cap — Retained Exchange Intelligence + 25% Cumulative Cap
   * Phase 12A — Social sharing + faction invite by email/username
@@ -9163,156 +9163,210 @@ const FORGE_MAX_REGENERATIONS = 1;
 type BrandEntryS = {
   canonical: string;
   aliases: string[];
+  /** Descriptive phrases that explicitly request reproduction of the mark. */
   descriptors: string[];
 };
 
 const PROHIBITED_BRANDS_S: BrandEntryS[] = [
   // ── Athletic / Sportswear ──
-  { canonical: "nike", aliases: ["nike", "nke", "nik3", "n1ke", "nikey", "nyke", "nikee"], descriptors: ["swoosh", "check-shaped athletic logo", "checkmark athletic logo", "nike swoosh", "swoosh logo", "the swoosh"] },
-  { canonical: "adidas", aliases: ["adidas", "adiddas", "ad1das", "adiads", "addidas"], descriptors: ["three stripes", "three adidas-style stripes", "trefoil", "adidas stripes", "three parallel stripes", "three-stripe design"] },
-  { canonical: "jordan", aliases: ["jordan", "jordann", "j0rdan", "jumpman", "jordan brand", "air jordan", "jordans"], descriptors: ["jumpman silhouette", "jumpman logo", "jumpman-style silhouette", "jumpman symbol", "basketball player silhouette logo", "flying basketball player logo"] },
-  { canonical: "under armour", aliases: ["under armour", "underarmour", "under armor", "underarmor", "ua logo"], descriptors: ["under armour logo", "interlocking ua", "ua connected logo"] },
-  { canonical: "puma", aliases: ["puma", "pumaa", "p0ma", "pumma"], descriptors: ["puma leaping cat", "puma cat logo", "leaping cat logo", "puma formstrip"] },
-  { canonical: "reebok", aliases: ["reebok", "reebokk", "r33bok", "reebook"], descriptors: ["reebok logo", "reebok vector", "delta logo reebok"] },
-  { canonical: "new balance", aliases: ["new balance", "newbalance", "nb logo"], descriptors: ["new balance logo", "nb stacked logo"] },
-  { canonical: "champion", aliases: ["champion", "chamption", "champ1on"], descriptors: ["champion logo", "c logo champion"] },
+  { canonical: "nike", aliases: ["nike", "nke", "nikey", "nyke", "nikee"], descriptors: ["nike swoosh", "swoosh logo", "the swoosh", "nike logo", "nike check logo"] },
+  { canonical: "adidas", aliases: ["adidas", "adiddas", "ad1das", "adiads", "addidas"], descriptors: ["adidas three stripes", "three stripes logo", "adidas trefoil", "adidas stripes logo", "three-stripe adidas logo"] },
+  { canonical: "jordan", aliases: ["jumpman", "jordan brand", "air jordan"], descriptors: ["jumpman logo", "jumpman silhouette", "jumpman symbol", "jordan logo", "flying basketball player logo"] },
+  { canonical: "under armour", aliases: ["underarmour", "under armour", "under armor", "underarmor"], descriptors: ["under armour logo", "interlocking ua logo"] },
+  { canonical: "puma", aliases: ["puma", "pumaa", "pumma"], descriptors: ["puma logo", "puma leaping cat", "puma cat logo", "leaping cat logo"] },
+  { canonical: "reebok", aliases: ["reebok", "reebokk", "reebook"], descriptors: ["reebok logo", "reebok vector logo"] },
+  { canonical: "new balance", aliases: ["new balance", "newbalance"], descriptors: ["new balance logo", "nb stacked logo"] },
+  { canonical: "champion", aliases: ["champion"], descriptors: ["champion logo", "champion c logo"] },
   // ── Luxury / Fashion ──
-  { canonical: "gucci", aliases: ["gucci", "gucc1", "guccci", "guccy"], descriptors: ["gucci pattern", "gg monogram", "gucci monogram", "interlocking g logo", "green red green stripe gucci", "gucci snake"] },
-  { canonical: "louis vuitton", aliases: ["louis vuitton", "louisvuitton", "louie vuitton", "louis vutton", "luis vuitton", "lv monogram"], descriptors: ["lv monogram", "louis vuitton monogram", "lv-style monogram", "lv pattern", "lv logo", "louis vuitton pattern", "lv flower pattern"] },
-  { canonical: "prada", aliases: ["prada", "prad4", "pradaa"], descriptors: ["prada logo", "prada triangle logo", "inverted triangle prada"] },
-  { canonical: "hermes", aliases: ["hermes", "hermès", "h3rmes"], descriptors: ["hermes logo", "hermes horse carriage", "hermes h logo"] },
-  { canonical: "burberry", aliases: ["burberry", "burb3rry", "burbery"], descriptors: ["burberry check", "burberry plaid", "burberry pattern", "nova check"] },
-  { canonical: "versace", aliases: ["versace", "v3rsace", "versache"], descriptors: ["versace logo", "medusa head versace", "versace medusa", "greek key versace"] },
-  { canonical: "balenciaga", aliases: ["balenciaga", "bal3nciaga"], descriptors: ["balenciaga logo", "balenciaga font logo"] },
+  { canonical: "gucci", aliases: ["gucci", "gucc1", "guccci", "guccy"], descriptors: ["gucci logo", "gucci monogram", "gg monogram", "interlocking g logo", "gucci pattern"] },
+  { canonical: "louis vuitton", aliases: ["louis vuitton", "louisvuitton", "louie vuitton", "louis vutton", "luis vuitton"], descriptors: ["louis vuitton logo", "louis vuitton monogram", "lv monogram", "lv logo", "louis vuitton pattern"] },
+  { canonical: "prada", aliases: ["prada", "prad4", "pradaa"], descriptors: ["prada logo", "prada triangle logo"] },
+  { canonical: "hermes", aliases: ["hermes", "hermès"], descriptors: ["hermes logo", "hermes horse carriage"] },
+  { canonical: "burberry", aliases: ["burberry", "burbery"], descriptors: ["burberry logo", "burberry check", "burberry plaid", "burberry pattern", "nova check"] },
+  { canonical: "versace", aliases: ["versace", "versache"], descriptors: ["versace logo", "versace medusa", "medusa head versace"] },
+  { canonical: "balenciaga", aliases: ["balenciaga"], descriptors: ["balenciaga logo"] },
   { canonical: "dior", aliases: ["dior", "d1or", "diorr"], descriptors: ["dior logo", "cd logo dior", "dior oblique pattern"] },
   { canonical: "fendi", aliases: ["fendi", "f3ndi", "fendii"], descriptors: ["fendi logo", "ff logo fendi", "fendi zucca pattern"] },
-  { canonical: "supreme", aliases: ["supreme", "supr3me", "supremee", "supream"], descriptors: ["supreme logo", "supreme box logo", "red box logo supreme"] },
+  { canonical: "supreme", aliases: ["supreme", "supremee", "supream"], descriptors: ["supreme logo", "supreme box logo", "red box logo supreme"] },
   // ── Tech ──
-  { canonical: "apple", aliases: ["apple", "appl3", "apple inc"], descriptors: ["apple logo", "bitten apple symbol", "bitten apple logo", "apple emblem", "apple symbol on chest", "apple icon"] },
-  { canonical: "microsoft", aliases: ["microsoft", "m1crosoft", "msft"], descriptors: ["microsoft logo", "windows logo", "four color squares microsoft", "windows flag"] },
-  { canonical: "google", aliases: ["google", "g00gle", "googl", "google inc"], descriptors: ["google logo", "google g logo", "google colors logo"] },
-  { canonical: "samsung", aliases: ["samsung", "samsng", "s4msung"], descriptors: ["samsung logo", "samsung wordmark"] },
-  { canonical: "playstation", aliases: ["playstation", "play station", "ps5", "ps4", "ps3"], descriptors: ["playstation logo", "ps logo", "p s logo", "playstation symbols", "circle triangle cross square logo"] },
-  { canonical: "xbox", aliases: ["xbox", "x-box", "xboxx"], descriptors: ["xbox logo", "xbox green sphere", "xbox sphere logo"] },
-  { canonical: "nintendo", aliases: ["nintendo", "n1ntendo", "nintend0"], descriptors: ["nintendo logo", "nintendo switch logo", "nintendo wordmark"] },
+  { canonical: "apple", aliases: ["apple"], descriptors: ["apple logo", "bitten apple logo", "bitten apple symbol", "apple emblem", "apple icon"] },
+  { canonical: "microsoft", aliases: ["microsoft", "msft"], descriptors: ["microsoft logo", "windows logo", "four color squares microsoft", "windows flag logo"] },
+  { canonical: "google", aliases: ["google", "g00gle", "googl"], descriptors: ["google logo", "google g logo"] },
+  { canonical: "samsung", aliases: ["samsung", "samsng"], descriptors: ["samsung logo", "samsung wordmark"] },
+  { canonical: "playstation", aliases: ["playstation", "play station"], descriptors: ["playstation logo", "ps logo", "playstation symbols logo"] },
+  { canonical: "xbox", aliases: ["xbox", "x-box"], descriptors: ["xbox logo", "xbox green sphere", "xbox sphere logo"] },
+  { canonical: "nintendo", aliases: ["nintendo", "n1ntendo", "nintend0"], descriptors: ["nintendo logo", "nintendo switch logo"] },
   // ── Social Media ──
-  { canonical: "facebook", aliases: ["facebook", "faceb00k", "fb logo"], descriptors: ["facebook logo", "f logo facebook", "blue f logo"] },
-  { canonical: "x twitter", aliases: ["twitter", "x twitter", "x logo", "twitter logo", "tw1tter"], descriptors: ["x logo", "twitter logo", "blue bird social media logo", "twitter bird", "x social media logo"] },
-  { canonical: "instagram", aliases: ["instagram", "insta", "instgram", "ig logo"], descriptors: ["instagram logo", "instagram camera icon", "instagram gradient logo"] },
-  { canonical: "tiktok", aliases: ["tiktok", "tik tok", "tik-tok", "tiktokk"], descriptors: ["tiktok logo", "tiktok music note logo", "tiktok symbol"] },
-  { canonical: "youtube", aliases: ["youtube", "you tube", "youtub", "yt logo"], descriptors: ["youtube logo", "youtube play button", "red play button logo", "youtube subscribe button"] },
+  { canonical: "facebook", aliases: ["facebook", "faceb00k"], descriptors: ["facebook logo", "f logo facebook"] },
+  { canonical: "twitter", aliases: ["twitter", "tw1tter"], descriptors: ["twitter logo", "twitter bird logo", "x twitter logo"] },
+  { canonical: "instagram", aliases: ["instagram", "insta", "instgram"], descriptors: ["instagram logo", "instagram camera icon"] },
+  { canonical: "tiktok", aliases: ["tiktok", "tik tok", "tik-tok"], descriptors: ["tiktok logo", "tiktok music note logo"] },
+  { canonical: "youtube", aliases: ["youtube", "you tube", "youtub"], descriptors: ["youtube logo", "youtube play button", "red play button logo"] },
   { canonical: "snapchat", aliases: ["snapchat", "snap chat"], descriptors: ["snapchat logo", "snapchat ghost", "ghost logo snapchat"] },
   { canonical: "linkedin", aliases: ["linkedin", "linked in"], descriptors: ["linkedin logo", "in logo linkedin"] },
-  { canonical: "threads", aliases: ["threads", "threadss"], descriptors: ["threads logo", "threads app logo", "at symbol threads"] },
+  { canonical: "threads", aliases: ["threads"], descriptors: ["threads logo", "threads app logo"] },
   // ── Sports Leagues ──
-  { canonical: "nfl", aliases: ["nfl", "n.f.l.", "national football league"], descriptors: ["nfl logo", "nfl shield", "football league shield logo", "nfl shield logo"] },
-  { canonical: "nba", aliases: ["nba", "n.b.a.", "national basketball association"], descriptors: ["nba logo", "basketball player silhouette logo", "blue red nba logo", "nba emblem"] },
-  { canonical: "mlb", aliases: ["mlb", "m.l.b.", "major league baseball"], descriptors: ["mlb logo", "baseball batter silhouette logo", "mlb emblem"] },
+  { canonical: "nfl", aliases: ["nfl", "n.f.l.", "national football league"], descriptors: ["nfl logo", "nfl shield", "nfl shield logo"] },
+  { canonical: "nba", aliases: ["nba", "n.b.a.", "national basketball association"], descriptors: ["nba logo", "nba emblem"] },
+  { canonical: "mlb", aliases: ["mlb", "m.l.b.", "major league baseball"], descriptors: ["mlb logo", "mlb emblem"] },
   { canonical: "nhl", aliases: ["nhl", "n.h.l.", "national hockey league"], descriptors: ["nhl logo", "nhl shield"] },
   { canonical: "mls", aliases: ["mls", "m.l.s.", "major league soccer"], descriptors: ["mls logo", "mls shield"] },
   { canonical: "fifa", aliases: ["fifa", "f1fa"], descriptors: ["fifa logo", "fifa emblem"] },
   { canonical: "uefa", aliases: ["uefa", "u.e.f.a."], descriptors: ["uefa logo", "uefa emblem"] },
-  { canonical: "ncaa", aliases: ["ncaa", "n.c.a.a."], descriptors: ["ncaa logo", "college sports logo"] },
+  { canonical: "ncaa", aliases: ["ncaa", "n.c.a.a."], descriptors: ["ncaa logo", "college sports logo ncaa"] },
   // ── Sports Teams ──
-  { canonical: "new york yankees", aliases: ["yankees", "n y yankees", "new york yankees", "yankeees"], descriptors: ["yankees logo", "yankees cap logo", "ny interlocking logo", "yankees emblem", "yankee logo"] },
-  { canonical: "los angeles lakers", aliases: ["lakers", "la lakers", "los angeles lakers", "lak3rs"], descriptors: ["lakers logo", "lakers emblem", "purple gold lakers logo"] },
-  { canonical: "chicago bulls", aliases: ["bulls", "chicago bulls", "chi bulls", "bullss"], descriptors: ["bulls logo", "angry bull logo", "chicago bulls emblem", "bull head logo"] },
-  { canonical: "boston celtics", aliases: ["celtics", "boston celtics", "celticss"], descriptors: ["celtics logo", "leprechaun logo celtics", "clover logo celtics"] },
-  { canonical: "golden state warriors", aliases: ["warriors", "golden state warriors", "gs warriors", "warriorss"], descriptors: ["warriors logo", "golden state warriors emblem", "bay bridge logo warriors"] },
-  { canonical: "dallas cowboys", aliases: ["cowboys", "dallas cowboys", "dal cowboys", "cowboyss"], descriptors: ["cowboys logo", "dallas star logo", "cowboys star", "lone star logo cowboys"] },
+  { canonical: "new york yankees", aliases: ["yankees", "new york yankees", "yankeees"], descriptors: ["yankees logo", "yankees cap logo", "ny interlocking logo", "yankees emblem"] },
+  { canonical: "los angeles lakers", aliases: ["lakers", "la lakers", "los angeles lakers"], descriptors: ["lakers logo", "lakers emblem", "purple gold lakers logo"] },
+  { canonical: "chicago bulls", aliases: ["chicago bulls", "chi bulls"], descriptors: ["bulls logo", "chicago bulls emblem", "bull head logo"] },
+  { canonical: "boston celtics", aliases: ["celtics", "boston celtics"], descriptors: ["celtics logo", "leprechaun logo celtics", "clover logo celtics"] },
+  { canonical: "golden state warriors", aliases: ["golden state warriors", "gs warriors"], descriptors: ["warriors logo", "golden state warriors emblem", "bay bridge logo warriors"] },
+  { canonical: "dallas cowboys", aliases: ["cowboys", "dallas cowboys", "dal cowboys"], descriptors: ["cowboys logo", "dallas star logo", "cowboys star"] },
   { canonical: "new england patriots", aliases: ["patriots", "new england patriots", "ne patriots"], descriptors: ["patriots logo", "patriot head logo", "minuteman logo"] },
-  { canonical: "green bay packers", aliases: ["packers", "green bay packers", "gb packers"], descriptors: ["packers logo", "g logo packers", "green bay g logo"] },
-  { canonical: "miami heat", aliases: ["heat", "miami heat", "mia heat"], descriptors: ["miami heat logo", "heat flame logo"] },
-  { canonical: "real madrid", aliases: ["real madrid", "realmadrid", "real mdrid"], descriptors: ["real madrid logo", "real madrid crest", "real madrid emblem"] },
-  { canonical: "barcelona", aliases: ["barcelona", "fc barcelona", "barca", "barcelona fc"], descriptors: ["barcelona logo", "barca crest", "fc barcelona emblem"] },
+  { canonical: "green bay packers", aliases: ["green bay packers", "gb packers"], descriptors: ["packers logo", "green bay g logo"] },
+  { canonical: "miami heat", aliases: ["miami heat", "mia heat"], descriptors: ["miami heat logo", "heat flame logo"] },
+  { canonical: "real madrid", aliases: ["real madrid", "realmadrid"], descriptors: ["real madrid logo", "real madrid crest", "real madrid emblem"] },
+  { canonical: "barcelona", aliases: ["fc barcelona", "barca", "barcelona fc"], descriptors: ["barcelona logo", "barca crest", "fc barcelona emblem"] },
   { canonical: "manchester united", aliases: ["manchester united", "man utd", "manu", "man united", "manchester utd"], descriptors: ["manchester united logo", "man utd crest", "red devil logo man united"] },
-  { canonical: "liverpool", aliases: ["liverpool", "liverpool fc", "lfc", "liverpoo"], descriptors: ["liverpool logo", "liverpool crest", "liverpool bird emblem"] },
+  { canonical: "liverpool", aliases: ["liverpool", "liverpool fc", "lfc"], descriptors: ["liverpool logo", "liverpool crest", "liverpool bird emblem"] },
   // ── Entertainment ──
-  { canonical: "disney", aliases: ["disney", "d1sney", "disneey", "walt disney"], descriptors: ["disney logo", "disney castle", "disney wordmark", "disney emblem"] },
-  { canonical: "marvel", aliases: ["marvel", "m4rvel", "marvell", "marvel studios"], descriptors: ["marvel logo", "marvel studios logo", "marvel red logo", "marvel emblem"] },
-  { canonical: "dc comics", aliases: ["dc comics", "dc", "d.c."], descriptors: ["dc logo", "dc comics logo", "dc emblem"] },
-  { canonical: "warner bros", aliases: ["warner bros", "warner brothers", "wb logo", "w b logo"], descriptors: ["warner bros logo", "wb shield logo", "warner brothers emblem"] },
+  { canonical: "disney", aliases: ["disney", "d1sney", "disneey", "walt disney"], descriptors: ["disney logo", "disney castle", "disney wordmark"] },
+  { canonical: "marvel", aliases: ["marvel", "m4rvel", "marvell", "marvel studios"], descriptors: ["marvel logo", "marvel studios logo", "marvel emblem"] },
+  { canonical: "dc comics", aliases: ["dc comics"], descriptors: ["dc logo", "dc comics logo", "dc emblem"] },
+  { canonical: "warner bros", aliases: ["warner bros", "warner brothers"], descriptors: ["warner bros logo", "wb shield logo", "warner brothers emblem"] },
   { canonical: "pixar", aliases: ["pixar", "p1xar", "pixarr"], descriptors: ["pixar logo", "pixar lamp", "luxo lamp logo"] },
   { canonical: "netflix", aliases: ["netflix", "netfl1x", "netflixx", "nflix"], descriptors: ["netflix logo", "netflix n logo", "red n logo netflix"] },
   { canonical: "hbo", aliases: ["hbo", "h.b.o."], descriptors: ["hbo logo", "hbo max logo"] },
-  { canonical: "spotify", aliases: ["spotify", "spot1fy", "spotifyy"], descriptors: ["spotify logo", "spotify green circle logo", "three sound waves logo"] },
+  { canonical: "spotify", aliases: ["spotify", "spot1fy", "spotifyy"], descriptors: ["spotify logo", "spotify green circle logo", "three sound waves logo spotify"] },
   // ── Food / Beverage / Retail ──
-  { canonical: "coca cola", aliases: ["coca cola", "cocacola", "coca-cola", "coke", "c0ca c0la"], descriptors: ["coca cola logo", "coke logo", "coca cola script logo", "coca cola wordmark"] },
-  { canonical: "pepsi", aliases: ["pepsi", "p3psi", "pepsii"], descriptors: ["pepsi logo", "pepsi circle logo", "red blue white circle logo pepsi"] },
-  { canonical: "starbucks", aliases: ["starbucks", "starbuckss", "star bucks", "starbux"], descriptors: ["starbucks logo", "starbucks siren", "green mermaid logo starbucks", "starbucks siren logo"] },
-  { canonical: "mcdonalds", aliases: ["mcdonalds", "mcdonald's", "mcd", "mc donalds", "mcdonaldss"], descriptors: ["mcdonalds logo", "golden arches logo", "m arches logo", "mcdonalds arches"] },
+  { canonical: "coca cola", aliases: ["coca cola", "cocacola", "coca-cola", "coke"], descriptors: ["coca cola logo", "coke logo", "coca cola script logo", "coca cola wordmark"] },
+  { canonical: "pepsi", aliases: ["pepsi", "p3psi", "pepsii"], descriptors: ["pepsi logo", "pepsi circle logo"] },
+  { canonical: "starbucks", aliases: ["starbucks", "star bucks", "starbux"], descriptors: ["starbucks logo", "starbucks siren", "green mermaid logo starbucks"] },
+  { canonical: "mcdonalds", aliases: ["mcdonalds", "mcdonald's", "mcd", "mc donalds"], descriptors: ["mcdonalds logo", "golden arches logo", "m arches logo"] },
   // ── Automotive ──
-  { canonical: "ferrari", aliases: ["ferrari", "f3rrari", "ferrarri"], descriptors: ["ferrari logo", "ferrari prancing horse", "prancing horse logo", "ferrari emblem", "yellow shield ferrari"] },
-  { canonical: "lamborghini", aliases: ["lamborghini", "lamborghni", "lambo", "lamborgh1ni"], descriptors: ["lamborghini logo", "lamborghini bull", "charging bull logo lamborghini"] },
-  { canonical: "porsche", aliases: ["porsche", "porshe", "p0rsche"], descriptors: ["porsche logo", "porsche crest", "stuttgart coat of arms porsche"] },
-  { canonical: "mercedes benz", aliases: ["mercedes", "mercedes benz", "mercedez", "merc"], descriptors: ["mercedes logo", "three point star logo", "mercedes star", "mercedes emblem"] },
-  { canonical: "bmw", aliases: ["bmw", "b.m.w.", "b m w"], descriptors: ["bmw logo", "bmw roundel", "blue white circle logo bmw", "bmw emblem"] },
+  { canonical: "ferrari", aliases: ["ferrari", "f3rrari", "ferrarri"], descriptors: ["ferrari logo", "ferrari prancing horse", "prancing horse logo"] },
+  { canonical: "lamborghini", aliases: ["lamborghini", "lambo"], descriptors: ["lamborghini logo", "lamborghini bull", "charging bull logo lamborghini"] },
+  { canonical: "porsche", aliases: ["porsche", "porshe"], descriptors: ["porsche logo", "porsche crest"] },
+  { canonical: "mercedes benz", aliases: ["mercedes", "mercedes benz", "mercedez"], descriptors: ["mercedes logo", "three point star logo", "mercedes star", "mercedes emblem"] },
+  { canonical: "bmw", aliases: ["bmw", "b.m.w."], descriptors: ["bmw logo", "bmw roundel", "blue white circle logo bmw", "bmw emblem"] },
   { canonical: "tesla", aliases: ["tesla", "t3sla", "teslaa"], descriptors: ["tesla logo", "tesla t logo", "tesla emblem"] },
 ];
 
-/** Generic logo-shaped descriptor phrases blocked without naming a brand. */
-const GENERIC_LOGO_PHRASES_S: string[] = [
-  "logo on chest", "logo on the chest", "brand logo", "branded logo", "brand mark",
-  "brand symbol", "trademarked logo", "trademark logo", "copyrighted logo",
-  "sponsor logo", "sponsor mark", "official logo", "real logo", "actual logo",
-  "branded emblem", "branded symbol", "branded patch", "branded jersey", "branded hat",
-  "branded shoes", "branded uniform", "designer logo", "designer monogram",
-  "designer pattern", "designer emblem", "real brand", "real company logo",
-  "real team logo", "real team uniform", "real jersey", "official team jersey",
-  "official team uniform", "team logo", "league logo", "school logo", "university logo",
-  "watermark", "copyrighted character", "copyrighted character insignia",
-  "branded text", "readable brand name", "brand name on", "brand name text",
+/** Context terms that, when paired with a brand name, indicate mark reproduction. */
+const CONTEXT_TERMS_S: string[] = [
+  "logo", "emblem", "mark", "symbol", "monogram", "monogrammed", "branded", "brand",
+  "trademark", "trademarked", "jersey", "hat", "cap", "shoe", "shoes", "sneaker",
+  "sneakers", "uniform", "patch", "badge", "insignia", "crest", "seal", "wordmark",
+  "jumpman", "swoosh", "trefoil", "pattern", "print", "design", "icon", "sign",
 ];
+
+/** Brands that are also common English words — require a context term to block. */
+const AMBIGUOUS_BRANDS_S = new Set([
+  "apple", "heat", "bulls", "warriors", "packers", "patriots", "barcelona", "threads",
+  "xbox", "hbo", "dc", "lv", "ua", "nb", "mc", "playstation", "champion", "supreme",
+  "tesla", "fifa", "uefa", "ncaa", "mls",
+]);
+
+/** Negation patterns — when present, the text is explicitly excluding logos. */
+const NEGATION_PATTERNS_S = [
+  /\bno\s+brands?\b/i,
+  /\bno\s+logos?\b/i,
+  /\bwithout\s+(?:any\s+)?(?:brands?|logos?|branding)\b/i,
+  /\bunbranded\b/i,
+  /\bno\s+(?:company|team|brand)\s+(?:symbols?|marks?|logos?|emblems?)\b/i,
+  /\bno\s+(?:real\s+)?(?:brand|company|team)\s+(?:names?|logos?)\b/i,
+  /\bwithout\s+(?:real\s+)?(?:brand|company|team)\s+(?:logos?|marks?)\b/i,
+  /\bavoid\s+(?:all\s+)?(?:brands?|logos?|branding)\b/i,
+  /\bno\s+real\s+(?:brands?|logos?|company\s+logos?|team\s+logos?)\b/i,
+  /\boriginal\s+(?:emblem|logo|symbol|insignia|design)\b/i,
+  /\bfictional\s+(?:emblem|logo|symbol|insignia|design|company)\b/i,
+  /\bgeneric\s+(?:emblem|logo|symbol|insignia|design|clothing|shoes?|athletic)\b/i,
+  /\bgeneric\s+(?:three|3)\s+line\s+pattern\b/i,
+];
+
+function hasNegationS(rawText: string): boolean {
+  return NEGATION_PATTERNS_S.some((p) => p.test(rawText));
+}
 
 /**
  * Normalize text for brand detection: lowercase, collapse whitespace,
- * apply leet-speak substitutions, remove spaces between letters.
+ * apply conservative leet-speak substitutions, collapse spaced letters.
+ * Does NOT remove all spaces or collapse all repeated chars (avoids false positives).
  */
 function normalizeForBrandCheckS(raw: string): string {
   let s = (raw ?? "").toLowerCase().trim();
   s = s.replace(/\s+/g, " ");
-  // Leet-speak substitutions
+  // Conservative leet-speak substitutions — only between letters
   s = s
-    .replace(/3/g, "e").replace(/1/g, "i").replace(/0/g, "o").replace(/@/g, "a")
-    .replace(/\$/g, "s").replace(/7/g, "t").replace(/4/g, "a").replace(/8/g, "b")
-    .replace(/9/g, "g").replace(/2/g, "z");
-  // Remove non-alphanumeric except spaces and hyphens
-  s = s.replace(/[^a-z0-9 \-]/g, " ");
-  s = s.replace(/\s+/g, " ").trim();
+    .replace(/(?<=[a-z])3(?=[a-z])/g, "e")
+    .replace(/(?<=[a-z])1(?=[a-z])/g, "i")
+    .replace(/(?<=[a-z])0(?=[a-z])/g, "o")
+    .replace(/(?<=[a-z])@(?=[a-z])/g, "a")
+    .replace(/(?<=[a-z])\$(?=[a-z])/g, "s")
+    .replace(/(?<=[a-z])7(?=[a-z])/g, "t")
+    .replace(/(?<=[a-z])4(?=[a-z])/g, "a")
+    .replace(/(?<=[a-z])8(?=[a-z])/g, "b");
   // Collapse spaces between single letters: "n i k e" → "nike"
-  s = s.replace(/([a-z]) ([a-z]) ([a-z]) ([a-z])/g, "$1$2$3$4");
-  s = s.replace(/([a-z]) ([a-z]) ([a-z])/g, "$1$2$3");
-  s = s.replace(/([a-z]) ([a-z])/g, "$1$2");
-  // Collapse hyphens: "n-i-k-e" → "nike"
+  s = s.replace(/\b([a-z]) (?=[a-z](?: [a-z]){1,4}\b)/g, (_, g1) => g1);
+  s = s.replace(/([a-z]) ([a-z]) ([a-z]) ([a-z])\b/g, "$1$2$3$4");
+  s = s.replace(/([a-z]) ([a-z]) ([a-z])\b/g, "$1$2$3");
+  s = s.replace(/([a-z]) ([a-z])\b/g, "$1$2");
+  // Collapse hyphens between single letters: "n-i-k-e" → "nike"
   s = s.replace(/([a-z])-([a-z])-([a-z])-([a-z])/g, "$1$2$3$4");
   s = s.replace(/([a-z])-([a-z])-([a-z])/g, "$1$2$3");
   s = s.replace(/([a-z])-([a-z])/g, "$1$2");
-  // Collapse 3+ repeated chars to 2
-  s = s.replace(/(.)\1{2,}/g, "$1$1");
   return s.replace(/\s+/g, " ").trim();
 }
 
-/** Detect a prohibited brand in a normalized text string. */
-function detectBrandInTextS(normalized: string): { canonical: string; category: string } | null {
+/** Word-boundary match — prevents "heat" matching inside "wheat". */
+function matchesWordBoundaryS(text: string, term: string): boolean {
+  if (term.length < 2) return false;
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${escaped}\\b`, "i").test(text);
+}
+
+function hasContextTermS(text: string): boolean {
+  return CONTEXT_TERMS_S.some((t) => matchesWordBoundaryS(text, t));
+}
+
+/**
+ * Detect a prohibited brand in a normalized text string.
+ * Relaxed logic matching the client:
+ *  1. Negation phrases skip blocking entirely.
+ *  2. Descriptors (explicit mark reproduction) always block.
+ *  3. Brand names/aliases block only with a context term for ambiguous brands.
+ */
+function detectBrandInTextS(normalized: string, rawText: string): { canonical: string; category: string } | null {
+  // Negation check — user is explicitly excluding logos
+  if (hasNegationS(rawText)) return null;
+
+  const hasContext = hasContextTermS(normalized);
+
   for (const brand of PROHIBITED_BRANDS_S) {
-    if (normalized.includes(brand.canonical)) {
-      return { canonical: brand.canonical, category: "brand_name" };
-    }
-    for (const alias of brand.aliases) {
-      if (alias.length >= 2 && normalized.includes(alias)) {
-        return { canonical: brand.canonical, category: "brand_alias" };
-      }
-    }
+    // Descriptors always block — they explicitly request a recognizable mark
     for (const desc of brand.descriptors) {
-      if (desc.length >= 3 && normalized.includes(normalizeForBrandCheckS(desc))) {
-        return { canonical: brand.canonical, category: "brand_descriptor" };
+      if (desc.length >= 3) {
+        const normalizedDesc = desc.toLowerCase().trim();
+        if (normalized.includes(normalizedDesc)) {
+          return { canonical: brand.canonical, category: "brand_descriptor" };
+        }
       }
     }
-  }
-  for (const phrase of GENERIC_LOGO_PHRASES_S) {
-    const np = normalizeForBrandCheckS(phrase);
-    if (np.length >= 3 && normalized.includes(np)) {
-      return { canonical: phrase, category: "generic_logo_phrase" };
+    // Canonical name — word-boundary match
+    if (matchesWordBoundaryS(normalized, brand.canonical)) {
+      const isAmbiguous = AMBIGUOUS_BRANDS_S.has(brand.canonical);
+      if (!isAmbiguous || hasContext) {
+        return { canonical: brand.canonical, category: "brand_name" };
+      }
+    }
+    // Aliases — word-boundary match
+    for (const alias of brand.aliases) {
+      if (alias.length < 2) continue;
+      if (matchesWordBoundaryS(normalized, alias)) {
+        const isAmbiguous = AMBIGUOUS_BRANDS_S.has(alias) || AMBIGUOUS_BRANDS_S.has(brand.canonical);
+        if (!isAmbiguous || hasContext) {
+          return { canonical: brand.canonical, category: "brand_alias" };
+        }
+      }
     }
   }
   return null;
@@ -9332,14 +9386,12 @@ function validateForgeDraftS(
   draft: Record<string, unknown>,
   prompt: string,
 ): BrandGuardResultS {
-  // Check individual draft fields
   const fieldsToCheck: Array<{ label: string; value: string }> = [
     { label: "name", value: str(draft.name) },
     { label: "styleNotes", value: str(draft.styleNotes) },
     { label: "pose", value: str(draft.pose) },
   ];
 
-  // Check appearance fields (headwear, body, footwear, accessories)
   const appearance = draft.appearance;
   if (appearance && typeof appearance === "object") {
     const appMap = appearance as Record<string, string>;
@@ -9354,15 +9406,15 @@ function validateForgeDraftS(
     const val = (field.value ?? "").trim();
     if (val.length === 0) continue;
     const normalized = normalizeForBrandCheckS(val);
-    const detection = detectBrandInTextS(normalized);
+    const detection = detectBrandInTextS(normalized, val);
     if (detection) {
       return { blocked: true, fieldLabel: field.label, category: detection.category };
     }
   }
 
-  // Also check the combined prompt (catches anything injected via style instructions)
+  // Also check the combined prompt
   const normalizedPrompt = normalizeForBrandCheckS(prompt);
-  const promptDetection = detectBrandInTextS(normalizedPrompt);
+  const promptDetection = detectBrandInTextS(normalizedPrompt, prompt);
   if (promptDetection) {
     return { blocked: true, fieldLabel: "prompt", category: promptDetection.category };
   }
