@@ -5,7 +5,7 @@ import { useAuth } from "@/providers/AuthProvider";
 import { useProfile } from "@/providers/ProfileProvider";
 import { useEdge } from "@/providers/EdgeProvider";
 import { supabase } from "@/lib/supabase";
-import { runForge, type RunForgeMode, type RunForgeResult } from "@/services/forge";
+import { runForge, type RunForgeMode, type RunForgeResult, type RunForgeSuccess } from "@/services/forge";
 import { buildForgePrompt, buildForgeSummary, type ForgePromptOptions } from "@/services/imagePrompt";
 import { getForgeCost, type EdgeReason } from "@/services/edge";
 import type { EagohDraft } from "@/services/eagohs";
@@ -21,20 +21,26 @@ import { startupLog } from "@/utils/startupLogger";
  *   3. UI calls `confirmForge()` → delegates to secure worker `/forge/generate`:
  *        - Worker verifies auth, tier, EAGOH limit, Neuron balance
  *        - Worker generates image server-side (OpenAI key never on client)
+ *        - Worker reviews image for logos, regenerates if needed
  *        - Worker creates/updates EAGOH row
  *        - Worker deducts Neurons atomically (refunds on failure)
  *   4. UI calls `cancelForge()` to dismiss the preview safely.
  *
  * NO client-side Edge deduction — the worker is the single source of truth.
  * If image gen fails, the worker rolls back and no Neurons are charged.
+ *
+ * SUCCESS ISOLATION: Once the backend confirms success (image saved, EAGOH
+ * row created, neurons deducted), the Forge is considered successful. UI
+ * refresh failures (profile query invalidation, balance refetch, navigation)
+ * do NOT convert a successful Forge into an error.
  */
 
 export type ForgeMode = RunForgeMode;
 
 /** Loading stage labels surfaced to the UI during generation. */
-export type ForgeStage = "idle" | "authenticating" | "generating" | "persisting" | "done";
+export type ForgeStage = "idle" | "authenticating" | "generating" | "reviewing" | "persisting" | "done";
 
-const STAGE_FLOW: ForgeStage[] = ["authenticating", "generating", "persisting"];
+const STAGE_FLOW: ForgeStage[] = ["authenticating", "generating", "reviewing", "persisting"];
 
 export type ForgePending = {
   mode: ForgeMode;
@@ -114,6 +120,16 @@ export const [ForgeProvider, useForge] = createContextHook(() => {
     setStage("idle");
   }, []);
 
+  /**
+   * Dismiss the success result and reset for another Forge.
+   * Does NOT reset the Forge form — that's the caller's responsibility.
+   */
+  const dismissResult = useCallback((): void => {
+    setLastResult(null);
+    setPending(null);
+    setStage("idle");
+  }, []);
+
   const confirmMutation = useMutation({
     mutationFn: async (): Promise<RunForgeResult> => {
       if (!pending) throw new Error("No forge pending confirmation.");
@@ -153,7 +169,7 @@ export const [ForgeProvider, useForge] = createContextHook(() => {
           }
           return prev;
         });
-      }, 3000);
+      }, 4000);
 
       try {
         // Delegate entirely to the secure worker — no client-side Edge deduction.
@@ -173,25 +189,51 @@ export const [ForgeProvider, useForge] = createContextHook(() => {
       }
     },
     onSuccess: (result) => {
+      // ── Store the result FIRST — this is the source of truth for success ──
+      // The Forge succeeded if result.ok is true, regardless of whether
+      // the subsequent cache invalidations succeed.
       setLastResult(result);
+
       if (result.ok) {
-        // Refresh the EAGOH list cache so the new render shows up.
-        queryClient.invalidateQueries({ queryKey: ["eagohs", user?.id ?? "anon"] });
-        if (pending?.eagohId) {
-          queryClient.invalidateQueries({ queryKey: ["eagoh", pending.eagohId] });
+        // ── BEST-effort cache refresh — failures here do NOT affect success ──
+        // We wrap each invalidation/refetch in a catch so a failed query
+        // refresh never converts a successful Forge into an error.
+        try {
+          queryClient.invalidateQueries({ queryKey: ["eagohs", user?.id ?? "anon"] });
+        } catch (e) {
+          console.warn("[ForgeProvider] eagohs invalidation failed (non-fatal):", e);
         }
-        // ── Invalidate and refetch the profile from Supabase so the
-        // displayed Neuron balance reflects the worker's atomic deduction.
-        queryClient.invalidateQueries({ queryKey: ["profile", user?.id ?? "anon"] });
-        queryClient.refetchQueries({ queryKey: ["profile", user?.id ?? "anon"] });
-        queryClient.invalidateQueries({ queryKey: ["edge", "transactions", user?.id ?? "anon"] });
-        setPending(null);
+        if (pending?.eagohId) {
+          try {
+            queryClient.invalidateQueries({ queryKey: ["eagoh", pending.eagohId] });
+          } catch (e) {
+            console.warn("[ForgeProvider] eagoh invalidation failed (non-fatal):", e);
+          }
+        }
+        try {
+          queryClient.invalidateQueries({ queryKey: ["profile", user?.id ?? "anon"] });
+          queryClient.refetchQueries({ queryKey: ["profile", user?.id ?? "anon"] }).catch(() => {});
+        } catch (e) {
+          console.warn("[ForgeProvider] profile refetch failed (non-fatal):", e);
+        }
+        try {
+          queryClient.invalidateQueries({ queryKey: ["edge", "transactions", user?.id ?? "anon"] });
+        } catch (e) {
+          console.warn("[ForgeProvider] edge transactions invalidation failed (non-fatal):", e);
+        }
+        // ── Do NOT clear pending here — the success modal needs it ──
+        // The caller (forge.tsx) will dismiss the result via dismissResult()
+        // after the user acknowledges the success modal.
         setStage("idle");
       } else if (result.reason === "balance") {
         // Balance check failed — invalidate and refetch the profile cache
         // so the UI refreshes with the real DB balance.
-        queryClient.invalidateQueries({ queryKey: ["profile", user?.id ?? "anon"] });
-        queryClient.refetchQueries({ queryKey: ["profile", user?.id ?? "anon"] });
+        try {
+          queryClient.invalidateQueries({ queryKey: ["profile", user?.id ?? "anon"] });
+          queryClient.refetchQueries({ queryKey: ["profile", user?.id ?? "anon"] }).catch(() => {});
+        } catch (e) {
+          console.warn("[ForgeProvider] balance-fail profile refetch failed (non-fatal):", e);
+        }
       }
     },
     onError: () => {
@@ -208,12 +250,13 @@ export const [ForgeProvider, useForge] = createContextHook(() => {
       prepareForge,
       cancelForge,
       confirmForge,
+      dismissResult,
       isGenerating: confirmMutation.isPending || isEdgeMutating,
       canAfford: pending ? edgeTotal >= pending.edgeCost : true,
       edgeTotal,
       stage,
     }),
-    [pending, lastResult, prepareForge, cancelForge, confirmForge, confirmMutation.isPending, isEdgeMutating, edgeTotal, stage],
+    [pending, lastResult, prepareForge, cancelForge, confirmForge, dismissResult, confirmMutation.isPending, isEdgeMutating, edgeTotal, stage],
   );
 
   startupLog("ForgeProvider", "success");

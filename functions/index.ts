@@ -1,5 +1,5 @@
 /**
-// EAGOH Analyst Chat — Cloudflare Worker (v4-relaxed-brandguard)
+// EAGOH Analyst Chat — Cloudflare Worker (v4-forge-fix)
  * Phase RETAINED-OI-2 — Trusted purchase reversal status (record_exchange_purchase_reversal RPC)
  * Phase RETAINED-OI-1 + Cap — Retained Exchange Intelligence + 25% Cumulative Cap
   * Phase 12A — Social sharing + faction invite by email/username
@@ -9461,10 +9461,10 @@ async function reviewForgeImageForLogos(
     "",
     "RULES:",
     "1. APPROVE images with NO recognizable real-world logos or brand marks.",
-    "2. REJECT if you see any recognizable: company logo, brand mark, sports-team logo, league logo, school logo, designer monogram, branded text, sponsor mark, trademarked emblem, copyrighted character insignia, or suspicious logo-like symbol strongly resembling a real brand.",
-    "3. APPROVE original fictional emblems, original letter marks, generic clothing, generic equipment, generic patterns, and color combinations — these are allowed.",
+    "2. REJECT ONLY if you clearly recognize a real: company logo, brand mark, sports-team logo, league logo, school logo, designer monogram, branded text, sponsor mark, or trademarked emblem.",
+    "3. APPROVE original fictional emblems, original letter marks, generic geometric shapes, plain stripes, ordinary clothing details, generic letters, mechanical panel markings, abstract cybernetic designs, generic patterns, and color combinations — these are allowed.",
     "4. REJECT if you see readable real brand names as text on the image.",
-    "5. REJECT logo-shaped chest emblems, branded hat symbols, branded shoe marks, branded jersey patches, or sponsor graphics that resemble real brands.",
+    "5. Do NOT reject merely because a symbol is uncertain or low-confidence. Only reject when you can reasonably identify a specific real-world brand or organization mark.",
     "6. Set confidence to 0.0 if you cannot determine the result.",
     "7. Return ONLY the JSON object — no other text.",
   ].join("\n");
@@ -9487,7 +9487,7 @@ async function reviewForgeImageForLogos(
             role: "user",
             content: [
               { type: "text", text: "Review this EAGOH character image for prohibited real-world logos or brand marks. Return the review JSON." },
-              { type: "image_url", image_url: { url: `data:image/png;base64,${base64Image}`, detail: "high" } },
+              { type: "image_url", image_url: { url: `data:image/png;base64,${base64Image}`, detail: "low" } },
             ],
           },
         ],
@@ -9533,70 +9533,85 @@ async function generateAndReviewForgeImage(
   // ── Attempt 1: standard prompt + anti-logo suffix ──
   const fullPrompt = `${basePrompt} — ${ANTI_LOGO_PROMPT_SUFFIX_S}`;
 
+  const t0 = Date.now();
   let base64Image: string;
   try {
     base64Image = await callOpenAiImageGen(fullPrompt, size, env);
   } catch (err) {
-    console.warn("[forge] image generation error (attempt 1)", { message: err instanceof Error ? err.message : "unknown" });
+    console.warn("[forge] image generation error (attempt 1)", { message: err instanceof Error ? err.message : "unknown", duration: Date.now() - t0 });
     return { ok: false, error: "Image generation could not be completed.", reviewResult: "review_failed" };
   }
+  const genDuration = Date.now() - t0;
+  console.log("[forge:timing] image generation (attempt 1)", { durationMs: genDuration });
 
   // ── Review attempt 1 ──
+  const t1 = Date.now();
   const review1 = await reviewForgeImageForLogos(base64Image, env);
+  const review1Duration = Date.now() - t1;
+  console.log("[forge:timing] logo review (attempt 1)", { durationMs: review1Duration, result: review1 ? (review1.approved ? "approved" : "rejected") : "null" });
 
-  if (review1 && review1.approved && review1.confidence >= 0.85) {
+  // ── If review service failed (null), return a retryable error — do NOT regenerate ──
+  if (!review1) {
+    console.warn("[forge:logo-review] attempt 1 review service failure — returning retryable error");
+    return { ok: false, error: "We could not complete the image safety review. Please try again.", reviewResult: "review_failed" };
+  }
+
+  // ── Approved: accept if approved (regardless of confidence) OR if no logo detected ──
+  if (review1.approved || !review1.recognizable_logo_detected) {
     console.log("[forge:logo-review] attempt 1 approved", { confidence: review1.confidence });
     return { ok: true, base64Image, review: review1, regenerated: false };
   }
 
-  if (review1 && !review1.approved) {
-    console.log("[forge:logo-review] attempt 1 rejected", {
-      brand: review1.brand_name_detected,
-      location: review1.logo_location,
-      confidence: review1.confidence,
-    });
-  } else if (!review1) {
-    console.warn("[forge:logo-review] attempt 1 review failed (AI call returned null)");
+  // ── Rejected: only regenerate if a recognizable logo was detected with reasonable confidence ──
+  if (!review1.recognizable_logo_detected || review1.confidence < 0.7) {
+    // Low confidence or no specific logo detected — approve to avoid false regenerations
+    console.log("[forge:logo-review] attempt 1 low-confidence rejection — approving", { confidence: review1.confidence });
+    return { ok: true, base64Image, review: review1, regenerated: false };
   }
 
+  console.log("[forge:logo-review] attempt 1 rejected — regenerating", {
+    brand: review1.brand_name_detected,
+    location: review1.logo_location,
+    confidence: review1.confidence,
+  });
+
   // ── Attempt 2: stronger anti-logo retry suffix ──
+  const t2 = Date.now();
   const retryPrompt = `${basePrompt} — ${ANTI_LOGO_RETRY_SUFFIX_S}`;
   let retryBase64: string;
   try {
     retryBase64 = await callOpenAiImageGen(retryPrompt, size, env);
   } catch (err) {
-    console.warn("[forge] image generation error (retry)", { message: err instanceof Error ? err.message : "unknown" });
-    // If the first image was reviewed but failed, and retry generation also failed, block.
-    if (review1 && !review1.approved) {
-      return { ok: false, error: "We detected a real-world logo in the generated image and removed it. Please try a more generic description.", reviewResult: "rejected" };
-    }
-    return { ok: false, error: "Image generation could not be completed.", reviewResult: "review_failed" };
+    console.warn("[forge] image generation error (retry)", { message: err instanceof Error ? err.message : "unknown", duration: Date.now() - t2 });
+    return { ok: false, error: "We detected a real-world logo in the generated image and removed it. Please try a more generic description.", reviewResult: "rejected" };
   }
+  const retryGenDuration = Date.now() - t2;
+  console.log("[forge:timing] image generation (attempt 2/regeneration)", { durationMs: retryGenDuration });
 
   // ── Review attempt 2 ──
+  const t3 = Date.now();
   const review2 = await reviewForgeImageForLogos(retryBase64, env);
+  const review2Duration = Date.now() - t3;
+  console.log("[forge:timing] logo review (attempt 2)", { durationMs: review2Duration, result: review2 ? (review2.approved ? "approved" : "rejected") : "null" });
 
-  if (review2 && review2.approved && review2.confidence >= 0.85) {
+  if (!review2) {
+    // Review service failed on second attempt — return retryable error, do NOT charge
+    console.warn("[forge:logo-review] attempt 2 review service failure — returning retryable error");
+    return { ok: false, error: "We could not complete the image safety review. Please try again.", reviewResult: "review_failed" };
+  }
+
+  if (review2.approved || !review2.recognizable_logo_detected) {
     console.log("[forge:logo-review] attempt 2 (regeneration) approved", { confidence: review2.confidence });
     return { ok: true, base64Image: retryBase64, review: review2, regenerated: true };
   }
 
-  if (review2 && !review2.approved) {
-    console.log("[forge:logo-review] attempt 2 rejected", {
-      brand: review2.brand_name_detected,
-      location: review2.logo_location,
-      confidence: review2.confidence,
-    });
-    return { ok: false, error: "We detected a real-world logo in the generated image and removed it. Please try a more generic description.", reviewResult: "rejected" };
-  }
-
-  // review2 was null (AI call failed on second review)
-  console.warn("[forge:logo-review] attempt 2 review failed (AI call returned null)");
-  if (review1 && !review1.approved) {
-    return { ok: false, error: "We detected a real-world logo in the generated image and removed it. Please try a more generic description.", reviewResult: "rejected" };
-  }
-  // If both reviews failed (null), we cannot safely approve — block to be safe.
-  return { ok: false, error: "Image review could not be completed. Please try again.", reviewResult: "review_failed" };
+  // Second rejection — block with user-friendly message
+  console.log("[forge:logo-review] attempt 2 rejected", {
+    brand: review2.brand_name_detected,
+    location: review2.logo_location,
+    confidence: review2.confidence,
+  });
+  return { ok: false, error: "We detected a real-world logo in the generated image and removed it. Please try a more generic description.", reviewResult: "rejected" };
 }
 
 /** Low-level OpenAI image generation call. Returns base64 string. */
@@ -9629,6 +9644,7 @@ async function callOpenAiImageGen(prompt: string, size: string, env: Env): Promi
 }
 
 async function handleForgeGenerate(request: Request, env: Env): Promise<Response> {
+  const forgeStartTime = Date.now();
   if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
     return jsonResponse({ ok: false, error: "Backend not configured." }, 503);
   }
@@ -9892,6 +9908,7 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
     console.log("[forge] image rejected or review failed", {
       userIdPrefix: userId.slice(0, 8),
       reviewResult: genResult.reviewResult,
+      totalDurationMs: Date.now() - forgeStartTime,
     });
     const status = genResult.reviewResult === "rejected" ? 422 : 502;
     return jsonResponse({ ok: false, error: genResult.error }, status);
@@ -10074,6 +10091,7 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
     meta: { model: "gpt-image-1", scope: str(payload.scope, "full") },
   }).then(() => {}).catch(() => {});
 
+  const totalBackendDuration = Date.now() - forgeStartTime;
   console.log("[forge] completed successfully", {
     userIdPrefix: userId.slice(0, 8),
     mode,
@@ -10084,16 +10102,23 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
     fromPurchased,
     nextSub,
     nextPurchased,
+    totalDurationMs: totalBackendDuration,
+    regenerated: genResult.regenerated,
   });
 
   return jsonResponse({
     ok: true,
     eagoh: eagohRecord,
+    eagohId,
     imageUrl,
     thumbUrl: imageUrl,
     prompt,
     edgeCost,
+    charged: edgeCost,
+    regenerated: genResult.regenerated,
     balanceAfter: { subscription: nextSub, purchased: nextPurchased },
+    subscriptionBalance: nextSub,
+    purchasedBalance: nextPurchased,
   });
 }
 

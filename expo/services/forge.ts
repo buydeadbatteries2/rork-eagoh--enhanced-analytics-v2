@@ -7,18 +7,16 @@
  *   - Tier check + EAGOH limit check
  *   - Neuron balance check + atomic deduction
  *   - OpenAI image generation (key never reaches the client)
+ *   - Post-generation logo review with safe regeneration
  *   - EAGOH row create/update
  *   - Image generation history log
  *
  * If any step fails after image generation, the worker rolls back and
  * no Neurons are charged — the client never needs to refund.
- *
- * Edge deduction is NOT performed on the client — the worker is the
- * single source of truth for the atomic transaction.
  */
 
 import { buildForgePrompt, type ForgePromptInput, type ForgePromptOptions } from "@/services/imagePrompt";
-import { generateEagohImage, type ImageGenSize } from "@/services/imageGen";
+import { generateEagohImage, type ImageGenSize, type ForgeBalanceAfter } from "@/services/imageGen";
 import type { ImageGenerationMode } from "@/services/imageStorage";
 import type { SubscriptionTier } from "@/services/profile";
 import type { EagohDraft, EagohRecord } from "@/services/eagohs";
@@ -38,11 +36,23 @@ export type RunForgeInput = {
   size?: ImageGenSize;
 };
 
+export type RunForgeSuccess = {
+  ok: true;
+  eagoh: EagohRecord;
+  eagohId: string;
+  imageUrl: string;
+  thumbUrl: string | null;
+  prompt: string;
+  charged: number;
+  regenerated: boolean;
+  balanceAfter: ForgeBalanceAfter | null;
+};
+
 export type RunForgeResult =
-  | { ok: true; eagoh: EagohRecord; imageUrl: string; thumbUrl: string | null; prompt: string }
+  | RunForgeSuccess
   | { ok: false; reason: ForgeErrorReason; error: string };
 
-export type ForgeErrorReason = "limit" | "image" | "persist" | "auth" | "balance" | "brand_logo";
+export type ForgeErrorReason = "limit" | "image" | "persist" | "auth" | "balance" | "brand_logo" | "review" | "timeout";
 
 function toPromptInput(draft: EagohDraft, tier?: SubscriptionTier): ForgePromptInput {
   return {
@@ -64,8 +74,11 @@ function toPromptInput(draft: EagohDraft, tier?: SubscriptionTier): ForgePromptI
  * Run the forge pipeline via the secure worker.
  *
  * The worker handles everything: auth, tier check, limit check, image
- * generation, EAGOH create/update, and Neuron deduction. If any step
- * fails, the worker rolls back — no client-side refund needed.
+ * generation, logo review, EAGOH create/update, and Neuron deduction.
+ * If any step fails, the worker rolls back — no client-side refund needed.
+ *
+ * Returns the full server response including eagohId, charged amount,
+ * remaining balances, and regeneration status.
  */
 export async function runForge(input: RunForgeInput): Promise<RunForgeResult> {
   const promptInput = toPromptInput(input.draft, input.tier);
@@ -93,13 +106,17 @@ export async function runForge(input: RunForgeInput): Promise<RunForgeResult> {
     else if (/auth|sign in|session|expired/i.test(msg)) reason = "auth";
     else if (/prohibited brand|real company|brand.*logo|PROHIBITED_BRAND/i.test(msg)) reason = "brand_logo";
     else if (/create|persist|update|eagoh|save/i.test(msg)) reason = "persist";
+    else if (/safety review|review.*failed|could not complete.*review/i.test(msg)) reason = "review";
+    else if (/timeout|taking longer/i.test(msg)) reason = "timeout";
     return { ok: false, reason, error: msg };
   }
 
-  // The worker returns the image URL; we construct a minimal EagohRecord
-  // for the client cache. The full record will be refetched via query invalidation.
+  // The worker returns the image URL and full result metadata.
+  // We construct a minimal EagohRecord for the client cache.
+  // The full record will be refetched via query invalidation.
+  const returnedEagohId = gen.eagohId ?? input.eagohId ?? "new";
   const eagoh: EagohRecord = {
-    id: input.eagohId ?? "new",
+    id: returnedEagohId,
     user_id: input.userId,
     name: input.draft.name,
     sport: input.draft.sport,
@@ -145,5 +162,15 @@ export async function runForge(input: RunForgeInput): Promise<RunForgeResult> {
     health_fitness_role: null,
   };
 
-  return { ok: true, eagoh, imageUrl: gen.imageUrl, thumbUrl: gen.thumbUrl, prompt };
+  return {
+    ok: true,
+    eagoh,
+    eagohId: returnedEagohId,
+    imageUrl: gen.imageUrl,
+    thumbUrl: gen.thumbUrl,
+    prompt,
+    charged: gen.charged ?? gen.edgeCost ?? input.edgeCost,
+    regenerated: gen.regenerated ?? false,
+    balanceAfter: gen.balanceAfter ?? null,
+  };
 }

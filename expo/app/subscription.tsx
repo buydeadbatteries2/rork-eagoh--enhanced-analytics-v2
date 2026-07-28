@@ -673,19 +673,49 @@ export default function SubscriptionScreen(): JSX.Element {
           const entitlementKeys = activeEntitlements ? Object.keys(activeEntitlements) : [];
           console.log(`[Subscription] Purchase success — active entitlements: ${entitlementKeys.join(", ") || "none"}`);
 
-          // ── Verify the expected entitlement is active BEFORE reporting success ──
+          // ── Verify the expected entitlement is active ──
+          // Use CustomerInfo immediately from the purchase result.
+          // If the entitlement is not yet present (delayed Apple receipt
+          // processing), refresh CustomerInfo once before showing pending.
           const expectedEntitlementId = SUBSCRIPTION_ENTITLEMENT_IDS[tier];
-          const hasExpectedEntitlement = entitlementKeys.includes(expectedEntitlementId);
+          let hasExpectedEntitlement = entitlementKeys.includes(expectedEntitlementId);
+          let finalEntitlements = entitlementKeys;
 
           if (!hasExpectedEntitlement) {
-            // RevenueCat did not confirm the entitlement — do NOT change Supabase,
-            // do NOT grant neurons. This handles the case where Apple/RevenueCat
-            // are replaying receipts after an outage. The user may have a
-            // temporary entitlement that hasn't fully registered yet.
-            console.warn(`[Subscription] Entitlement verification failed: expected ${expectedEntitlementId}, got [${entitlementKeys.join(", ")}], productId=${productId}`);
+            // ── One-time CustomerInfo refresh ──
+            // Apple/RevenueCat receipt processing can be delayed. The
+            // purchaseResult.customerInfo may not yet reflect the entitlement.
+            // Refresh once from RevenueCat before showing the pending state.
+            console.log(`[Subscription] Entitlement not in purchase result — refreshing CustomerInfo once`);
+            if (isMountedRef.current) {
+              setPurchaseStatusMsg("Verifying your App Store purchase...");
+            }
+            try {
+              const { getCustomerInfo: fetchInfo } = await import("@/services/revenuecat");
+              const refreshedInfo = await fetchInfo();
+              const refreshedEnts = refreshedInfo.entitlements?.active;
+              finalEntitlements = refreshedEnts ? Object.keys(refreshedEnts) : [];
+              hasExpectedEntitlement = finalEntitlements.includes(expectedEntitlementId);
+              if (hasExpectedEntitlement) {
+                console.log(`[Subscription] Entitlement found after refresh: ${expectedEntitlementId}`);
+              }
+            } catch (refreshErr) {
+              console.warn("[Subscription] CustomerInfo refresh failed:", refreshErr);
+            }
+          }
+
+          if (!hasExpectedEntitlement) {
+            // Entitlement still not present after refresh. The purchase DID
+            // complete (no error was thrown), but Apple/RevenueCat receipt
+            // processing is delayed. Do NOT crash. Do NOT force Pro.
+            // Preserve any temporary valid entitlement. Allow Restore.
+            console.warn(`[Subscription] Entitlement still pending after refresh: expected ${expectedEntitlementId}, got [${finalEntitlements.join(", ")}]`);
+            if (isMountedRef.current) {
+              setPurchaseStatusMsg(null);
+            }
             Alert.alert(
-              "Purchase Verification Pending",
-              "Your App Store purchase is still being verified. This can happen during Apple receipt processing.\n\nUse Restore Purchases in a few minutes to complete activation.",
+              "Your App Store subscription is still being verified.",
+              "Your purchase was completed successfully. Apple is processing the receipt, which can take a few minutes.\n\nUse Restore Purchases in a few minutes to complete activation, or close and reopen the app.",
             );
             return;
           }

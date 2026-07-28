@@ -19,6 +19,7 @@ import { useAuth } from "@/providers/AuthProvider";
 import { useEdge } from "@/providers/EdgeProvider";
 import { useEagohs, useEagohFull } from "@/providers/EagohProvider";
 import { useForge, type ForgePending, type ForgeStage } from "@/providers/ForgeProvider";
+import type { RunForgeSuccess } from "@/services/forge";
 import { useProfile } from "@/providers/ProfileProvider";
 import { canUseForge } from "@/services/permissions";
 import type { EagohFull, EagohRecord, TeamFocusMode } from "@/services/eagohs";
@@ -298,14 +299,15 @@ const OptionChip = memo(function OptionChip({
 });
 
 const FORGE_STAGE_LABELS: Record<string, string> = {
-  authenticating: "Verifying credentials…",
-  generating: "Generating cybernetic render…",
-  persisting: "Persisting EAGOH identity…",
-  done: "Complete",
+  authenticating: "Preparing your Forge…",
+  generating: "Generating your EAGOH…",
+  reviewing: "Checking the image…",
+  persisting: "Saving your EAGOH…",
+  done: "Finalizing your Forge…",
   idle: "",
 };
 
-const FORGE_STAGE_ORDER = ["authenticating", "generating", "persisting"] as const;
+const FORGE_STAGE_ORDER = ["authenticating", "generating", "reviewing", "persisting"] as const;
 
 function ConfirmationSheet({
   pending,
@@ -426,13 +428,136 @@ function ConfirmationSheet({
   );
 }
 
+// ── Forge Success Modal ─────────────────────────────────────────────────────
+
+function ForgeSuccessModal({
+  result,
+  domainLabel,
+  specialtyLabel,
+  navError,
+  onViewEagoh,
+  onReturnHome,
+  onForgeAnother,
+}: {
+  result: RunForgeSuccess;
+  domainLabel: string;
+  specialtyLabel: string | null;
+  navError: string | null;
+  onViewEagoh: () => void;
+  onReturnHome: () => void;
+  onForgeAnother: () => void;
+}): JSX.Element {
+  const charged = result.charged;
+  const subBalance = result.balanceAfter?.subscription ?? 0;
+  const purchBalance = result.balanceAfter?.purchased ?? 0;
+  const eagohName = result.eagoh.name || "Unnamed EAGOH";
+
+  return (
+    <View style={styles.successOverlay}>
+      <View style={styles.successCard}>
+        <LinearGradient colors={["rgba(16,27,42,0.98)", "rgba(8,15,26,0.98)"]} style={StyleSheet.absoluteFill} />
+        <ScrollView style={styles.successScroll} contentContainerStyle={styles.successScrollContent} showsVerticalScrollIndicator={false}>
+          {/* Success icon */}
+          <View style={styles.successIconWrap}>
+            <Check color={palette.success} size={32} />
+          </View>
+
+          {/* Title */}
+          <Text style={styles.successTitle}>EAGOH Forged Successfully</Text>
+          {result.regenerated ? (
+            <Text style={styles.successRegenNote}>Image was auto-regenerated for logo safety.</Text>
+          ) : null}
+
+          {/* EAGOH image preview */}
+          <View style={styles.successImageWrap}>
+            <Image
+              source={{ uri: result.imageUrl }}
+              style={styles.successImage}
+              resizeMode="contain"
+            />
+          </View>
+
+          {/* Details */}
+          <View style={styles.successDetails}>
+            <View style={styles.successDetailRow}>
+              <Text style={styles.successDetailLabel}>Name</Text>
+              <Text style={styles.successDetailValue}>{eagohName}</Text>
+            </View>
+            <View style={styles.successDetailRow}>
+              <Text style={styles.successDetailLabel}>Domain</Text>
+              <Text style={styles.successDetailValue}>{domainLabel}</Text>
+            </View>
+            {specialtyLabel ? (
+              <View style={styles.successDetailRow}>
+                <Text style={styles.successDetailLabel}>Specialization</Text>
+                <Text style={styles.successDetailValue}>{specialtyLabel}</Text>
+              </View>
+            ) : null}
+            <View style={styles.successDivider} />
+            <View style={styles.successDetailRow}>
+              <Zap color={palette.gold} size={14} />
+              <Text style={styles.successDetailLabel}>Neurons Charged</Text>
+              <Text style={[styles.successDetailValue, { color: palette.gold }]}>{charged}</Text>
+            </View>
+            <View style={styles.successDetailRow}>
+              <Text style={styles.successDetailLabel}>Subscription Balance</Text>
+              <Text style={styles.successDetailValue}>{subBalance.toLocaleString()}</Text>
+            </View>
+            <View style={styles.successDetailRow}>
+              <Text style={styles.successDetailLabel}>Purchased Balance</Text>
+              <Text style={styles.successDetailValue}>{purchBalance.toLocaleString()}</Text>
+            </View>
+          </View>
+
+          {/* Navigation error */}
+          {navError ? (
+            <View style={styles.successNavErrorBox}>
+              <AlertCircle color={palette.gold} size={14} />
+              <Text style={styles.successNavErrorText}>{navError}</Text>
+            </View>
+          ) : null}
+        </ScrollView>
+
+        {/* Actions */}
+        <View style={styles.successActions}>
+          {/* Primary: View My EAGOH */}
+          <Pressable
+            onPress={onViewEagoh}
+            style={({ pressed }) => [styles.successPrimaryBtn, pressed && styles.pressed]}
+          >
+            <LinearGradient colors={[palette.cyan, "rgba(61,165,255,0.85)"]} style={StyleSheet.absoluteFill} />
+            <Text style={styles.successPrimaryBtnText}>View My EAGOH</Text>
+          </Pressable>
+
+          {/* Secondary: Return Home + Forge Another */}
+          <View style={styles.successSecondaryRow}>
+            <Pressable
+              onPress={onReturnHome}
+              style={({ pressed }) => [styles.successSecondaryBtn, pressed && styles.pressed]}
+            >
+              <Text style={styles.successSecondaryBtnText}>Return Home</Text>
+            </Pressable>
+            <Pressable
+              onPress={onForgeAnother}
+              style={({ pressed }) => [styles.successSecondaryBtn, pressed && styles.pressed]}
+            >
+              <Sparkles color={palette.cyan} size={14} />
+              <Text style={[styles.successSecondaryBtnText, { color: palette.cyan }]}>Forge Another</Text>
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </View>
+  );
+}
+
 export default function ForgeScreen(): JSX.Element {
   const h = useHaptics();
   const router = useRouter();
   const { user } = useAuth();
   const { profile, refetch: refetchProfile } = useProfile();
   const { total: edgeTotal } = useEdge();
-  const { pending, prepareForge, confirmForge, cancelForge, isGenerating, stage } = useForge();
+  const { pending, prepareForge, confirmForge, cancelForge, dismissResult, isGenerating, stage, lastResult } = useForge();
   const { eagohs, remaining, canCreate, tier, deleteEagoh, isDeleting } = useEagohs();
   const { height: windowHeight } = useWindowDimensions();
   const { palette: pal } = useAppTheme();
@@ -477,6 +602,8 @@ export default function ForgeScreen(): JSX.Element {
   const [forgeError, setForgeError] = useState<string | null>(null);
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [forgeSuccess, setForgeSuccess] = useState<boolean>(false);
+  const [successResult, setSuccessResult] = useState<RunForgeSuccess | null>(null);
+  const [navError, setNavError] = useState<string | null>(null);
   const [keyboardHeight, setKeyboardHeight] = useState<number>(0);
 
   // ── EAGOH selection for editing ──────────────────────────────────
@@ -1206,30 +1333,35 @@ export default function ForgeScreen(): JSX.Element {
           image: "Image generation failed. Your Neurons were not charged.",
           persist: "Something went wrong saving your EAGOH. No Neurons were charged.",
           brand_logo: "Real company, brand, team, or organization logos cannot be added to an EAGOH. You can use original designs and color schemes instead.\nTry describing the colors, materials, or style without naming or recreating the logo.",
+          review: "We could not complete the image safety review. Please try again. Your neurons were not charged.",
+          timeout: "Your EAGOH is taking longer than expected. Please try again. Your neurons were not charged.",
         };
         const msg = friendly[result.reason] ?? result.error;
         setSheetError(msg);
         h.error();
       } else {
+        // ── SUCCESS: store the full result and show the success modal ──
+        // The Forge has completed successfully. Do NOT auto-dismiss.
+        // The success modal stays visible until the user chooses an action.
+        setSuccessResult(result);
         setForgeSuccess(true);
         h.success();
-        setTimeout(() => {
-          cancelForge();
-          setForgeSuccess(false);
-          setSheetError(null);
-        }, 2000);
+        // Do NOT call cancelForge() — the modal needs the pending data.
+        // The modal will call dismissResult() when the user is done.
       }
     }).catch((err: Error) => {
       setSheetError(err?.message ?? "Forge failed. No Neurons were charged.");
       h.error();
     });
-  }, [confirmForge, cancelForge, h]);
+  }, [confirmForge, h]);
 
   const handleCancel = useCallback((): void => {
     Keyboard.dismiss();
     cancelForge();
     setSheetError(null);
     setForgeSuccess(false);
+    setSuccessResult(null);
+    setNavError(null);
   }, [cancelForge]);
 
   const handleGetEdge = useCallback((): void => {
@@ -1237,6 +1369,75 @@ export default function ForgeScreen(): JSX.Element {
     h.selection();
     router.push("/edge-store" as never);
   }, [h, router]);
+
+  // ── Forge success modal navigation handlers ──────────────────────────
+
+  const handleViewEagoh = useCallback((): void => {
+    if (!successResult) return;
+    h.selection();
+    const eagohId = successResult.eagohId;
+    try {
+      router.push({
+        pathname: "/public-profile",
+        params: { eagohId },
+      } as never);
+      // Clean up after navigation
+      dismissResult();
+      setSuccessResult(null);
+      setForgeSuccess(false);
+      setSheetError(null);
+      setNavError(null);
+    } catch (navErr) {
+      console.warn("[forge] navigation to EAGOH profile failed", navErr);
+      setNavError("Your EAGOH was created, but the profile could not be opened. You can find it on your Home page.");
+    }
+  }, [successResult, h, router, dismissResult]);
+
+  const handleReturnHome = useCallback((): void => {
+    h.selection();
+    dismissResult();
+    setSuccessResult(null);
+    setForgeSuccess(false);
+    setSheetError(null);
+    setNavError(null);
+    try {
+      router.push("/" as never);
+    } catch (navErr) {
+      console.warn("[forge] navigation home failed", navErr);
+    }
+  }, [h, router, dismissResult]);
+
+  const handleForgeAnother = useCallback((): void => {
+    h.selection();
+    // Reset the wizard to the first step but keep the user on the Forge screen
+    dismissResult();
+    setSuccessResult(null);
+    setForgeSuccess(false);
+    setSheetError(null);
+    setNavError(null);
+    // Reset form fields for a new EAGOH
+    setName("");
+    setSelectedEagohId("");
+    setDomain("sports");
+    setSport("football");
+    setGender("neutral");
+    setBodyType("average");
+    setStyleNotes("");
+    setDna([]);
+    setTeams([]);
+    setTeamFocusMode("none");
+    setProTeamFocusId("");
+    setProTeamFocusName("");
+    setCollegeTeamFocusId("");
+    setCollegeTeamFocusName("");
+    setAppearance({});
+    setCyberneticIntensity("moderate");
+    setPose("calm-sentinel");
+    setLab("neon-vault");
+    setCurrentStepIndex(0);
+    setForgeError(null);
+    hasLoadedRef.current = null;
+  }, [h, dismissResult]);
 
   // ── Step content renderers ─────────────────────────────────────────
 
@@ -2064,7 +2265,7 @@ export default function ForgeScreen(): JSX.Element {
       </View>
 
       {/* ── Confirmation overlay (sits above everything) ──────────── */}
-      {pending ? (
+      {pending && !successResult ? (
         <ConfirmationSheet
           pending={pending}
           onConfirm={handleConfirm}
@@ -2075,6 +2276,19 @@ export default function ForgeScreen(): JSX.Element {
           sheetError={sheetError}
           forgeSuccess={forgeSuccess}
           stage={stage}
+        />
+      ) : null}
+
+      {/* ── Forge Success Modal ─────────────────────────────────────── */}
+      {successResult ? (
+        <ForgeSuccessModal
+          result={successResult}
+          domainLabel={domainLabel}
+          specialtyLabel={specialtyLabel}
+          navError={navError}
+          onViewEagoh={handleViewEagoh}
+          onReturnHome={handleReturnHome}
+          onForgeAnother={handleForgeAnother}
         />
       ) : null}
 
@@ -2949,6 +3163,109 @@ const styles = StyleSheet.create({
     paddingTop: 4,
     opacity: 0.7,
   },
+
+  // ── Forge Success Modal ────────────────────────────────────────────
+  successOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(2,4,10,0.94)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+    zIndex: 110,
+  },
+  successCard: {
+    width: "100%",
+    maxWidth: 380,
+    maxHeight: "88%",
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "rgba(34,197,94,0.35)",
+    overflow: "hidden",
+    backgroundColor: "rgba(8,15,26,0.98)",
+  },
+  successScroll: { flex: 1 },
+  successScrollContent: { padding: 22, alignItems: "center", gap: 12 },
+  successIconWrap: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    borderWidth: 2,
+    borderColor: palette.success,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(34,197,94,0.12)",
+  },
+  successTitle: { color: palette.text, fontSize: 20, fontWeight: "900", textAlign: "center", letterSpacing: -0.3 },
+  successRegenNote: { color: palette.gold, fontSize: 10, fontWeight: "700", textAlign: "center" },
+  successImageWrap: {
+    width: "100%",
+    alignItems: "center",
+    paddingVertical: 8,
+  },
+  successImage: {
+    width: 200,
+    height: 280,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "rgba(54,245,255,0.20)",
+  },
+  successDetails: {
+    width: "100%",
+    gap: 8,
+    paddingVertical: 8,
+  },
+  successDetailRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 2,
+  },
+  successDetailLabel: { color: palette.muted, fontSize: 12, fontWeight: "700", flex: 1 },
+  successDetailValue: { color: palette.text, fontSize: 13, fontWeight: "800" },
+  successDivider: { height: 1, backgroundColor: "rgba(255,255,255,0.06)", marginVertical: 4 },
+  successNavErrorBox: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    padding: 10,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "rgba(255,184,77,0.25)",
+    backgroundColor: "rgba(255,184,77,0.08)",
+    width: "100%",
+  },
+  successNavErrorText: { color: palette.gold, fontSize: 11, fontWeight: "700", flex: 1, flexWrap: "wrap" },
+  successActions: {
+    padding: 18,
+    gap: 10,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255,255,255,0.06)",
+  },
+  successPrimaryBtn: {
+    minHeight: 48,
+    borderRadius: 5,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+    shadowColor: palette.cyan,
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+  },
+  successPrimaryBtnText: { color: palette.void, fontSize: 15, fontWeight: "900", letterSpacing: 0.5 },
+  successSecondaryRow: { flexDirection: "row", gap: 10 },
+  successSecondaryBtn: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: 5,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 6,
+    borderWidth: 1,
+    borderColor: palette.line,
+    backgroundColor: "rgba(255,255,255,0.05)",
+  },
+  successSecondaryBtnText: { color: palette.muted, fontSize: 13, fontWeight: "800" },
 
   // ── EAGOH Picker overlay ────────────────────────────────────────
   pickerOverlay: {
