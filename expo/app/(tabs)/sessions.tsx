@@ -472,12 +472,14 @@ function AnalystChatThread({
   session,
   initialPrompt,
   onDone,
+  onThreadSaved,
 }: {
   threadId?: string;
   eagoh: EagohRecord;
   session: SessionType;
   initialPrompt?: string;
   onDone: () => void;
+  onThreadSaved: (eagohId: string | null) => void;
 }): JSX.Element {
   const { profile } = useProfile();
   const { spend, total: edgeTotal } = useEdge();
@@ -739,6 +741,7 @@ function AnalystChatThread({
           { id: userMsg.id, sender: "user", text: prompt, cost },
           { id: assistantMsg.id, sender: "analyst", text: result.reply, confidence: result.confidence, grounding: result.grounding, sources: result.sources, visualBlocks: result.visualBlocks },
         ]);
+        onThreadSaved(thread.eagoh_id);
       } catch (dbErr: unknown) {
         const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
         if (__DEV__) {
@@ -765,7 +768,7 @@ function AnalystChatThread({
       setIsSending(false);
       setIsInitialising(false);
     }
-  }, [spend]);
+  }, [spend, onThreadSaved]);
 
   // Send follow-up message
   const handleSend = useCallback(async (): Promise<void> => {
@@ -2233,7 +2236,7 @@ export default function SessionsScreen(): JSX.Element {
   // Recent threads query — scoped to the selected EAGOH so switching EAGOHs
   // immediately re-fetches the correct threads and never shows stale data.
   const threadsQuery = useQuery<ThreadWithMeta[]>({
-    queryKey: ["recent-analysis-thread", profile?.id, selectedEagohId],
+    queryKey: ["recent-analysis-threads", profile?.id, selectedEagohId],
     enabled: !!profile?.id && !!selectedEagohId,
     queryFn: () =>
       profile?.id && selectedEagohId
@@ -2297,13 +2300,8 @@ export default function SessionsScreen(): JSX.Element {
 
   const handleReopenThread = useCallback((thread: ThreadWithMeta): void => {
     h.selection();
-    setActiveThreadId(thread.id);
-    // Find matching session type
-    const st = sessionTypes.find((s) => s.id === thread.session_type);
-    setActiveThreadSession(st ?? null);
-    setSelectedEagohId(thread.eagoh_id ?? eagohs[0]?.id ?? "");
-    setActiveSession(null);
-  }, [h]);
+    router.push({ pathname: "/analyst-thread-detail", params: { threadId: thread.id } } as never);
+  }, [h, router]);
 
   const handleDeleteThread = useCallback((thread: ThreadWithMeta): void => {
     Alert.alert(
@@ -2362,6 +2360,10 @@ export default function SessionsScreen(): JSX.Element {
           session={activeThreadSession}
           initialPrompt={activeThreadId ? undefined : activeThreadInitialPrompt}
           onDone={handleDone}
+          onThreadSaved={(threadEagohId) => {
+            queryClient.invalidateQueries({ queryKey: ["recent-analysis-threads", profile?.id, threadEagohId ?? selectedEagohId] });
+            queryClient.invalidateQueries({ queryKey: ["analyst", "threads", profile?.id] });
+          }}
         />
       </SafeAreaView>
     );
@@ -2497,7 +2499,12 @@ export default function SessionsScreen(): JSX.Element {
 
           {/* Recent Analyst Threads — always visible with loading/empty/error states */}
           <View style={styles.recentThreadsSection}>
-            <Text style={styles.sectionLabel}>RECENT ANALYST THREADS</Text>
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+              <Text style={styles.sectionLabel}>RECENT ANALYST THREADS</Text>
+              <Pressable onPress={() => router.push("/analyst-archive" as never)} hitSlop={8}>
+                <Text style={{ color: palette.cyan, fontSize: 11, fontWeight: "800" as const }}>View All Threads</Text>
+              </Pressable>
+            </View>
             {threadsQuery.isLoading ? (
               <View style={styles.recentThreadEmpty}>
                 <ActivityIndicator color={palette.cyan} size="small" />
@@ -2575,7 +2582,7 @@ export default function SessionsScreen(): JSX.Element {
             ) : (
               <View style={styles.recentThreadEmpty}>
                 <MessageSquare color={palette.muted} size={16} />
-                <Text style={styles.recentThreadEmptyText}>No recent analysis threads yet.</Text>
+                <Text style={styles.recentThreadEmptyText}>No analysis threads yet. Start a session with this EAGOH to create one.</Text>
               </View>
             )}
           </View>

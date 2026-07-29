@@ -638,13 +638,10 @@ const LearningEntry = memo(function LearningEntry({
 
   // Build display tags from selected_subtags, custom_tags, or fallback to legacy tag field
   const displayTags: string[] = useMemo(() => {
-    if (entry.selected_subtags && entry.selected_subtags.length > 0) {
-      return entry.selected_subtags.map((id) => domainTags.find((t) => t.id === id)?.label ?? id);
-    }
-    if (entry.custom_tags && entry.custom_tags.length > 0) {
-      return entry.custom_tags;
-    }
-    return [entry.tag === "general" ? "General" : entry.tag.replace("custom:", "")];
+    const predefined = (entry.selected_subtags ?? []).map((id) => domainTags.find((t) => t.id === id)?.label ?? id);
+    const custom = entry.custom_tags ?? [];
+    const combined = [...predefined, ...custom];
+    return combined.length > 0 ? combined : [entry.tag === "general" ? "General" : entry.tag.replace("custom:", "")];
   }, [entry, domainTags]);
 
   const infLabel = influenceLabel(entry.influence_score);
@@ -1384,6 +1381,7 @@ export default function OpenIntelligenceScreen(): JSX.Element {
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitSuccess, setSubmitSuccess] = useState<string | null>(null);
+  const [selectedFeedTags, setSelectedFeedTags] = useState<string[]>([]);
   const [keyboardHeight, setKeyboardHeight] = useState<number>(0);
   const { height: windowHeight } = useWindowDimensions();
   const contentInputRef = useRef<TextInput | null>(null);
@@ -1472,10 +1470,30 @@ export default function OpenIntelligenceScreen(): JSX.Element {
 
   // Learning feed
   const feedQuery = useQuery<OpenIntelligenceRow[]>({
-    queryKey: ["oi", "feed", selectedEagohId],
+    queryKey: ["learning-feed", profile?.id, selectedEagohId, selectedFeedTags],
     enabled: !!selectedEagohId,
     queryFn: () => listEntriesForEagoh(selectedEagohId, 20),
   });
+
+  const availableFeedTags = useMemo(() => {
+    const tagIds = new Set<string>();
+    (feedQuery.data ?? []).forEach((entry) => {
+      (entry.selected_subtags ?? []).forEach((tag) => tagIds.add(tag));
+      (entry.custom_tags ?? []).forEach((tag) => tagIds.add(`custom:${tag.toLowerCase()}`));
+    });
+    return Array.from(tagIds).sort();
+  }, [feedQuery.data]);
+
+  const filteredFeedEntries = useMemo(() => {
+    if (selectedFeedTags.length === 0) return feedQuery.data ?? [];
+    return (feedQuery.data ?? []).filter((entry) => {
+      const entryTags = new Set([
+        ...(entry.selected_subtags ?? []),
+        ...(entry.custom_tags ?? []).map((tag) => `custom:${tag.toLowerCase()}`),
+      ]);
+      return selectedFeedTags.some((tag) => entryTags.has(tag));
+    });
+  }, [feedQuery.data, selectedFeedTags]);
 
   const handleToggleSubtag = useCallback((tagId: string): void => {
     setSelectedSubtags((prev) =>
@@ -1647,7 +1665,7 @@ export default function OpenIntelligenceScreen(): JSX.Element {
       setSelectedSubtags([]);
       setCustomTags([]);
       setSubmitSuccess(`Open Intelligence saved. ${result.edgeCost ?? 0} Neurons deducted.`);
-      queryClient.invalidateQueries({ queryKey: ["oi", "feed", selectedEagohId] });
+      queryClient.invalidateQueries({ queryKey: ["learning-feed", profile?.id, selectedEagohId] });
       queryClient.invalidateQueries({ queryKey: ["oi", "my-entries"] });
       queryClient.invalidateQueries({ queryKey: ["eagoh", selectedEagohId] });
       invalidateProfile();
@@ -1934,17 +1952,22 @@ export default function OpenIntelligenceScreen(): JSX.Element {
               </Text>
             </View>
 
-            {feedQuery.isLoading ? (
-              <ActivityIndicator color={palette.cyan} style={styles.feedLoader} />
-            ) : feedQuery.data && feedQuery.data.length > 0 ? (
-              feedQuery.data.map((entry) => (
-                <LearningEntry key={entry.id} entry={entry} domainId={currentDomain} />
-              ))
-            ) : (
-              <Text style={styles.feedEmpty}>
-                {selectedEagoh ? `No entries for ${selectedEagoh.name} yet. Submit your first observation above.` : "Select an EAGOH and submit an entry to populate the feed."}
-              </Text>
-            )}
+            {availableFeedTags.length > 0 ? (
+              <View style={{ marginBottom: 10, gap: 6 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                  <Text style={{ color: palette.muted, fontSize: 9, fontWeight: "800", letterSpacing: 0.5 }}>FILTER TAGS{selectedFeedTags.length > 0 ? ` · ${selectedFeedTags.length}` : ""}</Text>
+                  {selectedFeedTags.length > 0 ? <Pressable onPress={() => setSelectedFeedTags([])} hitSlop={8}><Text style={{ color: palette.cyan, fontSize: 10, fontWeight: "800" }}>Clear filters</Text></Pressable> : null}
+                </View>
+                <View style={styles.selectedTagsRow}>
+                  {availableFeedTags.map((tag) => {
+                    const selected = selectedFeedTags.includes(tag);
+                    const label = tag.startsWith("custom:") ? tag.slice(7) : lookupTagLabelForDomain(tag, currentDomain);
+                    return <Pressable key={tag} onPress={() => setSelectedFeedTags((previous) => selected ? previous.filter((item) => item !== tag) : [...previous, tag])} style={({ pressed }) => [styles.tagChip, selected && { borderColor: palette.cyan, backgroundColor: "rgba(108,230,255,0.12)" }, pressed && styles.pressed]}>{selected ? <Check color={palette.cyan} size={11} /> : <Hash color={palette.muted} size={11} />}<Text style={[styles.tagChipText, selected && { color: palette.cyan }]}>{label}</Text></Pressable>;
+                  })}
+                </View>
+              </View>
+            ) : null}
+            {feedQuery.isLoading ? <ActivityIndicator color={palette.cyan} style={styles.feedLoader} /> : (feedQuery.data?.length ?? 0) > 0 && filteredFeedEntries.length === 0 ? <Text style={styles.feedEmpty}>No entries match these tags.</Text> : filteredFeedEntries.length > 0 ? filteredFeedEntries.map((entry) => <LearningEntry key={entry.id} entry={entry} domainId={currentDomain} />) : <Text style={styles.feedEmpty}>{selectedEagoh ? `No entries for ${selectedEagoh.name} yet. Submit your first observation above.` : "Select an EAGOH and submit an entry to populate the feed."}</Text>}
           </View>
 
         </ScrollView>
