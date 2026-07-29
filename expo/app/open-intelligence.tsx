@@ -1630,11 +1630,13 @@ export default function OpenIntelligenceScreen(): JSX.Element {
       setContent("");
       setSelectedSubtags([]);
       setCustomTags([]);
-      setSubmitSuccess(`Entry saved. ${result.edgeCost} Neurons deducted.`);
+      setSubmitSuccess(`Open Intelligence saved. ${result.edgeCost ?? 0} Neurons deducted.`);
       queryClient.invalidateQueries({ queryKey: ["oi", "feed", selectedEagohId] });
+      queryClient.invalidateQueries({ queryKey: ["oi", "my-entries"] });
+      queryClient.invalidateQueries({ queryKey: ["eagoh", selectedEagohId] });
       invalidateProfile();
     } else {
-      setSubmitError(result.error ?? "Entry could not be saved. No Neurons were charged.");
+      setSubmitError(result.error ?? "Entry could not be saved. Your neurons were not charged.");
       invalidateProfile();
     }
     setIsSubmitting(false);

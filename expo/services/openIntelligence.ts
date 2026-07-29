@@ -257,6 +257,7 @@ export interface SubmitEntryResult {
   entry?: OpenIntelligenceRow;
   error?: string;
   edgeCost?: number;
+  code?: string;
 }
 
 /**
@@ -347,7 +348,7 @@ export async function submitEntry(input: SubmitEntryInput): Promise<SubmitEntryR
     return { ok: false, error: "Your session expired. Please sign in again." };
   }
 
-  let data: { ok: boolean; entry?: OpenIntelligenceRow; error?: string; edgeCost?: number; debug?: Record<string, unknown> };
+  let data: { ok: boolean; entry?: OpenIntelligenceRow; error?: string; edgeCost?: number; code?: string; debug?: Record<string, unknown> };
   try {
     data = (await res.json()) as typeof data;
   } catch {
@@ -356,19 +357,30 @@ export async function submitEntry(input: SubmitEntryInput): Promise<SubmitEntryR
 
   if (!data.ok) {
     if (__DEV__) {
-      console.warn("[oi/create] worker returned error", data.error);
-      if (data.debug) {
-        console.warn("[oi/create] DEBUG diagnostics", JSON.stringify(data.debug, null, 2));
-      }
+      console.warn("[oi/create] worker returned error", data.error, "code=" + (data.code ?? "n/a"));
     }
-    // Map server errors to user-friendly messages. Never expose raw DB errors.
+    // The worker now returns a safe `code` field and a safe `error` message.
+    // Use the server-provided message directly (already user-safe).
+    // Fall back to keyword matching for backward compat with older workers.
+    const serverCode = data.code ?? "";
     const serverErr = data.error ?? "";
-    let userError = "Entry could not be saved. Your neurons were not charged.";
-    if (serverErr.includes("SELF_PURCHASE")) userError = "You cannot purchase your own EAGOH listing.";
+    let userError: string;
+    if (serverCode === "OI_INSUFFICIENT_NEURONS") userError = "You do not have enough neurons to save this entry.";
+    else if (serverCode === "OI_INVALID_ENTRY") userError = "This entry does not meet the Open Intelligence requirements.";
+    else if (serverCode === "OI_EAGOH_NOT_FOUND") userError = "The selected EAGOH could not be found.";
+    else if (serverCode === "OI_NOT_OWNER") userError = "This Open Intelligence entry cannot be added to the selected EAGOH.";
+    else if (serverCode === "OI_DUPLICATE") userError = "This Open Intelligence entry was already saved.";
+    else if (serverCode === "OI_SESSION_EXPIRED") userError = "Your session expired. Please sign in again.";
+    else if (serverCode === "OI_SCHEMA_ERROR") userError = "Open Intelligence is temporarily unavailable. Your neurons were not charged.";
+    else if (serverCode === "OI_SERVER_ERROR") userError = "Entry could not be saved. Your neurons were not charged.";
+    // Backward-compat: older workers send error strings without codes
+    else if (serverErr.includes("SELF_PURCHASE")) userError = "You cannot purchase your own EAGOH listing.";
     else if (serverErr.includes("Insufficient") || serverErr.includes("insufficient")) userError = "You do not have enough neurons to save this entry.";
     else if (serverErr.includes("session") || serverErr.includes("Authentication") || serverErr.includes("auth")) userError = "Your session expired. Please sign in again.";
     else if (serverErr.includes("character limit") || serverErr.includes("empty") || serverErr.includes("does not meet") || serverErr.includes("EAGOH") || serverErr.includes("domain")) userError = "This entry does not meet the Open Intelligence requirements.";
-    return { ok: false, error: userError };
+    else userError = serverErr || "Entry could not be saved. Your neurons were not charged.";
+    return { ok: false, error: userError, code: serverCode || undefined, edgeCost };
+    return { ok: false, error: userError, code: serverCode || undefined, edgeCost };
   }
 
   // Record recently used tags (best-effort)

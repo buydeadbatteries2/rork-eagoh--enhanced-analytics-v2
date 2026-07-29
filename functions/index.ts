@@ -1,5 +1,5 @@
 /**
-// EAGOH Analyst Chat — Cloudflare Worker (v4-forge-fix)
+// EAGOH Analyst Chat — Cloudflare Worker (v4-oi-fix)
  * Phase RETAINED-OI-2 — Trusted purchase reversal status (record_exchange_purchase_reversal RPC)
  * Phase RETAINED-OI-1 + Cap — Retained Exchange Intelligence + 25% Cumulative Cap
   * Phase 12A — Social sharing + faction invite by email/username
@@ -3549,89 +3549,47 @@ const OI_VALID_CONFIDENCE_LEVELS = new Set([
 ]);
 
 /**
- * Finalize an OI entry after a successful insert: check balance, deduct Neurons,
- * log the transaction, and return success. If deduction fails, the entry is
- * deleted (rollback) so the user is never charged without a saved entry.
- *
- * This is shared between the full-insert and minimal-insert fallback paths.
+ * Map an RPC error code or Supabase error to a safe user-facing error code.
+ * Never exposes raw DB errors, SQLSTATE, or schema details to the client.
  */
-async function finalizeOiEntry(
-  serviceClient: SupabaseClient,
-  userId: string,
-  eagohId: string,
-  insertData: Record<string, unknown>,
-  cost: number,
-  note: string,
-  entryType: string,
-): Promise<Response> {
-  const entryId = (insertData as { id: string }).id;
-
-  // 1. Check balance and deduct via service-role client
-  const { data: profileRow, error: profileErr } = await serviceClient
-    .from("profiles")
-    .select("edge_subscription, edge_purchased")
-    .eq("id", userId)
-    .maybeSingle();
-
-  if (profileErr || !profileRow) {
-    if (DEBUG_OI) console.warn("[oi/create] fallback profile lookup failed — deleting entry:", profileErr?.message ?? "no row");
-    // Rollback: delete the entry since we can't charge
-    await serviceClient.from("open_intelligence").delete().eq("id", entryId);
-    return jsonResponse({ ok: false, error: "Could not verify Neuron balance." }, 500);
+function mapOiError(rpcErrorCode: string | undefined, supabaseErr: { code?: string; message?: string } | null): { code: string; status: number; message: string } {
+  // RPC-returned error codes (from create_oi_entry function body)
+  switch (rpcErrorCode) {
+    case "insufficient":
+      return { code: "OI_INSUFFICIENT_NEURONS", status: 402, message: "You do not have enough neurons to save this entry." };
+    case "invalid_entry_type":
+    case "empty_content":
+      return { code: "OI_INVALID_ENTRY", status: 400, message: "This entry does not meet the Open Intelligence requirements." };
+    case "profile_not_found":
+      return { code: "OI_SERVER_ERROR", status: 500, message: "Entry could not be saved. Your neurons were not charged." };
+    case "missing_request_id":
+      return { code: "OI_INVALID_ENTRY", status: 400, message: "This entry does not meet the Open Intelligence requirements." };
   }
-
-  const sub = (profileRow as { edge_subscription: number | null }).edge_subscription ?? 0;
-  const purch = (profileRow as { edge_purchased: number | null }).edge_purchased ?? 0;
-  const total = sub + purch;
-
-  if (total < cost) {
-    if (DEBUG_OI) console.warn("[oi/create] fallback insufficient balance — deleting entry. have=" + total + " need=" + cost);
-    // Rollback: delete the entry
-    await serviceClient.from("open_intelligence").delete().eq("id", entryId);
-    return jsonResponse({ ok: false, error: `Insufficient Neurons. Need ${cost} Neurons (have ${total}).` }, 402);
+  // Supabase/PostgREST error codes (RPC call itself failed)
+  if (supabaseErr) {
+    const pgCode = supabaseErr.code ?? "";
+    // 42883 = function does not exist (trigger or RPC missing)
+    // 42703 = column does not exist
+    // 42P01 = table does not exist
+    if (pgCode === "42883" || pgCode === "42703" || pgCode === "42P01") {
+      console.error("[oi/create] SCHEMA ERROR — RPC or trigger missing/broken:", pgCode, supabaseErr.message);
+      return { code: "OI_SCHEMA_ERROR", status: 500, message: "Open Intelligence is temporarily unavailable. Your neurons were not charged." };
+    }
+    // 42501 = RLS violation / insufficient privilege
+    if (pgCode === "42501") {
+      return { code: "OI_SESSION_EXPIRED", status: 401, message: "Your session expired. Please sign in again." };
+    }
+    // 23505 = unique violation (duplicate request_id — should be handled by RPC, but just in case)
+    if (pgCode === "23505") {
+      return { code: "OI_DUPLICATE", status: 409, message: "This Open Intelligence entry was already saved." };
+    }
+    // 23503 = foreign key violation (eagoh_id not found)
+    if (pgCode === "23503") {
+      return { code: "OI_EAGOH_NOT_FOUND", status: 404, message: "The selected EAGOH could not be found." };
+    }
   }
-
-  const fromSub = Math.min(sub, cost);
-  const fromPurchased = cost - fromSub;
-  const nextSub = sub - fromSub;
-  const nextPurchased = purch - fromPurchased;
-  const bucket = fromSub > 0 && fromPurchased > 0 ? "mixed" : fromPurchased > 0 ? "purchased" : "subscription";
-
-  const { error: deductErr } = await serviceClient
-    .from("profiles")
-    .update({ edge_subscription: nextSub, edge_purchased: nextPurchased, updated_at: new Date().toISOString() })
-    .eq("id", userId);
-
-  if (deductErr) {
-    if (DEBUG_OI) console.warn("[oi/create] fallback deduct failed — deleting entry:", deductErr.message);
-    // Rollback: delete the entry since deduction failed
-    await serviceClient.from("open_intelligence").delete().eq("id", entryId);
-    return jsonResponse({ ok: false, error: "Entry could not be saved. No Neurons were charged." }, 500);
-  }
-
-  // 2. Log the transaction (best-effort)
-  await serviceClient.from("edge_transactions").insert({
-    user_id: userId,
-    kind: "deduction",
-    reason: "observation",
-    amount: cost,
-    bucket: bucket,
-    from_subscription: fromSub,
-    from_purchased: fromPurchased,
-    balance_subscription_after: nextSub,
-    balance_purchased_after: nextPurchased,
-    note: note,
-  }).then(() => {}).catch(() => {});
-
-  if (DEBUG_OI) console.log("[oi/create] fallback success entryId=" + entryId.slice(0, 8) + " cost=" + cost + " type=" + entryType);
-
-  return jsonResponse({
-    ok: true,
-    entry: insertData,
-    edgeCost: cost,
-    balanceSubscriptionAfter: nextSub,
-    balancePurchasedAfter: nextPurchased,
-  });
+  console.error("[oi/create] unmapped error:", rpcErrorCode ?? "none", supabaseErr?.code ?? "none", supabaseErr?.message ?? "none");
+  return { code: "OI_SERVER_ERROR", status: 500, message: "Entry could not be saved. Your neurons were not charged." };
 }
 
 async function handleCreateOIEntry(request: Request, env: Env): Promise<Response> {
@@ -3660,50 +3618,50 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
   // ── Authenticate ──
   const authHeader = request.headers.get("Authorization") ?? "";
   const jwt = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-  if (!jwt) return jsonResponse({ ok: false, error: "Authentication required." }, 401);
+  if (!jwt) return jsonResponse({ ok: false, code: "OI_SESSION_EXPIRED", error: "Your session expired. Please sign in again." }, 401);
 
   const supabase = createAuthedClient(env, jwt);
   const userId = await verifyAuth(supabase, jwt);
-  if (!userId) return jsonResponse({ ok: false, error: "Invalid auth." }, 401);
+  if (!userId) return jsonResponse({ ok: false, code: "OI_SESSION_EXPIRED", error: "Your session expired. Please sign in again." }, 401);
 
   const serviceClient = getServiceRoleClient(env);
   if (!serviceClient) {
-    return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
+    return jsonResponse({ ok: false, code: "OI_SERVER_ERROR", error: "Entry could not be saved. Your neurons were not charged." }, 503);
   }
 
   // ── Validate requestId (idempotency key) ──
   const requestId = typeof payload.requestId === "string" ? payload.requestId.trim().slice(0, 120) : "";
   if (!requestId) {
-    return jsonResponse({ ok: false, error: "A request ID is required." }, 400);
+    return jsonResponse({ ok: false, code: "OI_INVALID_ENTRY", error: "This entry does not meet the Open Intelligence requirements." }, 400);
   }
 
   // ── Validate entry type ──
   const entryType = typeof payload.entryType === "string" ? payload.entryType.trim() : "";
   if (!OI_ENTRY_COSTS[entryType]) {
-    return jsonResponse({ ok: false, error: "Invalid entry type." }, 400);
+    return jsonResponse({ ok: false, code: "OI_INVALID_ENTRY", error: "This entry does not meet the Open Intelligence requirements." }, 400);
   }
 
   // ── Validate content ──
   const content = typeof payload.content === "string" ? payload.content.trim() : "";
   if (content.length === 0) {
-    return jsonResponse({ ok: false, error: "Entry cannot be empty." }, 400);
+    return jsonResponse({ ok: false, code: "OI_INVALID_ENTRY", error: "This entry does not meet the Open Intelligence requirements." }, 400);
   }
   const charCountNoSpaces = content.replace(/\s/g, "").length;
   const limit = OI_ENTRY_TYPE_LIMITS[entryType];
   if (charCountNoSpaces > limit) {
-    return jsonResponse({ ok: false, error: `Entry exceeds ${limit} character limit (excl. spaces).` }, 400);
+    return jsonResponse({ ok: false, code: "OI_INVALID_ENTRY", error: "This entry does not meet the Open Intelligence requirements." }, 400);
   }
 
   // ── Validate confidence level ──
   const confidenceLevel = typeof payload.confidenceLevel === "string" ? payload.confidenceLevel.trim() : "";
   if (!OI_VALID_CONFIDENCE_LEVELS.has(confidenceLevel)) {
-    return jsonResponse({ ok: false, error: "Invalid confidence level." }, 400);
+    return jsonResponse({ ok: false, code: "OI_INVALID_ENTRY", error: "This entry does not meet the Open Intelligence requirements." }, 400);
   }
 
   // ── Validate eagohId ──
   const eagohId = typeof payload.eagohId === "string" ? payload.eagohId.trim() : "";
   if (!eagohId) {
-    return jsonResponse({ ok: false, error: "An EAGOH is required." }, 400);
+    return jsonResponse({ ok: false, code: "OI_EAGOH_NOT_FOUND", error: "The selected EAGOH could not be found." }, 400);
   }
 
   if (DEBUG_OI) {
@@ -3719,11 +3677,11 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
 
   if (eagohErr) {
     if (DEBUG_OI) console.log("[oi/create] EAGOH lookup error: " + eagohErr.message);
-    return jsonResponse({ ok: false, error: "EAGOH not found." }, 404);
+    return jsonResponse({ ok: false, code: "OI_EAGOH_NOT_FOUND", error: "The selected EAGOH could not be found." }, 404);
   }
   if (!eagohRow) {
     if (DEBUG_OI) console.log("[oi/create] EAGOH lookup returned no row");
-    return jsonResponse({ ok: false, error: "EAGOH not found." }, 404);
+    return jsonResponse({ ok: false, code: "OI_EAGOH_NOT_FOUND", error: "The selected EAGOH could not be found." }, 404);
   }
 
   const eagoh = eagohRow as { id: string; user_id: string; name: string; domain: string | null };
@@ -3731,16 +3689,16 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
   if (DEBUG_OI) console.log("[oi/create] EAGOH found: " + eagoh.name);
 
   if (eagoh.user_id !== userId) {
-    return jsonResponse({ ok: false, error: "You can only use EAGOHs you own." }, 403);
+    return jsonResponse({ ok: false, code: "OI_NOT_OWNER", error: "This Open Intelligence entry cannot be added to the selected EAGOH." }, 403);
   }
   if (!eagoh.domain) {
-    return jsonResponse({ ok: false, error: "This EAGOH has no domain specialization." }, 400);
+    return jsonResponse({ ok: false, code: "OI_INVALID_ENTRY", error: "This entry does not meet the Open Intelligence requirements." }, 400);
   }
 
   // ── Verify entry domain matches EAGOH domain ──
   const intelligenceDomain = typeof payload.intelligenceDomain === "string" ? payload.intelligenceDomain.trim() : "";
   if (intelligenceDomain && intelligenceDomain !== eagoh.domain) {
-    return jsonResponse({ ok: false, error: "Entry domain does not match this EAGOH's domain." }, 400);
+    return jsonResponse({ ok: false, code: "OI_INVALID_ENTRY", error: "This entry does not meet the Open Intelligence requirements." }, 400);
   }
 
   // ── Build insert fields ──
@@ -3751,7 +3709,18 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
 
   const note = `OI ${entryType.replace(/_/g, " ")} · ${intelligenceDomain || eagoh.domain}`;
 
-  // ── Atomic deduction + insert via RPC ──
+  // ── Atomic deduction + insert via RPC (authoritative method) ──
+  // No manual fallback. If the RPC fails, return a mapped error code.
+  // The RPC is a security-definer function that atomically:
+  //   1. Locks the profile row (FOR UPDATE)
+  //   2. Re-checks the ledger for duplicate request_id
+  //   3. Verifies sufficient balance
+  //   4. Deducts neurons (subscription first, then purchased)
+  //   5. Inserts the OI entry (trigger computes quality/influence/hash)
+  //   6. Inserts the oi_creation_ledger row
+  //   7. Logs the edge_transactions row
+  //   8. Returns the entry ID and updated balances
+  // If any step fails, the entire transaction rolls back — no partial state.
   const { data: rpcData, error: rpcErr } = await serviceClient.rpc("create_oi_entry", {
     p_user_id: userId,
     p_request_id: requestId,
@@ -3767,8 +3736,7 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
     p_note: note,
   });
 
-  // Always log the RPC result for diagnostics — even when there's no error object,
-  // the RPC may return null data (function not found) which we need to see.
+  // Log the RPC result for server-side diagnostics (never sent to client)
   if (DEBUG_OI) {
     console.log("[oi/create] RPC result: rpcErr=" + (rpcErr ? "yes" : "no") +
       " rpcErrCode=" + (rpcErr?.code ?? "n/a") +
@@ -3778,201 +3746,25 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
       " rpcDataNull=" + (rpcData == null));
   }
 
-  // If the RPC errored OR returned null data (function doesn't exist in live DB),
-  // fall through to the manual insert+deduct fallback. Supabase returns { data: null,
-  // error: null } when a PostgREST function is not found — so we must check both.
-  const rpcNeedsFallback = rpcErr || (rpcData == null);
-
-  if (rpcNeedsFallback) {
-    if (DEBUG_OI) console.warn("[oi/create] RPC unavailable — using manual insert+deduct fallback. reason=" + (rpcErr ? "rpc_error" : "null_data"));
-    if (DEBUG_OI) console.warn("[oi/create] RPC failed — falling back to manual insert+deduct:", rpcErr?.code ?? "unknown", rpcErr?.message ?? "n/a", rpcErr?.details ?? "", rpcErr?.hint ?? "");
-    // ── Fallback: manual insert + deduct (service-role, bypasses RLS) ──
-    // Used when the create_oi_entry RPC is not yet deployed to the live DB.
-    // Order: insert entry → check balance → deduct → if deduction fails, delete entry (rollback).
-    const cost = OI_ENTRY_COSTS[entryType];
-
-    // 1. Insert the OI entry via service-role client (bypasses RLS)
-    const charCountNoSpacesForInsert = content.replace(/\s/g, "").length;
-
-    // ── Discover the actual live table columns so we only insert into columns
-    //    that exist. This handles schema mismatches (e.g. selected_category,
-    //    selected_subtags, custom_tags not yet added) without failing the insert.
-    //    Uses the PostgREST OpenAPI spec exposed at the table endpoint.
-    const fullInsertObj: Record<string, unknown> = {
-      user_id: userId,
-      eagoh_id: eagohId,
-      intelligence_domain: intelligenceDomain || eagoh.domain,
-      entry_type: entryType,
-      tag: tag,
-      content: content,
-      character_count_no_spaces: charCountNoSpacesForInsert,
-      confidence_level: confidenceLevel,
-      quality_score: 0,
-      validation_status: "pending_review",
-      influence_score: 0,
-      selected_category: selectedCategory,
-      selected_subtags: subtags,
-      custom_tags: customTags,
-    };
-
-    // All columns we *want* to insert, in priority order (core first, optional last)
-    const allDesiredColumns = Object.keys(fullInsertObj);
-
-    // Query the live DB schema to discover which columns actually exist.
-    // We fetch one existing row — the keys of the returned object ARE the
-    // live column names. If the table is empty, we fall through to the
-    // full → minimal heuristic chain below (which also surfaces diagnostics).
-    let liveColumns: Set<string> | null = null;
-    try {
-      const { data: sampleRow, error: sampleErr } = await serviceClient
-        .from("open_intelligence")
-        .select("*")
-        .limit(1)
-        .maybeSingle();
-      if (!sampleErr && sampleRow && typeof sampleRow === "object") {
-        liveColumns = new Set(Object.keys(sampleRow));
-        if (DEBUG_OI) console.log("[oi/create] live columns discovered from sample row:", Array.from(liveColumns).join(", "));
-      } else if (sampleErr) {
-        if (DEBUG_OI) console.log("[oi/create] sample row query error (will use heuristic):", sampleErr.code ?? "n/a", sampleErr.message ?? "n/a");
-      } else {
-        if (DEBUG_OI) console.log("[oi/create] table empty — no sample row; will use full insert + heuristic fallback");
-      }
-    } catch {
-      // Fall through to heuristic approach below
-    }
-
-    // Build the insert object: if we discovered live columns, filter to only those;
-    // otherwise use the full set and rely on the fallback chain below.
-    let insertObj: Record<string, unknown> = fullInsertObj;
-    if (liveColumns) {
-      insertObj = {};
-      for (const col of allDesiredColumns) {
-        if (liveColumns.has(col)) {
-          insertObj[col] = fullInsertObj[col];
-        }
-      }
-      if (DEBUG_OI) console.log("[oi/create] filtered insert columns:", Object.keys(insertObj).join(", "));
-    }
-
-    // Attempted columns for diagnostics
-    const attemptedColumns = Object.keys(insertObj);
-
-    // Full insert (uses discovered columns or all columns)
-    const { data: insertData, error: insertErr } = await serviceClient
-      .from("open_intelligence")
-      .insert(insertObj)
-      .select("*")
-      .maybeSingle();
-
-    if (insertErr) {
-      // ── DIAGNOSTIC: log the full Supabase error server-side ──
-      console.error("[oi/create] FALLBACK INSERT FAILED", JSON.stringify({
-        endpoint: "/oi/create",
-        userIdPrefix: userId.slice(0, 8),
-        eagohIdPrefix: eagohId.slice(0, 8),
-        entryType: entryType,
-        intelligenceDomain: intelligenceDomain || eagoh.domain,
-        insertErrCode: insertErr.code ?? null,
-        insertErrMessage: insertErr.message ?? null,
-        insertErrDetails: insertErr.details ?? null,
-        insertErrHint: insertErr.hint ?? null,
-        attemptedColumns: attemptedColumns,
-      }));
-
-      // ── Try a MINIMAL insert with only core columns from the original CREATE TABLE ──
-      // This handles the case where optional columns (selected_category, selected_subtags,
-      // custom_tags) or the quality trigger (which references version_number, content_hash,
-      // duplicate_flag) don't exist in the live schema yet.
-      if (DEBUG_OI) console.log("[oi/create] attempting minimal insert (core columns only)");
-
-      const { data: minimalData, error: minimalErr } = await serviceClient
-        .from("open_intelligence")
-        .insert({
-          user_id: userId,
-          eagoh_id: eagohId,
-          intelligence_domain: intelligenceDomain || eagoh.domain,
-          entry_type: entryType,
-          tag: tag,
-          content: content,
-          character_count_no_spaces: charCountNoSpacesForInsert,
-          confidence_level: confidenceLevel,
-        })
-        .select("*")
-        .maybeSingle();
-
-      if (minimalErr) {
-        console.error("[oi/create] MINIMAL INSERT ALSO FAILED", JSON.stringify({
-          insertErrCode: minimalErr.code ?? null,
-          insertErrMessage: minimalErr.message ?? null,
-          insertErrDetails: minimalErr.details ?? null,
-          insertErrHint: minimalErr.hint ?? null,
-          attemptedColumns: ["user_id", "eagoh_id", "intelligence_domain", "entry_type", "tag", "content", "character_count_no_spaces", "confidence_level"],
-        }));
-
-        // Map known Supabase error codes to user-friendly messages.
-        // Never expose raw DB errors, stack traces, or schema details to users.
-        const minCode = minimalErr.code ?? null;
-        let userError = "Entry could not be saved. Your neurons were not charged.";
-        if (minCode === "42501") userError = "Your session expired. Please sign in again.";
-        else if (minCode === "23505") userError = "This entry was already saved.";
-        else if (minCode === "23503") userError = "This EAGOH could not be found.";
-        else if (minCode === "42703") userError = "This entry does not meet the Open Intelligence requirements.";
-
-        return jsonResponse({
-          ok: false,
-          error: userError,
-          debug: {
-            fullInsertErr: {
-              code: insertErr.code ?? null,
-              message: insertErr.message ?? null,
-              details: insertErr.details ?? null,
-              hint: insertErr.hint ?? null,
-            },
-            minimalInsertErr: {
-              code: minimalErr.code ?? null,
-              message: minimalErr.message ?? null,
-              details: minimalErr.details ?? null,
-              hint: minimalErr.hint ?? null,
-            },
-            rpcErr: {
-              code: rpcErr?.code ?? null,
-              message: rpcErr?.message ?? null,
-              details: rpcErr?.details ?? null,
-              hint: rpcErr?.hint ?? null,
-            },
-            attemptedColumns: attemptedColumns,
-          },
-        }, 500);
-      }
-
-      if (!minimalData) {
-        console.warn("[oi/create] minimal insert returned no row");
-        return jsonResponse({
-          ok: false,
-          error: "Entry could not be saved. Your neurons were not charged.",
-          debug: { cause: "minimal_insert_no_row", rpcErrCode: rpcErr?.code ?? null, rpcErrMsg: rpcErr?.message ?? null },
-        }, 500);
-      }
-
-      // Minimal insert succeeded — proceed with deduction using the minimal entry
-      if (DEBUG_OI) console.log("[oi/create] minimal insert succeeded — proceeding with deduction");
-      return await finalizeOiEntry(serviceClient, userId, eagohId, minimalData, cost, note, entryType);
-    }
-
-    if (!insertData) {
-      if (DEBUG_OI) console.warn("[oi/create] fallback insert returned no row");
-      return jsonResponse({
-        ok: false,
-        error: "Entry could not be saved. Your neurons were not charged.",
-        debug: { cause: "full_insert_no_row", rpcErrCode: rpcErr?.code ?? null, rpcErrMsg: rpcErr?.message ?? null },
-      }, 500);
-    }
-
-    // Full insert succeeded — proceed with deduction
-    return await finalizeOiEntry(serviceClient, userId, eagohId, insertData, cost, note, entryType);
+  // ── RPC call itself failed (function missing, trigger error, etc.) ──
+  // No manual fallback. Map the error to a safe code.
+  if (rpcErr) {
+    const mapped = mapOiError(undefined, rpcErr);
+    return jsonResponse({ ok: false, code: mapped.code, error: mapped.message }, mapped.status);
   }
 
-  const rpcResult = (rpcData ?? null) as {
+  // ── RPC returned null data (function not found in live DB) ──
+  // PostgREST returns { data: null, error: null } when a function doesn't exist.
+  if (rpcData == null) {
+    console.error("[oi/create] RPC returned null data — create_oi_entry function not found in live DB");
+    return jsonResponse({
+      ok: false,
+      code: "OI_SCHEMA_ERROR",
+      error: "Open Intelligence is temporarily unavailable. Your neurons were not charged.",
+    }, 500);
+  }
+
+  const rpcResult = rpcData as {
     ok?: boolean;
     error?: string;
     duplicate?: boolean;
@@ -3983,27 +3775,12 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
     bucket?: string;
     balance_subscription_after?: number;
     balance_purchased_after?: number;
-  } | null;
+  };
 
-  if (!rpcResult || rpcResult.ok === false) {
-    const errCode = rpcResult?.error ?? "create_failed";
-    console.warn("[oi/create] RPC returned ok=false or null. errCode=" + errCode + " rpcDataNull=" + (rpcData == null));
-    if (errCode === "insufficient") {
-      const bal = (rpcResult as { balance?: number }).balance ?? 0;
-      const cost = OI_ENTRY_COSTS[entryType];
-      return jsonResponse({ ok: false, error: `Insufficient Neurons. Need ${cost} Neurons (have ${bal}).` }, 402);
-    }
-    if (errCode === "profile_not_found") {
-      return jsonResponse({ ok: false, error: "Could not verify Neuron balance." }, 500);
-    }
-    if (errCode === "invalid_entry_type") {
-      return jsonResponse({ ok: false, error: "Invalid entry type." }, 400);
-    }
-    if (errCode === "empty_content") {
-      return jsonResponse({ ok: false, error: "Entry cannot be empty." }, 400);
-    }
-    console.warn("[oi/create] RPC rejected", errCode);
-    return jsonResponse({ ok: false, error: "Entry could not be saved. Your neurons were not charged." }, 500);
+  // ── RPC returned ok=false (business logic rejection) ──
+  if (rpcResult.ok === false) {
+    const mapped = mapOiError(rpcResult.error ?? undefined, null);
+    return jsonResponse({ ok: false, code: mapped.code, error: mapped.message }, mapped.status);
   }
 
   // ── Duplicate (already created) — return the existing entry ──
@@ -4025,10 +3802,11 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
     }
   }
 
+  // ── RPC succeeded — extract entry ID ──
   const newEntryId = rpcResult.entry_id;
   if (!newEntryId) {
     console.warn("[oi/create] RPC succeeded but no entry_id returned");
-    return jsonResponse({ ok: false, error: "Entry could not be saved. Your neurons were not charged." }, 500);
+    return jsonResponse({ ok: false, code: "OI_SERVER_ERROR", error: "Entry could not be saved. Your neurons were not charged." }, 500);
   }
 
   // ── Fetch the created entry (with trigger-computed quality/influence/hash) ──
@@ -4040,12 +3818,14 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
 
   if (fetchErr || !newEntry) {
     // The entry was created (RPC succeeded) but we can't fetch it. Don't refund —
-    // the entry exists. Return success with the ID.
+    // the entry exists and neurons were deducted. Return success with the ID.
     console.warn("[oi/create] entry created but fetch failed", fetchErr?.message);
     return jsonResponse({
       ok: true,
       entryId: newEntryId,
       edgeCost: OI_ENTRY_COSTS[entryType],
+      balanceSubscriptionAfter: rpcResult.balance_subscription_after,
+      balancePurchasedAfter: rpcResult.balance_purchased_after,
     });
   }
 

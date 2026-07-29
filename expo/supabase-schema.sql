@@ -2812,8 +2812,8 @@ begin
   v_score := v_score + least(15, coalesce(v_proper_nouns, 0) * 3 + coalesce(v_numbers, 0) * 2);
 
   -- 4. Category/tag alignment
-  v_tag_count := coalesce(array_length(coalesce(new.selected_subtags, '{}'::jsonb), 1), 0)
-    + coalesce(array_length(coalesce(new.custom_tags, '{}'::jsonb), 1), 0)
+  v_tag_count := coalesce(jsonb_array_length(coalesce(new.selected_subtags, '[]'::jsonb)), 0)
+    + coalesce(jsonb_array_length(coalesce(new.custom_tags, '[]'::jsonb)), 0)
     + case when new.selected_category is not null then 1 else 0 end;
   v_score := v_score + least(10, v_tag_count * 3);
 
