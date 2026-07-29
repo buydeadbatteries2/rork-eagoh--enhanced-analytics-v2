@@ -3572,7 +3572,9 @@ function mapOiError(rpcErrorCode: string | undefined, supabaseErr: { code?: stri
     // 42883 = function does not exist (trigger or RPC missing)
     // 42703 = column does not exist
     // 42P01 = table does not exist
-    if (pgCode === "42883" || pgCode === "42703" || pgCode === "42P01") {
+    // 0A000 = feature not supported (e.g. set-returning function in scalar context)
+    // P0001 = PL/pgSQL raise_exception (trigger function runtime error)
+    if (pgCode === "42883" || pgCode === "42703" || pgCode === "42P01" || pgCode === "0A000" || pgCode === "P0001") {
       // ── Secure diagnostic: log full PG error server-side, never sent to client ──
       console.error("[oi/create] SCHEMA ERROR", {
         pgCode,

@@ -1,30 +1,34 @@
 -- =============================================================================
--- EAGOH Open Intelligence — Complete Idempotent Repair Migration
+-- EAGOH Open Intelligence — Complete Idempotent Repair Migration (v2)
 -- =============================================================================
 -- LIVE DIAGNOSIS (2026-07-29):
---   RPC create_oi_entry exists and is callable.
---   On INSERT into open_intelligence, the BEFORE INSERT trigger fires
---   evaluate_oi_quality_trigger(). That function calls:
---     array_length(jsonb, integer)
---   which does NOT exist in PostgreSQL — the correct call is:
---     jsonb_array_length(jsonb)
---   PostgreSQL SQLSTATE: 42883
---   Message: function array_length(jsonb, integer) does not exist
 --
---   The RPC catches this and returns {ok:false, error:null} with
---   PostgREST error code 42883, causing the Worker to return OI_SCHEMA_ERROR.
+--   FIRST failure (before v1 migration):
+--     SQLSTATE: 42883
+--     Message: function array_length(jsonb, integer) does not exist
+--     Cause: evaluate_oi_quality_trigger() called array_length(jsonb, int)
+--     Fix: replaced with jsonb_array_length(jsonb)  [v1 migration]
 --
--- This migration:
---   1. Ensures all required columns exist on open_intelligence
---   2. Ensures oi_creation_ledger table + unique index
---   3. Ensures edge_transactions table
---   4. Recreates evaluate_oi_quality_trigger() with jsonb_array_length()
---   5. Recreates both quality triggers (INSERT + UPDATE)
---   6. Recreates create_oi_entry with exact 12-parameter Worker-compatible signature
---   7. Recreates refund_oi_entry
---   8. Grants service_role execute; revokes public/anon/authenticated
+--   SECOND failure (after v1 migration, still OI_SERVER_ERROR):
+--     SQLSTATE: 0A000
+--     Message: set-returning functions are not allowed in COALESCE
+--     Hint: You might be able to move the set-returning function into a LATERAL FROM item.
+--     Cause: regexp_matches(text, pattern, 'g') returns SETOF text[] — a set-returning
+--            function. It CANNOT be used as a scalar argument to array_length() or
+--            coalesce(). Three statements did this:
+--              v_proper_nouns := array_length(regexp_matches(..., 'g'), 1);
+--              v_numbers := array_length(regexp_matches(..., 'g'), 1);
+--              v_negation_count := coalesce(array_length(regexp_matches(..., 'gi'), 1), 0);
+--     Fix: replaced all three with:
+--            SELECT count(*) INTO v_var FROM regexp_matches(text, pattern, flags);
 --
--- This migration is fully idempotent — safe to run multiple times.
+--   ADDITIONAL safety: jsonb_array_length() crashes if the jsonb value is not an
+--   array (e.g. '{}' object or 'null'). Added jsonb_typeof() guard:
+--     CASE WHEN jsonb_typeof(coalesce(col, '[]'::jsonb)) = 'array'
+--          THEN jsonb_array_length(coalesce(col, '[]'::jsonb))
+--          ELSE 0 END
+--
+-- This migration (v2) is fully idempotent — safe to run multiple times.
 -- =============================================================================
 
 -- ── 1. Ensure open_intelligence table exists ─────────────────────────────────
@@ -261,15 +265,23 @@ begin
   end if;
 
   -- 3. Specificity
-  v_proper_nouns := array_length(regexp_matches(v_text, '\b[A-Z][a-z]{2,}\b', 'g'), 1);
-  v_numbers := array_length(regexp_matches(v_text, '\b\d+', 'g'), 1);
+  -- FIX: regexp_matches(..., 'g') returns SETOF text[] — a set-returning function.
+  -- It CANNOT be passed to array_length() as a scalar. Use SELECT count(*) FROM regexp_matches().
+  select count(*) into v_proper_nouns from regexp_matches(v_text, '[A-Z][a-z]{2,}', 'g');
+  select count(*) into v_numbers from regexp_matches(v_text, '[0-9]+', 'g');
   v_score := v_score + least(15, coalesce(v_proper_nouns, 0) * 3 + coalesce(v_numbers, 0) * 2);
 
   -- 4. Category/tag alignment
   -- FIX: use jsonb_array_length() instead of array_length() for jsonb columns
   -- FIX: use '[]'::jsonb (empty array) instead of '{}'::jsonb (empty object)
-  v_tag_count := coalesce(jsonb_array_length(coalesce(new.selected_subtags, '[]'::jsonb)), 0)
-    + coalesce(jsonb_array_length(coalesce(new.custom_tags, '[]'::jsonb)), 0)
+  -- FIX: guard with jsonb_typeof() = 'array' — jsonb_array_length() crashes on non-array jsonb
+  v_tag_count :=
+    case when jsonb_typeof(coalesce(new.selected_subtags, '[]'::jsonb)) = 'array'
+         then coalesce(jsonb_array_length(coalesce(new.selected_subtags, '[]'::jsonb)), 0)
+         else 0 end
+    + case when jsonb_typeof(coalesce(new.custom_tags, '[]'::jsonb)) = 'array'
+           then coalesce(jsonb_array_length(coalesce(new.custom_tags, '[]'::jsonb)), 0)
+           else 0 end
     + case when new.selected_category is not null then 1 else 0 end;
   v_score := v_score + least(10, v_tag_count * 3);
 
@@ -298,7 +310,8 @@ begin
   v_score := v_score + least(10, v_support_count * 3);
 
   -- 8. Internal consistency (simplified)
-  v_negation_count := coalesce(array_length(regexp_matches(v_text, '\bnot\b|\bnever\b|\bcannot\b', 'gi'), 1), 0);
+  -- FIX: regexp_matches(..., 'gi') returns SETOF text[] — use SELECT count(*) FROM regexp_matches().
+  select count(*) into v_negation_count from regexp_matches(v_text, '\bnot\b|\bnever\b|\bcannot\b', 'gi');
   if v_negation_count <= 2 then v_score := v_score + 5; end if;
 
   -- 9. Non-duplicative (keyword stuffing check — simplified)
@@ -506,7 +519,9 @@ begin
     p_user_id, p_eagoh_id, p_intelligence_domain, p_entry_type, p_tag, p_content,
     v_char_count, p_confidence_level, 0,
     'pending_review', 0,
-    p_selected_category, p_selected_subtags, p_custom_tags
+    p_selected_category,
+    case when jsonb_typeof(p_selected_subtags) = 'array' then p_selected_subtags else '[]'::jsonb end,
+    case when jsonb_typeof(p_custom_tags) = 'array' then p_custom_tags else '[]'::jsonb end
   )
   returning id into v_new_entry_id;
 
