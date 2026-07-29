@@ -46,6 +46,7 @@ import {
   fetchVersionHistory,
   hasModerationAccess,
   VALIDATION_STATUS_LABELS,
+  VALIDATION_STATUS_HELP,
   validationStatusColor,
   CHANGE_TYPE_LABELS,
   type ConfidenceLevel,
@@ -72,6 +73,7 @@ import {
   FlaskConical,
   GitBranch,
   Hash,
+  Info,
   ListChecks,
   Plus,
   RotateCcw,
@@ -656,6 +658,8 @@ const LearningEntry = memo(function LearningEntry({
   const statusKey = entry.validation_status ?? "pending_review";
   const statusLabel = VALIDATION_STATUS_LABELS[statusKey] ?? "Pending Review";
   const statusColor = validationStatusColor(statusKey);
+  const statusHelp = VALIDATION_STATUS_HELP[statusKey] ?? VALIDATION_STATUS_HELP.pending_review;
+  const [showStatusInfo, setShowStatusInfo] = useState(false);
 
   return (
     <View style={styles.learningCard}>
@@ -694,9 +698,21 @@ const LearningEntry = memo(function LearningEntry({
         <View style={styles.learningScoreDivider} />
         <View style={styles.learningScoreItem}>
           <Text style={styles.learningScoreLabel}>Status</Text>
-          <Text style={[styles.learningScoreVal, { color: statusColor }]}>{statusLabel}</Text>
+          <Pressable
+            onPress={() => setShowStatusInfo((v) => !v)}
+            style={{ flexDirection: "row", alignItems: "center", gap: 3 }}
+          >
+            <Text style={[styles.learningScoreVal, { color: statusColor }]}>{statusLabel}</Text>
+            <Info color={statusColor} size={10} />
+          </Pressable>
         </View>
       </View>
+      {showStatusInfo ? (
+        <View style={[styles.learningStatusInfo, { borderColor: `${statusColor}22` }]}>
+          <Info color={statusColor} size={10} />
+          <Text style={[styles.learningStatusInfoText, { color: statusColor }]}>{statusHelp}</Text>
+        </View>
+      ) : null}
     </View>
   );
 });
@@ -2383,6 +2399,18 @@ const styles = StyleSheet.create({
   learningScoreLabel: { color: palette.muted, fontSize: 9, fontWeight: "700", textTransform: "uppercase" },
   learningScoreVal: { fontSize: 11, fontWeight: "900" },
   learningScoreDivider: { width: 1, height: 12, backgroundColor: palette.line },
+  learningStatusInfo: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 6,
+    marginTop: 6,
+    paddingTop: 6,
+    paddingBottom: 4,
+    paddingHorizontal: 8,
+    borderRadius: 4,
+    borderWidth: 1,
+  },
+  learningStatusInfoText: { fontSize: 10, fontWeight: "700", flex: 1, lineHeight: 14 },
 
   // General
   disabledButton: { opacity: 0.45 },

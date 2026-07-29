@@ -86,6 +86,65 @@ export async function createThread(params: {
 }
 
 /**
+ * List recent threads for a specific EAGOH, newest first.
+ * Used by the Sessions page to show EAGOH-scoped recent activity.
+ */
+export async function listThreadsForEagoh(
+  userId: string,
+  eagohId: string,
+  limit: number = 5,
+): Promise<ThreadWithMeta[]> {
+  const { data, error } = await supabase
+    .from("analyst_threads")
+    .select(`
+      *,
+      eagohs (name, image_url, image_thumb_url)
+    `)
+    .eq("user_id", userId)
+    .eq("eagoh_id", eagohId)
+    .order("updated_at", { ascending: false })
+    .limit(limit);
+
+  if (error) throw error;
+
+  const threads = (data ?? []) as ThreadRow[];
+
+  const enriched: ThreadWithMeta[] = [];
+  for (const t of threads) {
+    const { count } = await supabase
+      .from("analyst_messages")
+      .select("*", { count: "exact", head: true })
+      .eq("thread_id", t.id);
+
+    const { data: lastMsg } = await supabase
+      .from("analyst_messages")
+      .select("content")
+      .eq("thread_id", t.id)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
+
+    enriched.push({
+      id: t.id,
+      user_id: t.user_id,
+      eagoh_id: t.eagoh_id,
+      session_type: t.session_type as AnalystSessionType,
+      title: t.title,
+      domain: t.domain,
+      created_at: t.created_at,
+      updated_at: t.updated_at,
+      eagoh_name: t.eagohs?.name ?? undefined,
+      eagoh_image_url: t.eagohs?.image_url ?? null,
+      eagoh_image_thumb_url: t.eagohs?.image_thumb_url ?? null,
+      message_count: count ?? 0,
+      last_message_preview: lastMsg?.content?.slice(0, 80) ?? null,
+    });
+  }
+
+  return enriched;
+}
+
+/**
  * List recent threads for a user, newest first.
  *
  * Supports offset-based pagination so callers can load incrementally

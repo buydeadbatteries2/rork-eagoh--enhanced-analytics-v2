@@ -536,6 +536,16 @@ export const VALIDATION_STATUS_LABELS: Record<string, string> = {
   withdrawn: "Withdrawn",
 };
 
+/** Helper text explaining what each validation status means. */
+export const VALIDATION_STATUS_HELP: Record<string, string> = {
+  pending_review: "This entry was saved successfully and is awaiting validation.",
+  community_supported: "This entry has been validated and is available for use in analyst sessions.",
+  externally_supported: "This entry is supported by external evidence and carries increased weight in sessions.",
+  disputed: "This entry has been disputed. It remains available but with reduced weight in sessions.",
+  rejected: "This entry was rejected during validation and is not used in analyst sessions.",
+  withdrawn: "This entry was withdrawn by its owner and is no longer active.",
+};
+
 /** Validation status colors for trust indicators. */
 export function validationStatusColor(status: string): string {
   switch (status) {

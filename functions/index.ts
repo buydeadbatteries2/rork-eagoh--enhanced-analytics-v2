@@ -3528,7 +3528,7 @@ async function handleEvaluateQuality(request: Request, env: Env): Promise<Respon
 
 // ── OI Create Handler (atomic deduction + insert) ─────────────────────────────
 
-const DEBUG_OI = true; // dev-only OI logging
+const DEBUG_OI = true; // dev-only OI logging — auto-validation v2
 
 const OI_ENTRY_COSTS: Record<string, number> = {
   quick_observation: 10,
@@ -3842,6 +3842,65 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
       balanceSubscriptionAfter: rpcResult.balance_subscription_after,
       balancePurchasedAfter: rpcResult.balance_purchased_after,
     });
+  }
+
+  // ── Auto-validate the newly created entry ──
+  // Entries should not remain pending_review indefinitely.
+  // Run basic structural checks and promote to the appropriate status:
+  //   - duplicate_flag = true → disputed
+  //   - meaningless/gibberish content → rejected
+  //   - normal valid entry → community_supported (system auto-validated)
+  const newEntryRow = newEntry as {
+    content?: string;
+    duplicate_flag?: boolean | null;
+    quality_score?: number;
+    intelligence_domain?: string;
+    validation_status?: string;
+  };
+
+  let autoStatus: string = "community_supported";
+
+  // 1. Duplicate (flagged by DB trigger) → disputed
+  if (newEntryRow.duplicate_flag === true) {
+    autoStatus = "disputed";
+  } else {
+    // 2. Check for meaningless content (gibberish, keyword stuffing)
+    const rawContent = (newEntryRow.content ?? "").trim();
+    const words = rawContent.split(/\s+/).filter((w: string) => w.length > 2);
+    const uniqueWords = new Set(words.map((w: string) => w.toLowerCase()));
+
+    if (uniqueWords.size < 5) {
+      autoStatus = "rejected";
+    } else {
+      // Check for repetitive content (single word > 50% of meaningful words)
+      const wordFreq: Record<string, number> = {};
+      for (const w of words) {
+        const lw = w.toLowerCase();
+        wordFreq[lw] = (wordFreq[lw] ?? 0) + 1;
+      }
+      const maxFreq = Math.max(...Object.values(wordFreq));
+      if (maxFreq > words.length * 0.5 && words.length > 4) {
+        autoStatus = "rejected";
+      }
+    }
+  }
+
+  // Update the entry's validation_status
+  const { error: statusUpdateErr } = await serviceClient
+    .from("open_intelligence")
+    .update({ validation_status: autoStatus })
+    .eq("id", newEntryId);
+
+  if (statusUpdateErr) {
+    console.warn("[oi/create] auto-validation status update failed", statusUpdateErr.message);
+    // Don't fail the request — the entry was created successfully.
+    // It will remain pending_review and can be moderated manually.
+  } else {
+    // Update the returned entry object with the new status
+    (newEntry as Record<string, unknown>).validation_status = autoStatus;
+    if (DEBUG_OI) {
+      console.log("[oi/create] auto-validated entryId=" + newEntryId.slice(0, 8) + " status=" + autoStatus);
+    }
   }
 
   if (DEBUG_OI) {

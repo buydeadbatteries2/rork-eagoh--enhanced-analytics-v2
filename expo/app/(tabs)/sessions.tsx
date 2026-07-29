@@ -84,6 +84,7 @@ import {
   addMessage,
   listMessages,
   listThreads,
+  listThreadsForEagoh,
   deleteThread,
   generateThreadTitle,
   type AnalystThread,
@@ -2229,11 +2230,15 @@ export default function SessionsScreen(): JSX.Element {
 
   const selectedEagoh = useMemo(() => eagohs.find((e) => e.id === selectedEagohId), [eagohs, selectedEagohId]);
 
-  // Recent threads query
+  // Recent threads query — scoped to the selected EAGOH so switching EAGOHs
+  // immediately re-fetches the correct threads and never shows stale data.
   const threadsQuery = useQuery<ThreadWithMeta[]>({
-    queryKey: ["analyst", "threads", profile?.id],
-    enabled: !!profile?.id,
-    queryFn: () => profile?.id ? listThreads(profile.id, 10) : Promise.resolve([]),
+    queryKey: ["recent-analysis-thread", profile?.id, selectedEagohId],
+    enabled: !!profile?.id && !!selectedEagohId,
+    queryFn: () =>
+      profile?.id && selectedEagohId
+        ? listThreadsForEagoh(profile.id, selectedEagohId, 5)
+        : Promise.resolve([]),
   });
 
   // Keep selected in sync when eagohs load
@@ -2490,72 +2495,90 @@ export default function SessionsScreen(): JSX.Element {
             onPress={() => setShowPicker(true)}
           />
 
-          {/* Recent Analyst Threads — limited to 3 on Sessions, full list in Archive */}
-          {threadsQuery.data && threadsQuery.data.length > 0 ? (
-            <View style={styles.recentThreadsSection}>
-              <Text style={styles.sectionLabel}>RECENT ANALYST THREADS</Text>
-              <View style={styles.recentThreadsList}>
-                {threadsQuery.data.slice(0, 3).map((thread) => {
-                  const st = sessionTypes.find((s) => s.id === thread.session_type);
-                  const ac = st ? toneColor(st.tone) : palette.cyan;
-                  return (
-                    <Pressable
-                      key={thread.id}
-                      onPress={() => handleReopenThread(thread)}
-                      style={({ pressed }) => [
-                        styles.recentThreadCard,
-                        { borderColor: `${ac}22` },
-                        pressed && styles.pressed,
-                      ]}
-                    >
-                      <View style={[styles.recentThreadIcon, { backgroundColor: `${ac}14`, borderColor: `${ac}33` }]}>
-                        <MessageSquare color={ac} size={16} />
-                      </View>
-                      <View style={styles.recentThreadInfo}>
-                        <Text style={styles.recentThreadTitle} numberOfLines={1}>{thread.title}</Text>
-                        <Text style={styles.recentThreadMeta}>
-                          {thread.eagoh_name ?? "EAGOH"} · {st?.name ?? thread.session_type} · {thread.message_count} msgs · {new Date(thread.updated_at).toLocaleDateString()}
-                        </Text>
-                      </View>
-                      <Pressable
-                        onPress={() => handleDeleteThread(thread)}
-                        hitSlop={8}
-                        style={styles.recentThreadDelete}
-                      >
-                        <Trash2 color={palette.muted} size={14} />
-                      </Pressable>
-                    </Pressable>
-                  );
-                })}
+          {/* Recent Analyst Threads — always visible with loading/empty/error states */}
+          <View style={styles.recentThreadsSection}>
+            <Text style={styles.sectionLabel}>RECENT ANALYST THREADS</Text>
+            {threadsQuery.isLoading ? (
+              <View style={styles.recentThreadEmpty}>
+                <ActivityIndicator color={palette.cyan} size="small" />
+                <Text style={styles.recentThreadEmptyText}>Loading recent analysis...</Text>
               </View>
-              {/* View All Analyst Threads button */}
-              {threadsQuery.data.length > 3 ? (
-                <Pressable
-                  onPress={() => router.push("/analyst-archive" as never)}
-                  style={({ pressed }) => [
-                    {
-                      flexDirection: "row",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: 6,
-                      paddingVertical: 10,
-                      marginTop: 6,
-                      borderRadius: 5,
-                      borderWidth: 1,
-                      borderColor: "rgba(108,230,255,0.18)",
-                      backgroundColor: "rgba(108,230,255,0.04)",
-                    },
-                    pressed && { opacity: 0.8 },
-                  ]}
-                >
-                  <Text style={{ color: palette.cyan, fontSize: 12, fontWeight: "800" as const }}>
-                    View All Analyst Threads
-                  </Text>
-                  <ChevronRight color={palette.cyan} size={14} />
-                </Pressable>
-              ) : null}
-            </View>
-          ) : null}
+            ) : threadsQuery.isError ? (
+              <View style={styles.recentThreadEmpty}>
+                <Text style={[styles.recentThreadEmptyText, { color: palette.gold }]}>
+                  Recent analysis could not be loaded.
+                </Text>
+              </View>
+            ) : threadsQuery.data && threadsQuery.data.length > 0 ? (
+              <>
+                <View style={styles.recentThreadsList}>
+                  {threadsQuery.data.slice(0, 3).map((thread) => {
+                    const st = sessionTypes.find((s) => s.id === thread.session_type);
+                    const ac = st ? toneColor(st.tone) : palette.cyan;
+                    return (
+                      <Pressable
+                        key={thread.id}
+                        onPress={() => handleReopenThread(thread)}
+                        style={({ pressed }) => [
+                          styles.recentThreadCard,
+                          { borderColor: `${ac}22` },
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <View style={[styles.recentThreadIcon, { backgroundColor: `${ac}14`, borderColor: `${ac}33` }]}>
+                          <MessageSquare color={ac} size={16} />
+                        </View>
+                        <View style={styles.recentThreadInfo}>
+                          <Text style={styles.recentThreadTitle} numberOfLines={1}>{thread.title}</Text>
+                          <Text style={styles.recentThreadMeta}>
+                            {thread.eagoh_name ?? "EAGOH"} · {st?.name ?? thread.session_type} · {thread.message_count} msgs · {new Date(thread.updated_at).toLocaleDateString()}
+                          </Text>
+                        </View>
+                        <Pressable
+                          onPress={() => handleDeleteThread(thread)}
+                          hitSlop={8}
+                          style={styles.recentThreadDelete}
+                        >
+                          <Trash2 color={palette.muted} size={14} />
+                        </Pressable>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                {/* View All Analyst Threads button */}
+                {threadsQuery.data.length > 3 ? (
+                  <Pressable
+                    onPress={() => router.push("/analyst-archive" as never)}
+                    style={({ pressed }) => [
+                      {
+                        flexDirection: "row",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 6,
+                        paddingVertical: 10,
+                        marginTop: 6,
+                        borderRadius: 5,
+                        borderWidth: 1,
+                        borderColor: "rgba(108,230,255,0.18)",
+                        backgroundColor: "rgba(108,230,255,0.04)",
+                      },
+                      pressed && { opacity: 0.8 },
+                    ]}
+                  >
+                    <Text style={{ color: palette.cyan, fontSize: 12, fontWeight: "800" as const }}>
+                      View All Analyst Threads
+                    </Text>
+                    <ChevronRight color={palette.cyan} size={14} />
+                  </Pressable>
+                ) : null}
+              </>
+            ) : (
+              <View style={styles.recentThreadEmpty}>
+                <MessageSquare color={palette.muted} size={16} />
+                <Text style={styles.recentThreadEmptyText}>No recent analysis threads yet.</Text>
+              </View>
+            )}
+          </View>
 
           {/* Session type cards */}
           <Text style={styles.sectionLabel}>SESSION TYPES</Text>
@@ -3073,6 +3096,17 @@ const styles = StyleSheet.create({
   // Recent threads section
   recentThreadsSection: { marginBottom: 18 },
   recentThreadsList: { gap: 6 },
+  recentThreadEmpty: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    borderRadius: 5,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.06)",
+    backgroundColor: "rgba(10,18,30,0.40)",
+  },
+  recentThreadEmptyText: { color: palette.muted, fontSize: 11, fontWeight: "700" },
   recentThreadCard: {
     flexDirection: "row",
     alignItems: "center",
