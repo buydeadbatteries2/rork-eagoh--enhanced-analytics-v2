@@ -1,14 +1,28 @@
 -- =============================================================================
--- EAGOH Open Intelligence Fix Migration
+-- EAGOH Open Intelligence — Complete Idempotent Repair Migration
 -- =============================================================================
--- Fixes:
---   1. evaluate_oi_quality_trigger() used array_length(jsonb, int) which does
---      NOT exist in PostgreSQL — changed to jsonb_array_length().
---   2. Ensures all required columns exist on open_intelligence.
---   3. Ensures oi_creation_ledger table exists with unique index.
---   4. Ensures edge_transactions table exists.
---   5. Recreates the create_oi_entry atomic RPC with correct signature.
---   6. Recreates triggers, RLS policies, grants.
+-- LIVE DIAGNOSIS (2026-07-29):
+--   RPC create_oi_entry exists and is callable.
+--   On INSERT into open_intelligence, the BEFORE INSERT trigger fires
+--   evaluate_oi_quality_trigger(). That function calls:
+--     array_length(jsonb, integer)
+--   which does NOT exist in PostgreSQL — the correct call is:
+--     jsonb_array_length(jsonb)
+--   PostgreSQL SQLSTATE: 42883
+--   Message: function array_length(jsonb, integer) does not exist
+--
+--   The RPC catches this and returns {ok:false, error:null} with
+--   PostgREST error code 42883, causing the Worker to return OI_SCHEMA_ERROR.
+--
+-- This migration:
+--   1. Ensures all required columns exist on open_intelligence
+--   2. Ensures oi_creation_ledger table + unique index
+--   3. Ensures edge_transactions table
+--   4. Recreates evaluate_oi_quality_trigger() with jsonb_array_length()
+--   5. Recreates both quality triggers (INSERT + UPDATE)
+--   6. Recreates create_oi_entry with exact 12-parameter Worker-compatible signature
+--   7. Recreates refund_oi_entry
+--   8. Grants service_role execute; revokes public/anon/authenticated
 --
 -- This migration is fully idempotent — safe to run multiple times.
 -- =============================================================================
@@ -36,7 +50,7 @@ create table if not exists public.open_intelligence (
   updated_at timestamptz default now()
 );
 
--- ── 2. Add all optional columns (idempotent) ─────────────────────────────────
+-- ── 2. Add all optional/Phase 5B columns (idempotent) ────────────────────────
 
 alter table public.open_intelligence
   add column if not exists user_id uuid,
@@ -188,7 +202,7 @@ exception when others then null;
 end $$;
 
 -- ── 8. FIXED: evaluate_oi_quality_trigger function ───────────────────────────
--- The original used array_length(jsonb, int) which does NOT exist.
+-- The original used array_length(jsonb, int) which does NOT exist in PostgreSQL.
 -- Fixed to use jsonb_array_length() for jsonb columns.
 -- Also fixed default from '{}'::jsonb (object) to '[]'::jsonb (array).
 
@@ -208,8 +222,6 @@ declare
   v_lower_text text;
   v_support_keywords text[] := array['because','according to','source','evidence','observed','measured','reported','data','study','analysis'];
   v_negation_count int;
-  v_word_freq jsonb;
-  v_repeated_words int;
   v_meaningful_words int;
   v_entry_type_bonus int;
   v_influence int;
@@ -366,9 +378,14 @@ create trigger oi_quality_on_update
 
 -- ── 10. create_oi_entry RPC (atomic, security definer) ───────────────────────
 -- Drop any older overloads before creating the final version.
+-- The Worker calls this with exactly 12 named parameters:
+--   p_user_id, p_request_id, p_eagoh_id, p_intelligence_domain,
+--   p_entry_type, p_content, p_confidence_level, p_tag,
+--   p_selected_subtags, p_custom_tags, p_selected_category, p_note
 
 drop function if exists public.create_oi_entry(uuid, text, uuid, text, text, text, text, text, jsonb, jsonb, int);
 drop function if exists public.create_oi_entry(uuid, uuid, text, text, text, text, jsonb, jsonb, text);
+drop function if exists public.create_oi_entry(uuid, text, uuid, text, text, text, text, text, jsonb, jsonb, text, text);
 
 create or replace function public.create_oi_entry(
   p_user_id uuid,

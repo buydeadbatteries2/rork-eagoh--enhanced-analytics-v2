@@ -1,5 +1,5 @@
 /**
-// EAGOH Analyst Chat — Cloudflare Worker (v5-forge-fix-recheck)
+// EAGOH Analyst Chat — Cloudflare Worker (v6-oi-diag-deploy)
  * Phase RETAINED-OI-2 — Trusted purchase reversal status (record_exchange_purchase_reversal RPC)
  * Phase RETAINED-OI-1 + Cap — Retained Exchange Intelligence + 25% Cumulative Cap
   * Phase 12A — Social sharing + faction invite by email/username
@@ -3573,7 +3573,13 @@ function mapOiError(rpcErrorCode: string | undefined, supabaseErr: { code?: stri
     // 42703 = column does not exist
     // 42P01 = table does not exist
     if (pgCode === "42883" || pgCode === "42703" || pgCode === "42P01") {
-      console.error("[oi/create] SCHEMA ERROR — RPC or trigger missing/broken:", pgCode, supabaseErr.message);
+      // ── Secure diagnostic: log full PG error server-side, never sent to client ──
+      console.error("[oi/create] SCHEMA ERROR", {
+        pgCode,
+        message: supabaseErr.message,
+        details: supabaseErr.details ?? null,
+        hint: supabaseErr.hint ?? null,
+      });
       return { code: "OI_SCHEMA_ERROR", status: 500, message: "Open Intelligence is temporarily unavailable. Your neurons were not charged." };
     }
     // 42501 = RLS violation / insufficient privilege
@@ -3589,7 +3595,13 @@ function mapOiError(rpcErrorCode: string | undefined, supabaseErr: { code?: stri
       return { code: "OI_EAGOH_NOT_FOUND", status: 404, message: "The selected EAGOH could not be found." };
     }
   }
-  console.error("[oi/create] unmapped error:", rpcErrorCode ?? "none", supabaseErr?.code ?? "none", supabaseErr?.message ?? "none");
+  console.error("[oi/create] unmapped error", {
+    rpcErrorCode: rpcErrorCode ?? "none",
+    pgCode: supabaseErr?.code ?? "none",
+    message: supabaseErr?.message ?? "none",
+    details: supabaseErr?.details ?? null,
+    hint: supabaseErr?.hint ?? null,
+  });
   return { code: "OI_SERVER_ERROR", status: 500, message: "Entry could not be saved. Your neurons were not charged." };
 }
 

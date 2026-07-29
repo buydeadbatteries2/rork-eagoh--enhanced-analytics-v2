@@ -380,7 +380,6 @@ export async function submitEntry(input: SubmitEntryInput): Promise<SubmitEntryR
     else if (serverErr.includes("character limit") || serverErr.includes("empty") || serverErr.includes("does not meet") || serverErr.includes("EAGOH") || serverErr.includes("domain")) userError = "This entry does not meet the Open Intelligence requirements.";
     else userError = serverErr || "Entry could not be saved. Your neurons were not charged.";
     return { ok: false, error: userError, code: serverCode || undefined, edgeCost };
-    return { ok: false, error: userError, code: serverCode || undefined, edgeCost };
   }
 
   // Record recently used tags (best-effort)
