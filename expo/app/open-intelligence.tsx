@@ -89,6 +89,7 @@ import {
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Keyboard,
   KeyboardAvoidingView,
@@ -105,6 +106,8 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
+
+const MAX_ENTRY_TAGS = 10;
 
 type OptionTone = "cyan" | "gold" | "violet" | "ember" | "success";
 
@@ -308,17 +311,26 @@ const TagSelector = memo(function TagSelector({
   }, []);
 
   const handleToggle = useCallback((tagId: string): void => {
+    if (!selectedSubtags.includes(tagId) && selectedSubtags.length + customTags.length >= MAX_ENTRY_TAGS) {
+      Alert.alert("Tag limit reached", "You can add up to 10 tags per entry.");
+      return;
+    }
     h.selection();
     onToggleSubtag(tagId);
-  }, [onToggleSubtag, h]);
+  }, [onToggleSubtag, h, selectedSubtags, customTags.length]);
 
   const handleAddCustom = useCallback((): void => {
     const trimmed = customInput.trim().slice(0, 30);
-    if (trimmed && !customTags.includes(trimmed)) {
+    const normalized = trimmed.toLocaleLowerCase();
+    if (selectedSubtags.length + customTags.length >= MAX_ENTRY_TAGS) {
+      Alert.alert("Tag limit reached", "You can add up to 10 tags per entry.");
+      return;
+    }
+    if (trimmed && !customTags.some((tag) => tag.trim().toLocaleLowerCase() === normalized)) {
       onAddCustomTag(trimmed);
       setCustomInput("");
     }
-  }, [customInput, customTags, onAddCustomTag]);
+  }, [customInput, customTags, onAddCustomTag, selectedSubtags.length]);
 
   const handleRemoveSelected = useCallback((tagId: string): void => {
     h.selection();
@@ -343,9 +355,12 @@ const TagSelector = memo(function TagSelector({
   }, [recentTags, selectedSubtags, allTags]);
 
   const hasAnySelection = selectedSubtags.length > 0 || customTags.length > 0;
+  const tagCount = selectedSubtags.length + customTags.length;
+  const atTagLimit = tagCount >= MAX_ENTRY_TAGS;
 
   return (
     <View style={styles.tagSection}>
+      <Text style={styles.tagLimitText}>{tagCount}/{MAX_ENTRY_TAGS} tags · You can add up to 10 tags per entry.</Text>
       {/* Selected subtags chips */}
       {selectedSubtags.length > 0 ? (
         <View style={styles.selectedTagsRow}>
@@ -630,9 +645,17 @@ const ScorePreview = memo(function ScorePreview({
 const LearningEntry = memo(function LearningEntry({
   entry,
   domainId,
+  authenticatedUserId,
+  onEdit,
+  onDelete,
+  busy,
 }: {
   entry: OpenIntelligenceRow;
   domainId: string;
+  authenticatedUserId?: string;
+  onEdit: (entry: OpenIntelligenceRow) => void;
+  onDelete: (entry: OpenIntelligenceRow) => void;
+  busy: string | null;
 }): JSX.Element {
   const domainTags = useMemo(() => getAllTagsForDomain(domainId), [domainId]);
 
@@ -657,21 +680,23 @@ const LearningEntry = memo(function LearningEntry({
   const statusColor = validationStatusColor(statusKey);
   const statusHelp = VALIDATION_STATUS_HELP[statusKey] ?? VALIDATION_STATUS_HELP.pending_review;
   const [showStatusInfo, setShowStatusInfo] = useState(false);
+  const [showAllTags, setShowAllTags] = useState(false);
+  const isOwner = entry.user_id === authenticatedUserId;
+  const isActive = statusKey !== "withdrawn" && statusKey !== "rejected";
+  const visibleTags = showAllTags ? displayTags : displayTags.slice(0, 3);
 
   return (
     <View style={styles.learningCard}>
       <View style={styles.learningTop}>
-        <View style={styles.learningBadgeRow}>
-          {displayTags.slice(0, 3).map((label, idx) => (
-            <View key={idx} style={styles.learningBadge}>
+        <Pressable style={styles.learningBadgeRow} onPress={() => displayTags.length > 3 && setShowAllTags((shown) => !shown)} disabled={displayTags.length <= 3}>
+          {visibleTags.map((label, idx) => (
+            <View key={`${label}-${idx}`} style={styles.learningBadge}>
               <Hash color={palette.cyan} size={10} />
               <Text style={styles.learningBadgeText}>{label}</Text>
             </View>
           ))}
-          {displayTags.length > 3 ? (
-            <Text style={styles.learningBadgeMore}>+{displayTags.length - 3}</Text>
-          ) : null}
-        </View>
+          {displayTags.length > 3 ? <Text style={styles.learningBadgeMore}>{showAllTags ? "Show less" : `+${displayTags.length - 3}`}</Text> : null}
+        </Pressable>
         <View style={styles.learningMeta}>
           <Text style={styles.learningType}>{entryLabel}</Text>
           <Text style={styles.learningDot}>·</Text>
@@ -704,6 +729,18 @@ const LearningEntry = memo(function LearningEntry({
           </Pressable>
         </View>
       </View>
+      {isOwner && isActive ? (
+        <View style={styles.learningActionsRow}>
+          <Pressable onPress={() => onEdit(entry)} disabled={busy !== null} style={({ pressed }) => [styles.learningActionButton, pressed && styles.pressed]}>
+            <Edit3 color={palette.cyan} size={13} />
+            <Text style={[styles.learningActionText, { color: palette.cyan }]}>Edit Entry</Text>
+          </Pressable>
+          <Pressable onPress={() => onDelete(entry)} disabled={busy !== null} style={({ pressed }) => [styles.learningActionButton, { borderColor: `${palette.ember}44` }, pressed && styles.pressed]}>
+            {busy === `withdraw:${entry.id}` ? <ActivityIndicator color={palette.ember} size={13} /> : <Trash2 color={palette.ember} size={13} />}
+            <Text style={[styles.learningActionText, { color: palette.ember }]}>Delete Entry</Text>
+          </Pressable>
+        </View>
+      ) : null}
       {showStatusInfo ? (
         <View style={[styles.learningStatusInfo, { borderColor: `${statusColor}22` }]}>
           <Info color={statusColor} size={10} />
@@ -992,11 +1029,15 @@ function EditEntryModal({
 
   const handleAddCustom = useCallback((): void => {
     const trimmed = customInput.trim().slice(0, 30);
-    if (trimmed && !editCustomTags.includes(trimmed)) {
+    if (editSubtags.length + editCustomTags.length >= MAX_ENTRY_TAGS) {
+      Alert.alert("Tag limit reached", "You can add up to 10 tags per entry.");
+      return;
+    }
+    if (trimmed && !editCustomTags.some((tag) => tag.trim().toLowerCase() === trimmed.toLowerCase())) {
       setEditCustomTags((prev) => [...prev, trimmed]);
       setCustomInput("");
     }
-  }, [customInput, editCustomTags]);
+  }, [customInput, editCustomTags, editSubtags.length]);
 
   const handleSave = useCallback(async (): Promise<void> => {
     if (!entry || !editContent.trim()) return;
@@ -1096,7 +1137,8 @@ function EditEntryModal({
               })}
             </View>
 
-            <Text style={[styles.sectionLabel, { marginTop: 14 }]}>Subtags</Text>
+            <Text style={[styles.sectionLabel, { marginTop: 14 }]}>Subtags · {editSubtags.length + editCustomTags.length}/{MAX_ENTRY_TAGS}</Text>
+            <Text style={styles.tagLimitText}>You can add up to 10 tags per entry.</Text>
             {tags.map((cat) => {
               const isOpen = openCats[cat.id] ?? false;
               const selectedInCat = cat.tags.filter((t) => editSubtags.includes(t.id)).length;
@@ -1479,7 +1521,10 @@ export default function OpenIntelligenceScreen(): JSX.Element {
     const tagIds = new Set<string>();
     (feedQuery.data ?? []).forEach((entry) => {
       (entry.selected_subtags ?? []).forEach((tag) => tagIds.add(tag));
-      (entry.custom_tags ?? []).forEach((tag) => tagIds.add(`custom:${tag.toLowerCase()}`));
+      (entry.custom_tags ?? []).forEach((tag) => tagIds.add(`custom:${tag.trim().toLowerCase()}`));
+      if ((entry.selected_subtags ?? []).length === 0 && (entry.custom_tags ?? []).length === 0 && entry.tag && entry.tag !== "general") {
+        entry.tag.split(",").map((tag) => tag.trim()).filter(Boolean).forEach((tag) => tagIds.add(tag.toLowerCase().startsWith("custom:") ? `custom:${tag.slice(7).trim().toLowerCase()}` : tag));
+      }
     });
     return Array.from(tagIds).sort();
   }, [feedQuery.data]);
@@ -1487,19 +1532,24 @@ export default function OpenIntelligenceScreen(): JSX.Element {
   const filteredFeedEntries = useMemo(() => {
     if (selectedFeedTags.length === 0) return feedQuery.data ?? [];
     return (feedQuery.data ?? []).filter((entry) => {
+      const legacyTags = (entry.selected_subtags ?? []).length === 0 && (entry.custom_tags ?? []).length === 0
+        ? (entry.tag ?? "").split(",").map((tag) => tag.trim()).filter(Boolean).map((tag) => tag.toLowerCase().startsWith("custom:") ? `custom:${tag.slice(7).trim().toLowerCase()}` : tag)
+        : [];
       const entryTags = new Set([
         ...(entry.selected_subtags ?? []),
-        ...(entry.custom_tags ?? []).map((tag) => `custom:${tag.toLowerCase()}`),
+        ...(entry.custom_tags ?? []).map((tag) => `custom:${tag.trim().toLowerCase()}`),
+        ...legacyTags,
       ]);
       return selectedFeedTags.some((tag) => entryTags.has(tag));
     });
   }, [feedQuery.data, selectedFeedTags]);
 
   const handleToggleSubtag = useCallback((tagId: string): void => {
-    setSelectedSubtags((prev) =>
-      prev.includes(tagId) ? prev.filter((id) => id !== tagId) : [...prev, tagId]
-    );
-  }, []);
+    setSelectedSubtags((prev) => {
+      if (prev.includes(tagId)) return prev.filter((id) => id !== tagId);
+      return prev.length + customTags.length >= MAX_ENTRY_TAGS ? prev : [...prev, tagId];
+    });
+  }, [customTags.length]);
 
   // ── My Intelligence queries ──
   const myEntriesQuery = useQuery<OpenIntelligenceRow[]>({
@@ -1540,10 +1590,15 @@ export default function OpenIntelligenceScreen(): JSX.Element {
     }));
   }, [myEntriesQuery.data, sharedFactionQuery.data]);
 
-  const refreshMyEntries = useCallback((): void => {
-    queryClient.invalidateQueries({ queryKey: ["oi", "my-entries"] });
-    queryClient.invalidateQueries({ queryKey: ["oi", "my-shared-factions"] });
-  }, [queryClient]);
+  const refreshIntelligenceViews = useCallback((): void => {
+    queryClient.invalidateQueries({ queryKey: ["learning-feed", profile?.id, selectedEagohId] });
+    queryClient.invalidateQueries({ queryKey: ["oi", "my-entries", profile?.id] });
+    queryClient.invalidateQueries({ queryKey: ["oi", "my-shared-factions", profile?.id] });
+    queryClient.invalidateQueries({ queryKey: ["eagoh", selectedEagohId] });
+    queryClient.invalidateQueries({ queryKey: ["analyst"] });
+    queryClient.invalidateQueries({ queryKey: ["exchange"] });
+    queryClient.invalidateQueries({ queryKey: ["factions"] });
+  }, [profile?.id, queryClient, selectedEagohId]);
 
   const handleEditEntry = useCallback((entry: OpenIntelligenceRow): void => {
     setEditingEntry(entry);
@@ -1563,14 +1618,14 @@ export default function OpenIntelligenceScreen(): JSX.Element {
     setBusy(null);
     if (result.ok) {
       h.success();
-      setMyActionMsg("Entry withdrawn. It is no longer visible in analyst context.");
-      refreshMyEntries();
+      setMyActionMsg("Open Intelligence entry deleted.");
+      refreshIntelligenceViews();
     } else {
       setMyActionMsg(result.error ?? "Failed to withdraw entry.");
     }
     setWithdrawConfirmVisible(false);
     setWithdrawTarget(null);
-  }, [withdrawTarget, h, refreshMyEntries]);
+  }, [withdrawTarget, h, refreshIntelligenceViews]);
 
   const handleRestoreEntry = useCallback((entryId: string): void => {
     setRestoreTargetId(entryId);
@@ -1586,13 +1641,13 @@ export default function OpenIntelligenceScreen(): JSX.Element {
     if (result.ok) {
       h.success();
       setMyActionMsg("Entry restored to Pending Review. Re-enable sharing manually.");
-      refreshMyEntries();
+      refreshIntelligenceViews();
     } else {
       setMyActionMsg(result.error ?? "Failed to restore entry.");
     }
     setRestoreConfirmVisible(false);
     setRestoreTargetId(null);
-  }, [restoreTargetId, h, refreshMyEntries]);
+  }, [restoreTargetId, h, refreshIntelligenceViews]);
 
   const handleToggleExchange = useCallback(async (entryId: string, enabled: boolean): Promise<void> => {
     setBusy(`exchange:${entryId}`);
@@ -1602,11 +1657,11 @@ export default function OpenIntelligenceScreen(): JSX.Element {
     if (result.ok) {
       h.selection();
       setMyActionMsg(`Exchange sharing ${enabled ? "enabled" : "disabled"}.`);
-      refreshMyEntries();
+      refreshIntelligenceViews();
     } else {
       setMyActionMsg(result.error ?? "Exchange sharing could not be updated. Please try again.");
     }
-  }, [h, refreshMyEntries]);
+  }, [h, refreshIntelligenceViews]);
 
   const handleToggleFaction = useCallback(async (entryId: string, factionId: string, enabled: boolean): Promise<void> => {
     setBusy(`faction:${entryId}:${factionId}`);
@@ -1616,11 +1671,11 @@ export default function OpenIntelligenceScreen(): JSX.Element {
     if (result.ok) {
       h.selection();
       setMyActionMsg(`Faction sharing ${enabled ? "enabled" : "disabled"}.`);
-      refreshMyEntries();
+      refreshIntelligenceViews();
     } else {
       setMyActionMsg(result.error ?? "Failed to toggle faction sharing.");
     }
-  }, [h, refreshMyEntries]);
+  }, [h, refreshIntelligenceViews]);
 
   const handleShowVersions = useCallback((entryId: string): void => {
     setVersionEntryId(entryId);
@@ -1628,8 +1683,13 @@ export default function OpenIntelligenceScreen(): JSX.Element {
   }, []);
 
   const handleAddCustomTag = useCallback((tag: string): void => {
-    setCustomTags((prev) => (prev.includes(tag) ? prev : [...prev, tag]));
-  }, []);
+    const cleanTag = tag.trim().slice(0, 30);
+    if (!cleanTag) return;
+    setCustomTags((prev) => {
+      if (selectedSubtags.length + prev.length >= MAX_ENTRY_TAGS || prev.some((item) => item.trim().toLowerCase() === cleanTag.toLowerCase())) return prev;
+      return [...prev, cleanTag];
+    });
+  }, [selectedSubtags.length]);
 
   const handleRemoveCustomTag = useCallback((tag: string): void => {
     setCustomTags((prev) => prev.filter((t) => t !== tag));
@@ -1967,7 +2027,7 @@ export default function OpenIntelligenceScreen(): JSX.Element {
                 </View>
               </View>
             ) : null}
-            {feedQuery.isLoading ? <ActivityIndicator color={palette.cyan} style={styles.feedLoader} /> : (feedQuery.data?.length ?? 0) > 0 && filteredFeedEntries.length === 0 ? <Text style={styles.feedEmpty}>No entries match these tags.</Text> : filteredFeedEntries.length > 0 ? filteredFeedEntries.map((entry) => <LearningEntry key={entry.id} entry={entry} domainId={currentDomain} />) : <Text style={styles.feedEmpty}>{selectedEagoh ? `No entries for ${selectedEagoh.name} yet. Submit your first observation above.` : "Select an EAGOH and submit an entry to populate the feed."}</Text>}
+            {feedQuery.isLoading ? <ActivityIndicator color={palette.cyan} style={styles.feedLoader} /> : (feedQuery.data?.length ?? 0) > 0 && filteredFeedEntries.length === 0 ? <Text style={styles.feedEmpty}>No entries match these tags.</Text> : filteredFeedEntries.length > 0 ? filteredFeedEntries.map((entry) => <LearningEntry key={entry.id} entry={entry} domainId={currentDomain} authenticatedUserId={profile?.id} onEdit={handleEditEntry} onDelete={handleWithdrawEntry} busy={busy} />) : <Text style={styles.feedEmpty}>{selectedEagoh ? `No entries for ${selectedEagoh.name} yet. Submit your first observation above.` : "Select an EAGOH and submit an entry to populate the feed."}</Text>}
           </View>
 
         </ScrollView>
@@ -1980,7 +2040,10 @@ export default function OpenIntelligenceScreen(): JSX.Element {
         entry={editingEntry}
         domainId={editingEntry ? normalizeDomainId(editingEntry.intelligence_domain ?? "sports") : "sports"}
         onClose={() => setEditModalVisible(false)}
-        onSaved={refreshMyEntries}
+        onSaved={() => {
+          setMyActionMsg("Open Intelligence entry updated.");
+          refreshIntelligenceViews();
+        }}
       />
 
       {/* Version History Modal */}
@@ -1993,14 +2056,9 @@ export default function OpenIntelligenceScreen(): JSX.Element {
       {/* Withdraw Confirmation */}
       <ConfirmDialog
         visible={withdrawConfirmVisible}
-        title="Withdraw Entry?"
-        message={
-          "This entry will stop being used by analysts.\n" +
-          "Faction sharing will be removed.\n" +
-          "Exchange sharing will be disabled.\n" +
-          "The entry will not be permanently deleted."
-        }
-        confirmLabel="Withdraw"
+        title="Delete this Open Intelligence entry?"
+        message="This removes the entry from your active Learning Feed and prevents it from being used in future analysis. Historical citations may remain available."
+        confirmLabel="Delete Entry"
         confirmColor={palette.ember}
         onConfirm={handleConfirmWithdraw}
         onCancel={() => { setWithdrawConfirmVisible(false); setWithdrawTarget(null); }}
@@ -2434,6 +2492,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   learningStatusInfoText: { fontSize: 10, fontWeight: "700", flex: 1, lineHeight: 14 },
+  learningActionsRow: { flexDirection: "row", gap: 8, marginTop: 10 },
+  learningActionButton: { minHeight: 36, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingHorizontal: 10, borderWidth: 1, borderColor: `${palette.cyan}44`, borderRadius: 8 },
+  learningActionText: { fontSize: 11, fontWeight: "800" },
+  tagLimitText: { color: palette.muted, fontSize: 10, marginBottom: 8 },
 
   // General
   disabledButton: { opacity: 0.45 },

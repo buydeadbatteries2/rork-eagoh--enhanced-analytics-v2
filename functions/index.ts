@@ -3916,7 +3916,7 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
   });
 }
 
-// ── Phase 5B: OI Update Handler (version history + dispute preservation) ─────
+// ── Phase 5B: OI Update Handler (version history, tag validation, and dispute preservation) ─────
 
 async function handleUpdateOIEntry(request: Request, env: Env): Promise<Response> {
   if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
@@ -3948,6 +3948,15 @@ async function handleUpdateOIEntry(request: Request, env: Env): Promise<Response
   });
   const userId = await verifyAuth(supabase, jwt);
   if (!userId) return jsonResponse({ ok: false, error: "Invalid auth." }, 401);
+
+  const selectedSubtags = payload.selectedSubtags === undefined ? undefined : Array.isArray(payload.selectedSubtags) ? payload.selectedSubtags.filter((tag) => typeof tag === "string" && tag.trim()).map((tag) => tag.trim()) : null;
+  const customTags = payload.customTags === undefined ? undefined : Array.isArray(payload.customTags) ? payload.customTags.filter((tag) => typeof tag === "string" && tag.trim()).map((tag) => tag.trim().slice(0, 30)) : null;
+  if (selectedSubtags === null || customTags === null || (selectedSubtags?.length ?? 0) + (customTags?.length ?? 0) > 10) {
+    return jsonResponse({ ok: false, error: "You can add up to 10 tags per entry." }, 400);
+  }
+  if (customTags && new Set(customTags.map((tag) => tag.toLocaleLowerCase())).size !== customTags.length) {
+    return jsonResponse({ ok: false, error: "Custom tags must be unique." }, 400);
+  }
 
   const serviceClient = getServiceRoleClient(env);
   if (!serviceClient) {
@@ -4045,11 +4054,11 @@ async function handleUpdateOIEntry(request: Request, env: Env): Promise<Response
   if (payload.selectedCategory !== undefined) {
     updateFields.selected_category = payload.selectedCategory;
   }
-  if (payload.selectedSubtags !== undefined) {
-    updateFields.selected_subtags = payload.selectedSubtags;
+  if (selectedSubtags !== undefined) {
+    updateFields.selected_subtags = selectedSubtags;
   }
-  if (payload.customTags !== undefined) {
-    updateFields.custom_tags = payload.customTags;
+  if (customTags !== undefined) {
+    updateFields.custom_tags = customTags;
   }
   if (payload.exchangeShareEnabled !== undefined) {
     // Block enabling exchange sharing on rejected or withdrawn entries
