@@ -1239,6 +1239,27 @@ export default function ForgeScreen(): JSX.Element {
     setForgeError(null);
     setSheetError(null);
     setForgeSuccess(false);
+
+    // ── Fresh eligibility check before opening the confirmation modal ──
+    // Resolve the current effective tier, fetch the authoritative EAGOH count,
+    // and compare against the tier limit. Only open the modal if eligible.
+    if (!isEditing) {
+      // For initial forge: check tier limit using the same shared config.
+      const resolvedLimit = TIER_MAX_EAGOHS[currentTier] ?? 0;
+      if (resolvedLimit <= 0) {
+        setForgeError("Forge requires a Pro or higher subscription. Upgrade to forge EAGOHs.");
+        h.error();
+        return;
+      }
+      // canCreate comes from EagohProvider which uses the live query count.
+      // The backend will do its own authoritative check too.
+      if (!canCreate) {
+        setForgeError(`You've reached your tier's EAGOH limit (${resolvedLimit} max). Upgrade to forge more.`);
+        h.error();
+        return;
+      }
+    }
+
     // ── Refetch the profile from Supabase before opening the confirmation
     // sheet so the displayed Neuron balance matches the live DB value.
     refetchProfile();
@@ -1257,7 +1278,7 @@ export default function ForgeScreen(): JSX.Element {
     } else {
       prepareForge(draft, "initial");
     }
-  }, [domain.length, draft, name, prepareForge, isEditing, selectedEagohId, currentTier, reforgeCost, refetchProfile]);
+  }, [domain.length, draft, name, prepareForge, isEditing, selectedEagohId, currentTier, reforgeCost, refetchProfile, canCreate, h]);
 
   // ── Keyboard-aware scroll helpers ──────────────────────────────────
 
@@ -1329,6 +1350,7 @@ export default function ForgeScreen(): JSX.Element {
         const friendly: Record<string, string> = {
           balance: "Insufficient Neurons. Visit the Edge Store to get more.",
           auth: "Your session expired. Please sign in again.",
+          tier: "Forge requires a Pro or higher subscription. Upgrade to forge EAGOHs.",
           limit: "You've reached your tier's EAGOH limit. Upgrade to forge more.",
           image: "Image generation failed. Your Neurons were not charged.",
           persist: "Something went wrong saving your EAGOH. No Neurons were charged.",

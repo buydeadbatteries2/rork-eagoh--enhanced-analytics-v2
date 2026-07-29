@@ -52,7 +52,7 @@ export type RunForgeResult =
   | RunForgeSuccess
   | { ok: false; reason: ForgeErrorReason; error: string };
 
-export type ForgeErrorReason = "limit" | "image" | "persist" | "auth" | "balance" | "brand_logo" | "review" | "timeout";
+export type ForgeErrorReason = "limit" | "tier" | "image" | "persist" | "auth" | "balance" | "brand_logo" | "review" | "timeout";
 
 function toPromptInput(draft: EagohDraft, tier?: SubscriptionTier): ForgePromptInput {
   return {
@@ -102,8 +102,9 @@ export async function runForge(input: RunForgeInput): Promise<RunForgeResult> {
     const msg = gen.error;
     let reason: ForgeErrorReason = "image";
     if (/insufficient|balance|neurons|edge store/i.test(msg)) reason = "balance";
-    else if (/forge requires|pro or higher|limit|upgrade|tier/i.test(msg)) reason = "limit";
-    else if (/auth|sign in|session|expired/i.test(msg)) reason = "auth";
+    else if (/auth|sign in|session|expired|invalid auth/i.test(msg)) reason = "auth";
+    else if (/forge requires|pro or higher|tier too low/i.test(msg)) reason = "tier";
+    else if (/eagoh limit|reached.*limit|limit reached/i.test(msg)) reason = "limit";
     else if (/prohibited brand|real company|brand.*logo|PROHIBITED_BRAND/i.test(msg)) reason = "brand_logo";
     else if (/create|persist|update|eagoh|save/i.test(msg)) reason = "persist";
     else if (/safety review|review.*failed|could not complete.*review/i.test(msg)) reason = "review";

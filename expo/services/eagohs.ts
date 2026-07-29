@@ -1,5 +1,5 @@
 import { supabase } from "@/lib/supabase";
-import type { SubscriptionTier } from "@/services/profile";
+import { TIER_MAX_EAGOHS, type SubscriptionTier } from "@/services/tiers";
 
 /**
  * EAGOH persistence service.
@@ -199,16 +199,9 @@ export type EagohDraft = {
   imageUrl?: string | null;
 };
 
-/** Maximum user-forged EAGOHs per tier. Default shells are excluded. */
-export const TIER_EAGOH_LIMITS: Record<SubscriptionTier, number> = {
-  free: 0,
-  pro: 2,
-  oracle_elite: 3,
-  syndicate: 5,
-};
-
+/** Maximum user-forged EAGOHs per tier — uses the shared config from tiers.ts (single source of truth). */
 export function getEagohLimit(tier: SubscriptionTier): number {
-  return TIER_EAGOH_LIMITS[tier] ?? 1;
+  return TIER_MAX_EAGOHS[tier] ?? 1;
 }
 
 /** Lightweight list — does NOT load customization/teams/labs (lazy loaded per item). */
@@ -232,13 +225,15 @@ export async function countEagohs(userId: string): Promise<number> {
   return count ?? 0;
 }
 
-/** Count only user-forged EAGOHs, excluding default dormant shells. */
+/** Count only user-forged EAGOHs, excluding default dormant shells.
+ *  is_default_shell may be null in older DB rows — the filter excludes
+ *  rows where is_default_shell is explicitly true. */
 export async function countUserForgedEagohs(userId: string): Promise<number> {
   const { count, error } = await supabase
     .from("eagohs")
     .select("id", { count: "exact", head: true })
     .eq("user_id", userId)
-    .eq("is_default_shell", false);
+    .neq("is_default_shell", true);
   if (error) throw error;
   return count ?? 0;
 }

@@ -1,5 +1,5 @@
 /**
-// EAGOH Analyst Chat — Cloudflare Worker (v4-oi-fix)
+// EAGOH Analyst Chat — Cloudflare Worker (v5-forge-fix-recheck)
  * Phase RETAINED-OI-2 — Trusted purchase reversal status (record_exchange_purchase_reversal RPC)
  * Phase RETAINED-OI-1 + Cap — Retained Exchange Intelligence + 25% Cumulative Cap
   * Phase 12A — Social sharing + faction invite by email/username
@@ -62,7 +62,8 @@
  * Phase 5A — Intelligence Usage Auditing and Source Provenance (deployed).
  * Phase 5B — Human Intelligence Quality, Validation, and Reputation (deployed).
  * Phase 5B Security — Locked down feedback, disputes, reputation, versions, rate-limits to server-only.
- * Phase 12C — Server-side dev test subs, enforce server cost, remove is_default_shell from forge limit.
+ * Phase 12C — Server-side dev test subs, enforce server cost.
+ * Phase 12D — Forge tier-limit false-positive fix: always check dev_test_subscriptions, exclude default shells from count, distinct tier vs limit errors.
  */
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
@@ -9519,13 +9520,13 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
   const realTier = str((profileRow as Record<string, unknown>).subscription_tier, "free");
 
   // ── Dev test subscription resolution (server-side, secure) ──
-  // Only active when the private worker env flag ENABLE_DEV_TEST_SUBSCRIPTIONS=true.
-  // The worker loads the test tier from the dev_test_subscriptions table — never
-  // trusts a client-supplied tier. In production the flag is absent and this
-  // entire block is skipped.
-  const devFlag = str(env.ENABLE_DEV_TEST_SUBSCRIPTIONS).toLowerCase() === "true";
+  // Always check the dev_test_subscriptions table. In production there are
+  // simply no rows in it (RLS requires auth.uid() = user_id, and no
+  // production user ever writes to it). The table is the authoritative
+  // source for Expo Go / Rork preview test tiers — the worker never trusts
+  // a client-supplied tier.
   let devTestTier: string | null = null;
-  if (devFlag) {
+  {
     const { data: devRow } = await serviceClient
       .from("dev_test_subscriptions")
       .select("test_tier, expires_at")
@@ -9539,8 +9540,9 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
     }
   }
 
-  // Effective tier: real paid subscription always wins; dev test tier only
-  // applies when the real tier is free and the dev flag is on.
+  // Effective tier: the higher of (real DB tier, dev test tier) wins.
+  // A real paid subscription always takes priority over a dev test tier
+  // of equal or lower rank. A dev test tier only elevates a free user.
   const tierPriority: Record<string, number> = { free: 0, pro: 1, oracle_elite: 2, syndicate: 3 };
   let effectiveTier = realTier;
   if (devTestTier && (tierPriority[devTestTier] ?? 0) > (tierPriority[realTier] ?? 0)) {
@@ -9551,22 +9553,41 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
     userIdPrefix: userId.slice(0, 8),
     mode,
     realTier,
-    devTestTier: devFlag ? devTestTier : "disabled",
+    devTestTier,
     effectiveTier,
   });
 
   if (effectiveTier === "free") {
-    return jsonResponse({ ok: false, error: "Forge requires Pro or higher." }, 403);
+    return jsonResponse({ ok: false, error: "Forge requires Pro or higher.", code: "FORGE_TIER_TOO_LOW" }, 403);
   }
 
   // ── For initial forge: check EAGOH limit ──
-  // Count all EAGOH rows owned by the user. We do NOT filter on is_default_shell
-  // or any other column that may not exist in the live schema — just user_id.
+  // Count only user-forged EAGOHs, excluding default dormant shells.
+  // If the is_default_shell column doesn't exist in the live schema,
+  // fall back to counting all rows (the column was added in a migration
+  // and may be absent on older databases).
   if (mode === "initial") {
-    const { count, error: countErr } = await serviceClient
+    // First attempt: filter out default shells.
+    let countQuery = serviceClient
       .from("eagohs")
       .select("id", { count: "exact", head: true })
-      .eq("user_id", userId);
+      .eq("user_id", userId)
+      .eq("is_default_shell", false);
+
+    let { count, error: countErr } = await countQuery;
+
+    // If the column doesn't exist (42703 / PGRST204), retry without the filter.
+    if (countErr && (countErr.code === "42703" || countErr.code === "PGRST204" || /column.*does not exist/i.test(countErr.message))) {
+      console.warn("[forge] is_default_shell column missing, counting all rows", {
+        userIdPrefix: userId.slice(0, 8),
+      });
+      const fallback = await serviceClient
+        .from("eagohs")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId);
+      count = fallback.count;
+      countErr = fallback.error;
+    }
 
     if (countErr) {
       console.warn("[forge] EAGOH count failed", {
@@ -9574,15 +9595,21 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
         code: countErr.code,
         message: countErr.message,
       });
-      return jsonResponse({ ok: false, error: "Could not verify your EAGOH limit." }, 500);
+      return jsonResponse({ ok: false, error: "Could not verify your EAGOH limit.", code: "FORGE_COUNT_ERROR" }, 500);
     }
 
     const eagohCount = count ?? 0;
     const limit = TIER_EAGOH_LIMITS_SERVER[effectiveTier] ?? 0;
-    console.log("[forge] limit check", { userIdPrefix: userId.slice(0, 8), eagohCount, limit, effectiveTier });
+    console.log("[forge] limit check", {
+      userIdPrefix: userId.slice(0, 8),
+      eagohCount,
+      limit,
+      effectiveTier,
+      isAtLimit: eagohCount >= limit,
+    });
 
     if (eagohCount >= limit) {
-      return jsonResponse({ ok: false, error: "You have reached your EAGOH limit." }, 403);
+      return jsonResponse({ ok: false, error: "You have reached your EAGOH limit.", code: "FORGE_LIMIT_REACHED" }, 403);
     }
   }
 

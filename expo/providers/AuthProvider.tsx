@@ -1,7 +1,7 @@
 import createContextHook from "@nkzw/create-context-hook";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Session, User } from "@supabase/supabase-js";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getCurrentSession,
   onAuthStateChange,
@@ -23,9 +23,31 @@ import { startupLog } from "@/utils/startupLogger";
 
 export const [AuthProvider, useAuth] = createContextHook(() => {
   startupLog("AuthProvider", "start");
+  const queryClient = useQueryClient();
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [isReady, setIsReady] = useState<boolean>(false);
+
+  // ── Track the previous user ID to detect account switches / logouts ──
+  // When the user changes (login as different user, or logout), clear all
+  // React Query caches so no stale data from the previous account leaks.
+  const prevUserIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const currentUserId = user?.id ?? null;
+    const prevUserId = prevUserIdRef.current;
+    if (prevUserId !== currentUserId) {
+      if (prevUserId !== null) {
+        // User changed or logged out — clear ALL cached queries so the new
+        // user (or login screen) never sees the previous user's data.
+        console.log("[auth] user changed, clearing query cache", {
+          prevPrefix: prevUserId?.slice(0, 8) ?? "none",
+          nextPrefix: currentUserId?.slice(0, 8) ?? "none",
+        });
+        queryClient.clear();
+      }
+      prevUserIdRef.current = currentUserId;
+    }
+  }, [user?.id, queryClient]);
 
   useEffect(() => {
     let mounted = true;

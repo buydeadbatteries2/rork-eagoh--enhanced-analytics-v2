@@ -1,7 +1,12 @@
 import { supabase } from "@/lib/supabase";
 import { getQuickCheckCost } from "@/services/analyst";
 import { getEffectiveSubscriptionTier, updateProfile, type UserProfile } from "@/services/profile";
-import type { SubscriptionTier } from "@/services/tiers";
+import {
+  TIER_MAX_EAGOHS as TIER_MAX_EAGOHS_SHARED,
+  TIER_MONTHLY_ALLOCATION as TIER_MONTHLY_ALLOCATION_SHARED,
+  TIER_MULTIPLIER as TIER_MULTIPLIER_SHARED,
+  type SubscriptionTier,
+} from "@/services/tiers";
 
 /**
  * Edge wallet service.
@@ -85,33 +90,18 @@ export function getForgeCost(mode: "initial" | "full_reforge" | "partial_reforge
   return EDGE_COSTS.forge_partial_reforge;
 }
 
-/** Monthly subscription Neuron allocations per tier. */
-export const TIER_MONTHLY_ALLOCATION: Record<SubscriptionTier, number> = {
-  free: 25,
-  pro: 600,
-  oracle_elite: 1400,
-  syndicate: 3700,
-};
+/** Monthly subscription Neuron allocations per tier — re-exported from tiers.ts (single source of truth). */
+export const TIER_MONTHLY_ALLOCATION = TIER_MONTHLY_ALLOCATION_SHARED;
 
 /** Free tier receives 25 Neurons on their first month, then 10 per month thereafter. */
 export const FREE_INITIAL_ALLOCATION = 25;
 export const FREE_RECURRING_ALLOCATION = 10;
 
-/** Maximum number of user-forged EAGOHs per tier. Default shells are excluded. */
-export const TIER_MAX_EAGOHS: Record<SubscriptionTier, number> = {
-  free: 0,
-  pro: 2,
-  oracle_elite: 3,
-  syndicate: 5,
-};
+/** Maximum number of user-forged EAGOHs per tier — re-exported from tiers.ts (single source of truth). */
+export const TIER_MAX_EAGOHS = TIER_MAX_EAGOHS_SHARED;
 
-/** Edge efficiency multiplier per tier. */
-export const TIER_MULTIPLIER: Record<SubscriptionTier, number> = {
-  free: 0,
-  pro: 1.0,
-  oracle_elite: 1.2,
-  syndicate: 1.5,
-};
+/** Edge efficiency multiplier per tier — re-exported from tiers.ts (single source of truth). */
+export const TIER_MULTIPLIER = TIER_MULTIPLIER_SHARED;
 
 /** Rollover cap and retention requirement (10% each). Free tier never rolls over. */
 export const ROLLOVER_CAP_PCT = 0.1;
