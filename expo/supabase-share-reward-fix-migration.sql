@@ -1,5 +1,5 @@
 -- =============================================================================
--- EAGOH Social Share Reward Fix — Complete Idempotent Migration
+-- EAGOH Social Share Reward Fix — Complete Idempotent Migration (v2)
 -- =============================================================================
 -- ROOT CAUSE:
 --   The award_social_share_reward function uses the PostgreSQL `??` operator
@@ -20,10 +20,13 @@
 --
 --   The same bug class was fixed in the OI migration (supabase-oi-fix-migration.sql).
 --
--- FIX:
+-- v2 FIX (this migration):
 --   Replace all `??` with COALESCE() — the standard SQL null-coalescing function.
---   Also add: idempotency via ledger reason+amount uniqueness check, partial
+--   Add: idempotency via ledger reason+amount uniqueness check, partial
 --   recovery for verified-but-unrewarded attempts, and proper error codes.
+--   Drop ALL existing overloads of both functions via a DO block so the
+--   migration is safe regardless of which overload(s) exist in the live DB.
+--   Apply REVOKE/GRANT only after CREATE, with the exact signature match.
 --
 -- This migration is fully idempotent — safe to run multiple times.
 -- =============================================================================
@@ -82,11 +85,29 @@ create policy "ss_uploader_delete" on storage.objects
     and (storage.foldername(name))[1] = auth.uid()::text
   );
 
--- ── 3. Replace award_social_share_reward — atomic, idempotent, COALESCE ──
--- Drops any existing overloads first to ensure one authoritative signature.
-drop function if exists public.award_social_share_reward(uuid, text, text, text);
-drop function if exists public.award_social_share_reward(uuid, text, text, text, text, text, text, text, numeric, boolean, text, boolean, boolean, text, boolean);
+-- ── 3. Drop ALL existing overloads of award_social_share_reward ───────────
+-- Uses a DO block to drop every overload regardless of signature, so the
+-- migration is safe whether the live DB has the 4-param, 15-param, or any
+-- other variant. This replaces fragile per-signature DROP statements.
+do $$
+declare
+  r record;
+begin
+  for r in
+    select p.oid, pg_get_function_identity_arguments(p.oid) as args
+      from pg_proc p
+      join pg_namespace n on p.pronamespace = n.oid
+      where n.nspname = 'public' and p.proname = 'award_social_share_reward'
+  loop
+    execute format('drop function if exists public.award_social_share_reward(%s)', r.args);
+  end loop;
+end;
+$$;
 
+-- ── 4. Create authoritative award_social_share_reward ────────────────────
+-- Atomic: lock row → check ownership → check expiry → check duplicates →
+-- lock profile → grant neurons → increment count → insert ledger →
+-- mark verified + rewarded → commit. All COALESCE, no `??`.
 create or replace function public.award_social_share_reward(
   p_attempt_id uuid,
   p_post_url text default null,
@@ -127,9 +148,13 @@ begin
     return jsonb_build_object('ok', false, 'error', 'SHARE_ATTEMPT_NOT_FOUND');
   end if;
 
-  -- 2. Idempotency: already verified AND rewarded
+  -- 2. Ownership check
+  if v_attempt.user_id <> auth.uid() then
+    return jsonb_build_object('ok', false, 'error', 'SHARE_NOT_OWNER');
+  end if;
+
+  -- 3. Idempotency: already verified AND rewarded
   if v_attempt.reward_awarded = true and v_attempt.status = 'verified' then
-    -- Check if ledger entry exists (fully completed)
     select exists(
       select 1 from public.edge_transactions
         where user_id = v_attempt.user_id
@@ -145,7 +170,7 @@ begin
         'skipped', true,
         'attempt_id', p_attempt_id,
         'message', 'Reward already awarded for this attempt.',
-        'reward_amount', v_attempt.reward_amount,
+        'reward_amount', v_reward,
         'new_verified_share_count', null,
         'new_edge_purchased', null
       );
@@ -153,9 +178,8 @@ begin
     -- Fall through to recovery (verified but ledger missing)
   end if;
 
-  -- 3. Idempotency: status verified but reward not awarded (partial — recover)
+  -- 4. Partial recovery: status verified but reward not awarded
   if v_attempt.status = 'verified' and v_attempt.reward_awarded = false then
-    -- Check if a ledger entry already exists for this attempt
     select exists(
       select 1 from public.edge_transactions
         where user_id = v_attempt.user_id
@@ -182,7 +206,7 @@ begin
     -- No ledger entry — proceed to grant the missing reward (recovery)
   end if;
 
-  -- 4. Check not expired
+  -- 5. Check not expired
   if v_attempt.expires_at <= now() then
     update public.social_share_attempts
       set status = 'expired',
@@ -191,7 +215,7 @@ begin
     return jsonb_build_object('ok', false, 'error', 'SHARE_CODE_EXPIRED');
   end if;
 
-  -- 5. Check the same normalized URL hasn't already been verified by another attempt
+  -- 6. Check duplicate normalized URL
   if p_post_url_normalized is not null then
     if exists (
       select 1 from public.social_share_attempts
@@ -209,7 +233,7 @@ begin
     end if;
   end if;
 
-  -- 6. Check for duplicate screenshot hash
+  -- 7. Check duplicate screenshot hash
   if p_screenshot_hash is not null then
     if exists (
       select 1 from public.social_share_attempts
@@ -228,7 +252,7 @@ begin
     end if;
   end if;
 
-  -- 7. Lock the profile row
+  -- 8. Lock the profile row
   select edge_subscription, edge_purchased, verified_share_count
     into v_profile
     from public.profiles
@@ -239,18 +263,18 @@ begin
     return jsonb_build_object('ok', false, 'error', 'SHARE_SCHEMA_ERROR', 'detail', 'profile_not_found');
   end if;
 
-  -- 8. Award 5 Neurons to edge_purchased (COALESCE — NOT ??)
+  -- 9. Award 5 Neurons to edge_purchased (COALESCE — NOT ??)
   v_next_purchased := COALESCE(v_profile.edge_purchased, 0) + v_reward;
   v_next_count := COALESCE(v_profile.verified_share_count, 0) + 1;
 
-  -- 9. Update profile balance and verified share count
+  -- 10. Update profile balance and verified share count
   update public.profiles
     set edge_purchased = v_next_purchased,
         verified_share_count = v_next_count,
         updated_at = now()
     where id = v_attempt.user_id;
 
-  -- 10. Insert the reward ledger transaction (idempotency key via note)
+  -- 11. Insert the reward ledger transaction
   insert into public.edge_transactions (
     user_id, kind, reason, amount, bucket,
     from_subscription, from_purchased,
@@ -268,7 +292,7 @@ begin
     'Social share verification reward (EAGOH ' || v_attempt.eagoh_id::text || ')'
   );
 
-  -- 11. Update the attempt with all verification fields and mark rewarded
+  -- 12. Update the attempt with all verification fields and mark rewarded
   update public.social_share_attempts
     set status = 'verified',
         submitted_post_url = p_post_url,
@@ -292,7 +316,7 @@ begin
         optional_post_url = p_post_url
     where id = p_attempt_id;
 
-  -- 12. Return success
+  -- 13. Return success
   return jsonb_build_object(
     'ok', true,
     'skipped', false,
@@ -304,7 +328,6 @@ begin
 
 exception
   when others then
-    -- Return a safe error with SQLSTATE for server logs
     return jsonb_build_object(
       'ok', false,
       'error', 'SHARE_REWARD_FAILED',
@@ -314,15 +337,34 @@ exception
 end;
 $$;
 
+-- Permissions: applied AFTER create, with the exact 15-param signature.
 revoke execute on function public.award_social_share_reward(uuid, text, text, text, text, text, text, text, numeric, boolean, text, boolean, boolean, text, boolean) from public;
 revoke execute on function public.award_social_share_reward(uuid, text, text, text, text, text, text, text, numeric, boolean, text, boolean, boolean, text, boolean) from anon;
 revoke execute on function public.award_social_share_reward(uuid, text, text, text, text, text, text, text, numeric, boolean, text, boolean, boolean, text, boolean) from authenticated;
 grant execute on function public.award_social_share_reward(uuid, text, text, text, text, text, text, text, numeric, boolean, text, boolean, boolean, text, boolean) to service_role;
 
--- ── 4. Replace update_share_attempt_status — accept screenshot fields ────
-drop function if exists public.update_share_attempt_status(uuid, text, text, text, text, text);
-drop function if exists public.update_share_attempt_status(uuid, text, text, text, text, text, text, text, text, text, numeric, text, boolean, boolean, text, boolean);
+-- ── 5. Drop ALL existing overloads of update_share_attempt_status ────────
+-- Same DO-block approach: drops every overload regardless of signature.
+-- This replaces the previous per-signature DROP statements which could
+-- miss an unknown overload or reference a non-existent one.
+do $$
+declare
+  r record;
+begin
+  for r in
+    select p.oid, pg_get_function_identity_arguments(p.oid) as args
+      from pg_proc p
+      join pg_namespace n on p.pronamespace = n.oid
+      where n.nspname = 'public' and p.proname = 'update_share_attempt_status'
+  loop
+    execute format('drop function if exists public.update_share_attempt_status(%s)', r.args);
+  end loop;
+end;
+$$;
 
+-- ── 6. Create authoritative update_share_attempt_status ──────────────────
+-- 16 parameters. The Worker calls this with named params and relies on
+-- defaults for unused fields. Still needed by 8 call sites in functions/index.ts.
 create or replace function public.update_share_attempt_status(
   p_attempt_id uuid,
   p_status text default null,
@@ -370,12 +412,13 @@ begin
 end;
 $$;
 
-revoke execute on function public.update_share_attempt_status(uuid, text, text, text, text, text, text, text, text, text, text, numeric, text, boolean, boolean, text, boolean) from public;
-revoke execute on function public.update_share_attempt_status(uuid, text, text, text, text, text, text, text, text, text, text, numeric, text, boolean, boolean, text, boolean) from anon;
-revoke execute on function public.update_share_attempt_status(uuid, text, text, text, text, text, text, text, text, text, text, numeric, text, boolean, boolean, text, boolean) from authenticated;
-grant execute on function public.update_share_attempt_status(uuid, text, text, text, text, text, text, text, text, text, text, numeric, text, boolean, boolean, text, boolean) to service_role;
+-- Permissions: applied AFTER create, with the exact 16-param signature.
+revoke execute on function public.update_share_attempt_status(uuid, text, text, text, text, text, text, text, text, text, numeric, text, boolean, boolean, text, boolean) from public;
+revoke execute on function public.update_share_attempt_status(uuid, text, text, text, text, text, text, text, text, text, numeric, text, boolean, boolean, text, boolean) from anon;
+revoke execute on function public.update_share_attempt_status(uuid, text, text, text, text, text, text, text, text, text, numeric, text, boolean, boolean, text, boolean) from authenticated;
+grant execute on function public.update_share_attempt_status(uuid, text, text, text, text, text, text, text, text, text, numeric, text, boolean, boolean, text, boolean) to service_role;
 
--- ── 5. Recovery: fix any existing verified-but-unrewarded attempts ───────
+-- ── 7. Recovery: fix any existing verified-but-unrewarded attempts ───────
 -- For attempts that were marked verified but never got reward_awarded = true
 -- AND have no ledger entry, grant the missing reward now.
 do $$
