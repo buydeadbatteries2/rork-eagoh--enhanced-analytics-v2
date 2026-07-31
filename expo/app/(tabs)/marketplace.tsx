@@ -8,7 +8,6 @@ import { useHaptics } from "@/hooks/useHaptics";
 import {
   ArrowRightLeft,
   Award,
-  BadgeCheck,
   BookOpen,
   Clock,
   ChevronDown,
@@ -121,6 +120,8 @@ import {
   DisputeModal,
   type FeedbackAccessInfo,
 } from "@/app/_components/IntelligenceTrust";
+import SocialVerifiedBadge from "@/app/_components/SocialVerifiedBadge";
+import { getSocialVerificationState } from "@/services/socialVerification";
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -635,9 +636,19 @@ const ListingCard = memo(function ListingCard({
             )}
           </Pressable>
           <Text style={styles.vendorText}>{item.vendor_username ?? "Anonymous"}</Text>
-          {item.is_vendor_verified && (
-            <BadgeCheck color={palette.cyan} size={12} />
-          )}
+          {(() => {
+            const vState = getSocialVerificationState({
+              verified_share_count: item.vendor_verified_share_count,
+              is_social_verified: item.is_vendor_verified,
+            });
+            return vState.isVerified ? (
+              <SocialVerifiedBadge
+                isVerified={vState.isVerified}
+                variant="iconOnly"
+                iconSize={12}
+              />
+            ) : null;
+          })()}
           {reputation && (
             <>
               <View style={styles.vendorDivider} />
@@ -912,12 +923,21 @@ function PurchaseModal({
                     <Text style={styles.modalEagohName}>{eagoh?.name}</Text>
                     <Text style={styles.modalEagohDomain}>{domainLabel(eagoh?.domain ?? eagoh?.sport ?? "")}</Text>
                     <Text style={styles.modalVendor}>by {listing.vendor_username ?? "Anonymous"}</Text>
-                    {listing.is_vendor_verified && (
-                      <View style={{ flexDirection: "row", alignItems: "center", gap: 4, marginTop: 2 }}>
-                        <BadgeCheck color={palette.cyan} size={12} />
-                        <Text style={{ color: palette.cyan, fontSize: 10, fontWeight: "800" }}>Verified</Text>
-                      </View>
-                    )}
+                    {(() => {
+                      const vState = getSocialVerificationState({
+                        verified_share_count: listing.vendor_verified_share_count,
+                        is_social_verified: listing.is_vendor_verified,
+                      });
+                      return vState.isVerified ? (
+                        <View style={{ marginTop: 2 }}>
+                          <SocialVerifiedBadge
+                            isVerified={vState.isVerified}
+                            variant="compact"
+                            badgeName={vState.badgeName}
+                          />
+                        </View>
+                      ) : null;
+                    })()}
                   </View>
                 </View>
 

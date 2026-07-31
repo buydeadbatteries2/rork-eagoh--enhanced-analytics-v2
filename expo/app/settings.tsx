@@ -598,6 +598,8 @@ const SocialVerificationPanel = memo(function SocialVerificationPanel({
   const { user } = useAuth();
   const h = useHaptics();
   const { eagohs } = useEagohs();
+  const queryClient = useQueryClient();
+  const { refetch: refetchProfile } = useProfile();
 
   const [selectedEagohId, setSelectedEagohId] = useState<string | null>(null);
   const [loadingShare, setLoadingShare] = useState(false);
@@ -883,6 +885,12 @@ const SocialVerificationPanel = memo(function SocialVerificationPanel({
         setScreenshotBase64(null);
         setScreenshotHash("");
         await loadData(); // refresh history + count
+        // Invalidate profile + marketplace caches so the verified badge
+        // appears immediately across all screens without restart.
+        queryClient.invalidateQueries({ queryKey: ["profile"] });
+        queryClient.invalidateQueries({ queryKey: ["marketplace"] });
+        queryClient.invalidateQueries({ queryKey: ["public-profile"] });
+        refetchProfile?.();
       } else {
         h.warning();
         await loadData();
@@ -894,7 +902,7 @@ const SocialVerificationPanel = memo(function SocialVerificationPanel({
     } finally {
       setVerifying(false);
     }
-  }, [activeAttempt, verifying, screenshotBase64, screenshotHash, postUrlInput, h, loadData]);
+  }, [activeAttempt, verifying, screenshotBase64, screenshotHash, postUrlInput, h, loadData, queryClient, refetchProfile]);
 
   const inlineStyles = useMemo(
     () => ({
@@ -1864,6 +1872,7 @@ export default function SettingsScreen(): JSX.Element {
     isAdminOverrideActive,
     updateProfile,
     setPreferences,
+    refetch,
   } = useProfile();
   const pal = palette;
   const h = useHaptics();

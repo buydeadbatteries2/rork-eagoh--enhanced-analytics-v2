@@ -14,6 +14,8 @@ import { LinearGradient } from "expo-linear-gradient";
 import { useHaptics } from "@/hooks/useHaptics";
 import { useRouter } from "expo-router";
 import { Award, Bell, BrainCircuit, Coins, Cpu, Crown, Eye, Flame, FlaskConical, Layers3, LogOut, Swords, Sparkles, Shield, Ticket, Trophy, TrendingUp, Zap } from "lucide-react-native";
+import SocialVerifiedBadge from "@/app/_components/SocialVerifiedBadge";
+import { getSocialVerificationState } from "@/services/socialVerification";
 import { INTELLIGENCE_DOMAINS } from "@/services/domains";
 import React, { memo, useCallback, useEffect, useMemo, useState } from "react";
 import PublicProfileModal from "@/components/PublicProfileModal";
@@ -81,7 +83,7 @@ function SectionTitle({ eyebrow, title }: { eyebrow: string; title: string }): J
 }
 
 /** Gallery of all forged EAGOHs — sizes adjust dynamically based on count. Free users see the default shell. */
-const EagohGallery = memo(function EagohGallery({ eagohs, isFree }: { eagohs: EagohRecord[]; isFree: boolean }): JSX.Element {
+const EagohGallery = memo(function EagohGallery({ eagohs, isFree, isOwnerVerified, ownerBadgeName }: { eagohs: EagohRecord[]; isFree: boolean; isOwnerVerified: boolean; ownerBadgeName: string | null }): JSX.Element {
   const count = eagohs.length;
 
   if (count === 0) {
@@ -141,6 +143,16 @@ const EagohGallery = memo(function EagohGallery({ eagohs, isFree }: { eagohs: Ea
                       </View>
                     </View>
                   )}
+                  {/* Verified contributor badge overlay — top-right corner */}
+                  {isOwnerVerified ? (
+                    <View style={{ position: "absolute", top: 6, right: 6, zIndex: 10 }}>
+                      <SocialVerifiedBadge
+                        isVerified={isOwnerVerified}
+                        variant="iconOnly"
+                        iconSize={count >= 4 ? 12 : 16}
+                      />
+                    </View>
+                  ) : null}
                 </View>
                 <View style={{ padding: isCompact ? 8 : 10, flexDirection: "row", alignItems: "center", gap: 6 }}>
                   <View style={[styles.galleryDomainDot, { backgroundColor: accent }]} />
@@ -291,7 +303,18 @@ export default function ProfileScreen(): JSX.Element {
               <Text style={styles.adminOverrideText}>Promotional Access Active</Text>
             </View>
           ) : null}
-          <EagohGallery eagohs={eagohs} isFree={currentTier === "free"} />
+          <EagohGallery
+            eagohs={eagohs}
+            isFree={currentTier === "free"}
+            isOwnerVerified={getSocialVerificationState({
+              verified_share_count: (profile as any)?.verified_share_count ?? null,
+              is_social_verified: profile?.is_social_verified ?? false,
+            }).isVerified}
+            ownerBadgeName={getSocialVerificationState({
+              verified_share_count: (profile as any)?.verified_share_count ?? null,
+              is_social_verified: profile?.is_social_verified ?? false,
+            }).badgeName}
+          />
           <Pressable onPress={handleSignOut} disabled={signingOut} style={({ pressed }) => [styles.signOutButton, pressed && { opacity: 0.85 }, signingOut && { opacity: 0.5 }]}>
             {signingOut ? <ActivityIndicator color={palette.ember} /> : <LogOut color={palette.ember} size={16} />}
             <Text style={styles.signOutText}>{signingOut ? "Signing out…" : "Sign out"}</Text>

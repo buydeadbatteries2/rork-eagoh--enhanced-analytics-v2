@@ -55,9 +55,10 @@ import {
   type PublicKnowledgeCredential,
 } from "@/services/knowledgeCredentials";
 import { INTELLIGENCE_DOMAINS } from "@/services/domains";
-import { PLATFORM_DISPLAY, PLATFORM_BASE_URL, type SocialPlatform } from "@/services/socialVerification";
+import { PLATFORM_DISPLAY, PLATFORM_BASE_URL, type SocialPlatform, getSocialVerificationState } from "@/services/socialVerification";
 import { rankColor as repRankColor } from "@/services/reputation";
 import { Linking } from "react-native";
+import SocialVerifiedBadge from "@/app/_components/SocialVerifiedBadge";
 
 // ── Props ──────────────────────────────────────────────────────────────
 
@@ -921,12 +922,20 @@ export default function PublicProfileModal({
                   <Text style={styles.username}>
                     {profile.displayName || profile.username || "Anonymous Analyst"}
                   </Text>
-                  {profile.isSocialVerified && (
-                    <View style={styles.verifiedBadge}>
-                      <BadgeCheck color={palette.cyan} size={12} />
-                      <Text style={styles.verifiedBadgeText}>Verified</Text>
-                    </View>
-                  )}
+                  {(() => {
+                    const vState = getSocialVerificationState({
+                      verified_share_count: profile.verifiedShareCount,
+                      is_social_verified: profile.isSocialVerified,
+                    });
+                    return vState.isVerified ? (
+                      <SocialVerifiedBadge
+                        isVerified={vState.isVerified}
+                        variant="compact"
+                        badgeName={vState.badgeName}
+                        verifiedShareCount={vState.verifiedShareCount}
+                      />
+                    ) : null;
+                  })()}
                 </View>
 
                 {profile.username && profile.displayName && (
@@ -1018,7 +1027,7 @@ export default function PublicProfileModal({
                 <View style={styles.section}>
                   <SectionHeader
                     title="Connected Accounts"
-                    icon={<BadgeCheck color={palette.cyan} size={14} />}
+                    icon={<User color={palette.cyan} size={14} />}
                   />
                   <View style={styles.sectionBody}>
                     {socialAccounts.map((account) => (

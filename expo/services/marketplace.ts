@@ -212,6 +212,7 @@ export type EnrichedListing = MarketplaceListingRow & {
   has_credentials: boolean;
   is_vendor_verified: boolean;
   vendor_verified_platform: string | null;
+  vendor_verified_share_count: number;
 };
 
 export type EnrichedPurchase = SyncPurchaseRow & {
@@ -589,6 +590,7 @@ async function bulkEnrichListings(
       has_credentials: credentialsSet.has(row.eagoh_id),
       is_vendor_verified: verif?.isVerified ?? false,
       vendor_verified_platform: verif?.verifiedPlatform ?? null,
+      vendor_verified_share_count: verif?.verifiedShareCount ?? 0,
     } as EnrichedListing;
   });
 }
@@ -1144,6 +1146,7 @@ export async function getListingById(listingId: string): Promise<EnrichedListing
     has_credentials: credentialsSet.has(row.vendor_id),
     is_vendor_verified: verif?.isVerified ?? false,
     vendor_verified_platform: verif?.verifiedPlatform ?? null,
+    vendor_verified_share_count: verif?.verifiedShareCount ?? 0,
   };
 }
 

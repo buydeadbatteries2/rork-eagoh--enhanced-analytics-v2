@@ -13,7 +13,6 @@ import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import {
   ArrowLeft,
-  BadgeCheck,
   Coins,
   Crown,
   PackageOpen,
@@ -42,6 +41,8 @@ import { resolveMarketplaceEagohImage } from "@/services/marketplace";
 import { INTELLIGENCE_DOMAINS } from "@/services/domains";
 import { getBulkReputations, rankColor as repRankColor, type RankTier } from "@/services/reputation";
 import type { ReputationRow } from "@/services/reputation";
+import SocialVerifiedBadge from "@/app/_components/SocialVerifiedBadge";
+import { getSocialVerificationState } from "@/services/socialVerification";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -60,6 +61,7 @@ type PublicListingData = {
   vendor_avatar_url: string | null;
   vendor_is_verified: boolean;
   vendor_verified_platform: string | null;
+  vendor_verified_share_count: number;
   eagoh_name: string;
   eagoh_domain: string | null;
   eagoh_dna: string[] | null;
@@ -123,7 +125,7 @@ export default function PublicListingScreen(): JSX.Element {
             .maybeSingle(),
           supabase
             .from("profiles")
-            .select("username, avatar_url, is_social_verified, social_verified_platform")
+            .select("username, avatar_url, is_social_verified, social_verified_platform, verified_share_count")
             .eq("id", row.vendor_id)
             .maybeSingle(),
           supabase
@@ -141,6 +143,7 @@ export default function PublicListingScreen(): JSX.Element {
         const vendor = (vendorRes.data ?? null) as {
           username: string | null; avatar_url: string | null;
           is_social_verified: boolean; social_verified_platform: string | null;
+          verified_share_count: number | null;
         } | null;
 
         const stats = (statsRes.data ?? null) as {
@@ -152,7 +155,11 @@ export default function PublicListingScreen(): JSX.Element {
           ...row,
           vendor_username: vendor?.username ?? null,
           vendor_avatar_url: vendor?.avatar_url ?? null,
-          vendor_is_verified: vendor?.is_social_verified ?? false,
+          vendor_is_verified: getSocialVerificationState({
+            verified_share_count: vendor?.verified_share_count ?? null,
+            is_social_verified: vendor?.is_social_verified ?? false,
+          }).isVerified,
+          vendor_verified_share_count: vendor?.verified_share_count ?? 0,
           vendor_verified_platform: vendor?.social_verified_platform ?? null,
           eagoh_name: eagoh?.name ?? "Unnamed EAGOH",
           eagoh_domain: eagoh?.domain ?? null,
@@ -337,7 +344,11 @@ export default function PublicListingScreen(): JSX.Element {
             <View style={styles.vendorNameRow}>
               <Text style={styles.vendorName}>{listing.vendor_username ?? "Anonymous"}</Text>
               {listing.vendor_is_verified && (
-                <BadgeCheck color={palette.cyan} size={14} />
+                <SocialVerifiedBadge
+                  isVerified={listing.vendor_is_verified}
+                  variant="iconOnly"
+                  iconSize={14}
+                />
               )}
             </View>
             <Text style={styles.vendorRank}>{listing.rank} · {listing.total_sales} sales</Text>

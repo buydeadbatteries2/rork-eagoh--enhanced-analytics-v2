@@ -36,6 +36,7 @@ export type PublicProfileData = {
   publicDisplayTitle: string | null;
   isSocialVerified: boolean;
   socialVerifiedPlatform: string | null;
+  verifiedShareCount: number;
   // Visibility settings
   publicProfileEnabled: boolean;
   showSocialAccounts: boolean;
@@ -96,6 +97,7 @@ const PUBLIC_PROFILE_COLUMNS = [
   "public_display_title",
   "is_social_verified",
   "social_verified_platform",
+  "verified_share_count",
   "public_profile_enabled",
   "show_social_accounts",
   "show_credentials",
@@ -185,8 +187,9 @@ export async function getPublicProfile(
       avatarUrl: (p.avatar_url as string) ?? null,
       bannerUrl: (p.banner_url as string) ?? null,
       publicDisplayTitle: (p.public_display_title as string) ?? null,
-      isSocialVerified: (p.is_social_verified as boolean) === true,
+      isSocialVerified: (p.is_social_verified as boolean) === true || (typeof p.verified_share_count === "number" && p.verified_share_count >= 1),
       socialVerifiedPlatform: (p.social_verified_platform as string) ?? null,
+      verifiedShareCount: typeof p.verified_share_count === "number" ? p.verified_share_count : 0,
       publicProfileEnabled: publicEnabled,
       showSocialAccounts: (p.show_social_accounts as boolean) !== false,
       showCredentials: (p.show_credentials as boolean) !== false,

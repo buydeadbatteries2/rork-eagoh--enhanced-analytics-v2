@@ -43,6 +43,66 @@ export const PLATFORM_BASE_URL: Record<SocialPlatform, string> = {
   linkedin: "https://linkedin.com/in/",
 };
 
+// ── Social Verification State (shared resolver) ───────────────────────
+
+/**
+ * Normalized social verification state derived from profile data.
+ * Used by every screen that displays the verified badge so logic is consistent.
+ */
+export type SocialVerificationState = {
+  isVerified: boolean;
+  verifiedShareCount: number;
+  badgeName: string | null;
+  badgeLevel: string | null;
+};
+
+/**
+ * Badge thresholds for social share verification progression.
+ * The verified check appears at >= 1 verified share; badge levels at thresholds.
+ */
+export const SOCIAL_BADGE_THRESHOLDS: { name: string; threshold: number }[] = [
+  { name: "Neural Scout", threshold: 5 },
+  { name: "Synapse Builder", threshold: 25 },
+  { name: "Cortex Architect", threshold: 100 },
+  { name: "Neural Vanguard", threshold: 500 },
+  { name: "Oracle Ascendant", threshold: 1000 },
+];
+
+/**
+ * Compute the social badge name from a verified share count.
+ * Returns null when below the first threshold (5).
+ */
+export function getSocialBadgeName(verifiedShareCount: number): string | null {
+  for (let i = SOCIAL_BADGE_THRESHOLDS.length - 1; i >= 0; i--) {
+    if (verifiedShareCount >= SOCIAL_BADGE_THRESHOLDS[i].threshold) {
+      return SOCIAL_BADGE_THRESHOLDS[i].name;
+    }
+  }
+  return null;
+}
+
+/**
+ * Derive a normalized SocialVerificationState from raw profile fields.
+ * A user is verified when verified_share_count >= 1 OR is_social_verified is true.
+ * This is the ONE shared resolver — every screen should use this.
+ */
+export function getSocialVerificationState(profile: {
+  verified_share_count?: number | null;
+  is_social_verified?: boolean | null;
+}): SocialVerificationState {
+  const count = typeof profile.verified_share_count === "number"
+    ? profile.verified_share_count
+    : 0;
+  const isVerified = count >= 1 || profile.is_social_verified === true;
+  const badgeName = getSocialBadgeName(count);
+  return {
+    isVerified,
+    verifiedShareCount: count,
+    badgeName,
+    badgeLevel: badgeName, // same as badgeName; kept for API compatibility
+  };
+}
+
 // ── Types ──────────────────────────────────────────────────────────────
 
 export type SocialAccountRow = {
@@ -212,29 +272,33 @@ export async function getPublicVerificationStatus(
 
 /**
  * Bulk check verification status for multiple user IDs.
- * Returns a Map of userId → { isVerified, verifiedPlatform }.
+ * Returns a Map of userId → { isVerified, verifiedPlatform, verifiedShareCount }.
+ * Includes verified_share_count so callers can derive badge level without N+1 queries.
  */
 export async function getBulkVerificationStatus(
   userIds: string[],
-): Promise<Map<string, { isVerified: boolean; verifiedPlatform: string | null }>> {
+): Promise<Map<string, { isVerified: boolean; verifiedPlatform: string | null; verifiedShareCount: number }>> {
   if (userIds.length === 0) return new Map();
   const { data, error } = await supabase
     .from("profiles")
-    .select("id, is_social_verified, social_verified_platform")
+    .select("id, is_social_verified, social_verified_platform, verified_share_count")
     .in("id", userIds);
   if (error) {
     console.warn("[socialVerification] getBulkVerificationStatus error", error.message);
     return new Map();
   }
-  const map = new Map<string, { isVerified: boolean; verifiedPlatform: string | null }>();
+  const map = new Map<string, { isVerified: boolean; verifiedPlatform: string | null; verifiedShareCount: number }>();
   for (const row of (data ?? []) as Array<{
     id: string;
     is_social_verified: boolean | null;
     social_verified_platform: string | null;
+    verified_share_count: number | null;
   }>) {
+    const count = typeof row.verified_share_count === "number" ? row.verified_share_count : 0;
     map.set(row.id, {
-      isVerified: row.is_social_verified === true,
+      isVerified: count >= 1 || row.is_social_verified === true,
       verifiedPlatform: row.social_verified_platform ?? null,
+      verifiedShareCount: count,
     });
   }
   return map;
@@ -268,6 +332,7 @@ export async function getPublicBannerUrl(userId: string): Promise<string | null>
 
 /**
  * Get public profile info for a given user (for public profile page).
+ * Includes verified_share_count for badge level derivation.
  */
 export async function getPublicProfileInfo(userId: string): Promise<{
   username: string | null;
@@ -276,10 +341,11 @@ export async function getPublicProfileInfo(userId: string): Promise<{
   publicDisplayTitle: string | null;
   isSocialVerified: boolean;
   socialVerifiedPlatform: string | null;
+  verifiedShareCount: number;
 } | null> {
   const { data, error } = await supabase
     .from("profiles")
-    .select("username, avatar_url, banner_url, public_display_title, is_social_verified, social_verified_platform")
+    .select("username, avatar_url, banner_url, public_display_title, is_social_verified, social_verified_platform, verified_share_count")
     .eq("id", userId)
     .maybeSingle();
   if (error || !data) return null;
@@ -291,14 +357,17 @@ export async function getPublicProfileInfo(userId: string): Promise<{
     public_display_title: string | null;
     is_social_verified: boolean | null;
     social_verified_platform: string | null;
+    verified_share_count: number | null;
   };
 
+  const count = typeof p.verified_share_count === "number" ? p.verified_share_count : 0;
   return {
     username: p.username,
     avatarUrl: p.avatar_url,
     bannerUrl: p.banner_url,
     publicDisplayTitle: p.public_display_title,
-    isSocialVerified: p.is_social_verified === true,
+    isSocialVerified: count >= 1 || p.is_social_verified === true,
     socialVerifiedPlatform: p.social_verified_platform ?? null,
+    verifiedShareCount: count,
   };
 }

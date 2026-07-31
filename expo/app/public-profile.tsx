@@ -11,7 +11,6 @@ import { LinearGradient } from "expo-linear-gradient";
 import {
   ArrowLeft,
   Award,
-  BadgeCheck,
   BookOpen,
   BrainCircuit,
   Cpu,
@@ -39,11 +38,13 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useSafeBack } from "@/hooks/useSafeBack";
 import { useLocalSearchParams } from "expo-router";
 import { supabase } from "@/lib/supabase";
+import SocialVerifiedBadge from "@/app/_components/SocialVerifiedBadge";
 import { INTELLIGENCE_DOMAINS } from "@/services/domains";
 import { getKnowledgeCredentials, type KnowledgeCredentialsRow } from "@/services/knowledgeCredentials";
 import {
   getPublicVerificationStatus,
   getPublicProfileInfo,
+  getSocialVerificationState,
 } from "@/services/socialVerification";
 import { getVendorStats } from "@/services/marketplace";
 import { getBulkReputations, rankColor as repRankColor, RANK_TIERS } from "@/services/reputation";
@@ -366,6 +367,7 @@ export default function PublicProfileScreen(): JSX.Element {
     publicDisplayTitle: string | null;
     isSocialVerified: boolean;
     socialVerifiedPlatform: string | null;
+    verifiedShareCount: number;
   } | null>(null);
   const [credentials, setCredentials] = useState<KnowledgeCredentialsRow | null>(null);
   const [vendorStats, setVendorStats] = useState<{
@@ -524,12 +526,20 @@ export default function PublicProfileScreen(): JSX.Element {
         <View style={s.identityCard}>
           <View style={s.usernameRow}>
             <Text style={s.username}>{profile.username ?? "Anonymous Analyst"}</Text>
-            {profile.isSocialVerified && (
-              <View style={s.verifiedBadge}>
-                <BadgeCheck color={pal.cyan} size={14} />
-                <Text style={s.verifiedBadgeText}>Verified</Text>
-              </View>
-            )}
+            {(() => {
+              const vState = getSocialVerificationState({
+                verified_share_count: profile.verifiedShareCount,
+                is_social_verified: profile.isSocialVerified,
+              });
+              return vState.isVerified ? (
+                <SocialVerifiedBadge
+                  isVerified={vState.isVerified}
+                  variant="compact"
+                  badgeName={vState.badgeName}
+                  verifiedShareCount={vState.verifiedShareCount}
+                />
+              ) : null;
+            })()}
           </View>
 
           {profile.publicDisplayTitle ? (
@@ -538,7 +548,15 @@ export default function PublicProfileScreen(): JSX.Element {
 
           {profile.isSocialVerified && profile.socialVerifiedPlatform ? (
             <Text style={{ color: pal.muted, fontSize: 11, fontWeight: "600" }}>
-              Verified through connected social account
+              {(() => {
+                const vState = getSocialVerificationState({
+                  verified_share_count: profile.verifiedShareCount,
+                  is_social_verified: profile.isSocialVerified,
+                });
+                return vState.badgeName
+                  ? `${vState.badgeName} · ${vState.verifiedShareCount} verified shares`
+                  : "Verified EAGOH Contributor";
+              })()}
             </Text>
           ) : null}
         </View>
