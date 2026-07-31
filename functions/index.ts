@@ -1,5 +1,5 @@
 /**
-// EAGOH Analyst Chat — Cloudflare Worker (v6-oi-diag-deploy)
+ * EAGOH Analyst Chat — Cloudflare Worker (v6-oi-diag-deploy)
  * Phase RETAINED-OI-2 — Trusted purchase reversal status (record_exchange_purchase_reversal RPC)
  * Phase RETAINED-OI-1 + Cap — Retained Exchange Intelligence + 25% Cumulative Cap
   * Phase 12A — Social sharing + faction invite by email/username
@@ -8382,20 +8382,32 @@ async function handleSocialShareVerify(request: Request, env: Env): Promise<Resp
   );
 
   if (awardErr) {
-    console.warn("[social:share:verify] award RPC failed", { attemptId: attemptId.slice(0, 8), error: awardErr.message });
-    return jsonResponse({ ok: false, error: "Verification completed but reward could not be awarded." }, 500);
+    console.warn("[social:share:verify] award RPC failed", { attemptId: attemptId.slice(0, 8), error: awardErr.message, code: awardErr.code });
+    return jsonResponse({
+      ok: false,
+      status: "verified_reward_pending",
+      error: "Your post was verified, but we could not finish updating your reward. Please try again.",
+      canRetry: true,
+      attemptId,
+    }, 500);
   }
 
-  const result = awardResult as { ok?: boolean; skipped?: boolean; error?: string; reward_amount?: number; new_verified_share_count?: number; new_edge_purchased?: number };
+  const result = awardResult as { ok?: boolean; skipped?: boolean; error?: string; reward_amount?: number; new_verified_share_count?: number; new_edge_purchased?: number; sqlstate?: string; message?: string };
   if (!result?.ok) {
-    if (result?.error === "already_verified") {
+    if (result?.error === "SHARE_ALREADY_REWARDED" || result?.error === "already_verified") {
       return jsonResponse({ ok: false, status: "already_verified", error: "This social post URL has already been verified." }, 409);
     }
-    if (result?.error === "code_expired") {
+    if (result?.error === "SHARE_CODE_EXPIRED" || result?.error === "code_expired") {
       return jsonResponse({ ok: false, status: "expired", error: "This verification code has expired." }, 410);
     }
-    console.warn("[social:share:verify] award RPC returned error", { attemptId: attemptId.slice(0, 8), error: result?.error });
-    return jsonResponse({ ok: false, error: "Reward could not be awarded." }, 500);
+    console.warn("[social:share:verify] award RPC returned error", { attemptId: attemptId.slice(0, 8), error: result?.error, sqlstate: result?.sqlstate });
+    return jsonResponse({
+      ok: false,
+      status: "verified_reward_pending",
+      error: "Your post was verified, but we could not finish updating your reward. Please try again.",
+      canRetry: true,
+      attemptId,
+    }, 500);
   }
 
   console.log("[social:share:verify] verified", {
@@ -8904,23 +8916,44 @@ async function handleSocialShareVerifyScreenshot(request: Request, env: Env): Pr
     console.warn("[social:share:verify-screenshot] award RPC failed", {
       attemptId: attemptId.slice(0, 8),
       error: awardErr.message,
+      code: awardErr.code,
     });
-    return jsonResponse({ ok: false, error: "Verification completed but the reward could not be awarded. Please try again." }, 500);
+    return jsonResponse({
+      ok: false,
+      status: "verified_reward_pending",
+      error: "Your post was verified, but we could not finish updating your reward. Please try again.",
+      canRetry: true,
+      attemptId,
+    }, 500);
   }
 
-  const result = awardResult as { ok?: boolean; skipped?: boolean; error?: string; reward_amount?: number; new_verified_share_count?: number; new_edge_purchased?: number };
+  const result = awardResult as { ok?: boolean; skipped?: boolean; error?: string; reward_amount?: number; new_verified_share_count?: number; new_edge_purchased?: number; sqlstate?: string; message?: string };
   if (!result?.ok) {
-    if (result?.error === "already_verified") {
+    if (result?.error === "SHARE_ALREADY_REWARDED" || result?.error === "already_verified") {
       return jsonResponse({ ok: false, status: "already_verified", error: "This screenshot has already been verified." }, 409);
     }
-    if (result?.error === "code_expired") {
+    if (result?.error === "SHARE_CODE_EXPIRED" || result?.error === "code_expired") {
       return jsonResponse({ ok: false, status: "expired", error: "This verification code has expired." }, 410);
+    }
+    if (result?.error === "SHARE_SCHEMA_ERROR") {
+      console.error("[social:share:verify-screenshot] schema error", {
+        attemptId: attemptId.slice(0, 8),
+        sqlstate: result?.sqlstate,
+        message: result?.message,
+      });
     }
     console.warn("[social:share:verify-screenshot] award RPC returned error", {
       attemptId: attemptId.slice(0, 8),
       error: result?.error,
+      sqlstate: result?.sqlstate,
     });
-    return jsonResponse({ ok: false, error: "Reward could not be awarded." }, 500);
+    return jsonResponse({
+      ok: false,
+      status: "verified_reward_pending",
+      error: "Your post was verified, but we could not finish updating your reward. Please try again.",
+      canRetry: true,
+      attemptId,
+    }, 500);
   }
 
   console.log("[social:share:verify-screenshot] verified", {
@@ -8945,6 +8978,134 @@ async function handleSocialShareVerifyScreenshot(request: Request, env: Env): Pr
       social_handle_detected: aiResult.social_handle_detected,
       confidence: aiResult.confidence,
     },
+  });
+}
+
+/**
+ * POST /social/share/retry-reward
+ *
+ * Retries only the reward completion for a verified attempt without re-running
+ * the OpenAI image analysis. Used when AI verification succeeded but the
+ * reward transaction temporarily failed (status = verified, reward_awarded = false).
+ */
+async function handleSocialShareRetryReward(request: Request, env: Env): Promise<Response> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
+    return jsonResponse({ ok: false, error: "Backend not configured." }, 503);
+  }
+
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const jwt = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  if (!jwt) return jsonResponse({ ok: false, error: "Authentication required." }, 401);
+
+  const supabase = createAuthedClient(env, jwt);
+  const userId = await verifyAuth(supabase, jwt);
+  if (!userId) return jsonResponse({ ok: false, error: "Invalid auth." }, 401);
+
+  let payload: { attemptId?: unknown };
+  try {
+    payload = (await request.json()) as typeof payload;
+  } catch {
+    return jsonResponse({ ok: false, error: "Invalid request." }, 400);
+  }
+
+  const attemptId = str(payload.attemptId).trim();
+  if (!attemptId) return jsonResponse({ ok: false, error: "attemptId is required." }, 400);
+
+  const serviceClient = getServiceRoleClient(env);
+  if (!serviceClient) return jsonResponse({ ok: false, error: "Service not configured." }, 503);
+
+  // Fetch the attempt to confirm ownership and current state
+  const { data: attempt, error: attemptErr } = await supabase
+    .from("social_share_attempts")
+    .select("id, user_id, status, reward_awarded, eagoh_id, detected_platform, detected_handle, verification_confidence, screenshot_hash, optional_post_url, submitted_post_url, submitted_post_url_normalized, platform")
+    .eq("id", attemptId)
+    .maybeSingle();
+
+  if (attemptErr || !attempt) {
+    return jsonResponse({ ok: false, error: "Share attempt not found." }, 404);
+  }
+
+  const a = attempt as {
+    user_id: string;
+    status: string;
+    reward_awarded: boolean;
+    eagoh_id: string;
+    detected_platform: string | null;
+    detected_handle: string | null;
+    verification_confidence: number | null;
+    screenshot_hash: string | null;
+    optional_post_url: string | null;
+    submitted_post_url: string | null;
+    submitted_post_url_normalized: string | null;
+    platform: string | null;
+  };
+
+  if (a.user_id !== userId) {
+    return jsonResponse({ ok: false, error: "Share attempt not found." }, 404);
+  }
+
+  // Only allow retry if the attempt was verified but not rewarded
+  if (a.status !== "verified" || a.reward_awarded) {
+    return jsonResponse({ ok: false, error: "This attempt does not need a reward retry." }, 409);
+  }
+
+  // Re-call the award RPC — it will detect the partial state and recover
+  const { data: awardResult, error: awardErr } = await serviceClient.rpc(
+    "award_social_share_reward",
+    {
+      p_attempt_id: attemptId,
+      p_post_url: a.optional_post_url ?? a.submitted_post_url,
+      p_post_url_normalized: a.submitted_post_url_normalized,
+      p_platform: a.platform,
+      p_screenshot_storage_path: null,
+      p_screenshot_hash: a.screenshot_hash,
+      p_detected_platform: a.detected_platform,
+      p_detected_handle: a.detected_handle,
+      p_verification_confidence: a.verification_confidence,
+      p_ai_is_valid: true,
+      p_ai_failure_reason: null,
+      p_eagoh_card_detected: true,
+      p_published_post_interface_detected: true,
+      p_verification_code_detected: null,
+      p_verification_code_matches: true,
+    },
+  );
+
+  if (awardErr) {
+    console.warn("[social:share:retry-reward] award RPC failed", {
+      attemptId: attemptId.slice(0, 8),
+      error: awardErr.message,
+    });
+    return jsonResponse({
+      ok: false,
+      error: "Could not complete the reward. Please try again.",
+    }, 500);
+  }
+
+  const result = awardResult as { ok?: boolean; skipped?: boolean; error?: string; reward_amount?: number; new_verified_share_count?: number; new_edge_purchased?: number };
+  if (!result?.ok) {
+    console.warn("[social:share:retry-reward] award RPC returned error", {
+      attemptId: attemptId.slice(0, 8),
+      error: result?.error,
+    });
+    return jsonResponse({ ok: false, error: "Could not complete the reward. Please try again." }, 500);
+  }
+
+  console.log("[social:share:retry-reward] completed", {
+    userIdPrefix: userId.slice(0, 8),
+    attemptId: attemptId.slice(0, 8),
+    reward: result.reward_amount,
+    newCount: result.new_verified_share_count,
+  });
+
+  return jsonResponse({
+    ok: true,
+    skipped: result.skipped ?? false,
+    status: "verified",
+    rewardAmount: result.reward_amount ?? SHARE_REWARD_AMOUNT,
+    newVerifiedShareCount: result.new_verified_share_count,
+    newEdgePurchased: result.new_edge_purchased,
+    message: "Your published EAGOH post was verified successfully.",
   });
 }
 
@@ -10313,6 +10474,9 @@ export default {
     if (url.pathname === "/social/share/verify-screenshot" && request.method === "POST") {
       return handleSocialShareVerifyScreenshot(request, env);
     }
+    if (url.pathname === "/social/share/retry-reward" && request.method === "POST") {
+      return handleSocialShareRetryReward(request, env);
+    }
 
     // Subscription sync: verifies RevenueCat entitlements server-side, updates
     // the Supabase tier, and grants the billing-period neuron allocation with
@@ -10558,3 +10722,4 @@ async function handleSubscriptionSync(request: Request, env: Env): Promise<Respo
 
 
 
+// trigger rebuild
