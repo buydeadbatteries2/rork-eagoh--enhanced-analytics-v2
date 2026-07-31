@@ -105,7 +105,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRouter } from "expo-router";
+import { useRouter, useLocalSearchParams } from "expo-router";
 
 const MAX_ENTRY_TAGS = 10;
 
@@ -1414,7 +1414,8 @@ export default function OpenIntelligenceScreen(): JSX.Element {
   const queryClient = useQueryClient();
   const router = useRouter();
 
-  const [selectedEagohId, setSelectedEagohId] = useState<string>("");
+  const { eagohId: paramEagohId } = useLocalSearchParams<{ eagohId?: string }>();
+  const [selectedEagohId, setSelectedEagohId] = useState<string>(paramEagohId ?? "");
   const [entryType, setEntryType] = useState<EntryType>("quick_observation");
   const [content, setContent] = useState<string>("");
   const [selectedSubtags, setSelectedSubtags] = useState<string[]>([]);
