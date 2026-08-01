@@ -2783,7 +2783,13 @@ export default function MarketplaceScreen(): JSX.Element {
         onToggleSourceInfo={() => setShowSourceInfo((v) => !v)}
         purchasing={purchasing}
         reputation={repMap.get(purchaseModal?.eagoh_id ?? "")}
-        onViewVendorProfile={(vendorId) => setPublicProfileVendorId(vendorId)}
+        onViewVendorProfile={(vendorId) => {
+          // Close PurchaseModal first so PublicProfileModal isn't trapped behind
+          // the native <Modal> layer — ensures a clean single-modal experience.
+          setPurchaseModal(null);
+          setShowSourceInfo(false);
+          setPublicProfileVendorId(vendorId);
+        }}
       />
       <CreateListingModal
         visible={createModal}

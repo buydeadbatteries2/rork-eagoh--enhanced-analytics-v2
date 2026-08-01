@@ -748,7 +748,9 @@ export default function PublicProfileModal({
             duration: 220,
             useNativeDriver: true,
           }).start(() => {
-            translateY.setValue(0);
+            // Do NOT reset translateY here — resetting to 0 before onClose()
+            // causes the sheet to flash back visible for one frame (double-modal bug).
+            // translateY is reset in the visible-change useEffect when the modal re-opens.
             isDismissing.current = false;
             onClose();
           });
@@ -798,7 +800,7 @@ export default function PublicProfileModal({
       duration: 200,
       useNativeDriver: true,
     }).start(() => {
-      translateY.setValue(0);
+      // Do NOT reset translateY here — same double-modal flash fix as swipe dismiss.
       isDismissing.current = false;
       onClose();
     });
