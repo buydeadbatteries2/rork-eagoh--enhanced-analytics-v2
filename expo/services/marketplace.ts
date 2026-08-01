@@ -914,27 +914,37 @@ export async function purchaseSync(
     return { ok: false, error: "Neuron deduction failed. Please try again." };
   }
 
-  // Transfer Edge to vendor
+  // Transfer Edge to vendor — single atomic update (no double-credit)
   try {
-    await addSubscriptionEdge(
-      listingRow.vendor_id,
-      { edge_subscription: 0, edge_purchased: 0 } as UserProfile, // dummy — service fetches actual
-      totalCost,
-      "marketplace",
-      `Sync purchase from buyer`,
-    );
-    // Actually we need to read vendor profile first. Let's use a simpler approach:
-    // Just add to vendor's subscription Edge directly via profile update.
+    // Read the vendor's current subscription balance, then add the sync cost.
+    // This replaces the previous code which called addSubscriptionEdge (which
+    // internally read + updated + logged) and THEN did a second raw update on
+    // top — crediting the vendor twice for the same purchase.
     const { data: vendorProfile } = await supabase
       .from("profiles")
-      .select("edge_subscription")
+      .select("edge_subscription, edge_purchased")
       .eq("id", listingRow.vendor_id)
       .single();
     const vendorSub = (vendorProfile as { edge_subscription: number } | null)?.edge_subscription ?? 0;
+    const vendorPurch = (vendorProfile as { edge_purchased: number } | null)?.edge_purchased ?? 0;
+    const vendorNewSub = vendorSub + totalCost;
     await supabase
       .from("profiles")
-      .update({ edge_subscription: vendorSub + totalCost, updated_at: new Date().toISOString() })
+      .update({ edge_subscription: vendorNewSub, updated_at: new Date().toISOString() })
       .eq("id", listingRow.vendor_id);
+    // Log the vendor's credit transaction
+    await supabase.from("edge_transactions").insert({
+      user_id: listingRow.vendor_id,
+      kind: "addition",
+      reason: "marketplace",
+      amount: totalCost,
+      bucket: "subscription",
+      from_subscription: 0,
+      from_purchased: 0,
+      balance_subscription_after: vendorNewSub,
+      balance_purchased_after: vendorPurch,
+      note: `Sync purchase from buyer (${syncLevel} for ${days} day(s))`,
+    });
   } catch (err: unknown) {
     console.warn("[marketplace] vendor credit transfer failed; buyer was charged.", err);
   }

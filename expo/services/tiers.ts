@@ -10,7 +10,7 @@ export type SubscriptionTier = "free" | "pro" | "oracle_elite" | "syndicate";
 /** Admin override tier — mirrors SubscriptionTier but also allows null (no override). */
 export type AdminOverrideTier = SubscriptionTier | null;
 
-/** Monthly subscription Neuron allocations per tier. Free tier receives 25 first month, then 10/month. */
+/** Monthly subscription Neuron allocations per tier. Free tier receives 25 every month. */
 export const TIER_MONTHLY_ALLOCATION: Record<SubscriptionTier, number> = {
   free: 25,
   pro: 600,
@@ -18,9 +18,9 @@ export const TIER_MONTHLY_ALLOCATION: Record<SubscriptionTier, number> = {
   syndicate: 3700,
 };
 
-/** Free tier specific: 25 Neurons on first month, 10/month thereafter. No rollover. */
+/** Free tier specific: 25 Neurons every month. No rollover. */
 export const FREE_INITIAL_ALLOCATION = 25;
-export const FREE_RECURRING_ALLOCATION = 10;
+export const FREE_RECURRING_ALLOCATION = 25;
 
 /** Maximum number of user-forged EAGOHs per tier. Default shells are excluded. */
 export const TIER_MAX_EAGOHS: Record<SubscriptionTier, number> = {

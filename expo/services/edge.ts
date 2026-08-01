@@ -93,9 +93,9 @@ export function getForgeCost(mode: "initial" | "full_reforge" | "partial_reforge
 /** Monthly subscription Neuron allocations per tier — re-exported from tiers.ts (single source of truth). */
 export const TIER_MONTHLY_ALLOCATION = TIER_MONTHLY_ALLOCATION_SHARED;
 
-/** Free tier receives 25 Neurons on their first month, then 10 per month thereafter. */
+/** Free tier receives 25 Neurons every month. No rollover. */
 export const FREE_INITIAL_ALLOCATION = 25;
-export const FREE_RECURRING_ALLOCATION = 10;
+export const FREE_RECURRING_ALLOCATION = 25;
 
 /** Maximum number of user-forged EAGOHs per tier — re-exported from tiers.ts (single source of truth). */
 export const TIER_MAX_EAGOHS = TIER_MAX_EAGOHS_SHARED;
@@ -109,10 +109,12 @@ export const ROLLOVER_RETENTION_PCT = 0.1;
 
 /**
  * Returns the free tier allocation for this period.
- * First month: 25. Subsequent months: 10.
+ * Every month: 25 Neurons.
  */
 export function getFreeTierAllocation(lastAllocation: number | undefined | null): number {
-  return lastAllocation && lastAllocation > 0 ? FREE_RECURRING_ALLOCATION : FREE_INITIAL_ALLOCATION;
+  // Free tier always receives 25 Neurons per month.
+  void lastAllocation;
+  return FREE_INITIAL_ALLOCATION;
 }
 
 export function getBalances(
@@ -337,7 +339,7 @@ export async function applyMonthlyRollover(
     bucket: "subscription",
     from_subscription: 0,
     from_purchased: 0,
-    balance_subscription_after: rollover,
+    balance_subscription_after: nextSub,
     balance_purchased_after: profile.edge_purchased ?? 0,
     note: `Rollover ${rollover} of ${priorAllocation} (retention ${retentionThreshold})`,
   });
