@@ -648,6 +648,7 @@ const LearningEntry = memo(function LearningEntry({
   authenticatedUserId,
   onEdit,
   onDelete,
+  onToggleExchange,
   busy,
 }: {
   entry: OpenIntelligenceRow;
@@ -655,6 +656,7 @@ const LearningEntry = memo(function LearningEntry({
   authenticatedUserId?: string;
   onEdit: (entry: OpenIntelligenceRow) => void;
   onDelete: (entry: OpenIntelligenceRow) => void;
+  onToggleExchange: (entryId: string, enabled: boolean) => void;
   busy: string | null;
 }): JSX.Element {
   const domainTags = useMemo(() => getAllTagsForDomain(domainId), [domainId]);
@@ -740,6 +742,25 @@ const LearningEntry = memo(function LearningEntry({
             <Text style={[styles.learningActionText, { color: palette.ember }]}>Delete Entry</Text>
           </Pressable>
         </View>
+      ) : null}
+      {isOwner && isActive ? (
+        <Pressable
+          onPress={() => onToggleExchange(entry.id, !(entry.exchange_share_enabled ?? false))}
+          disabled={busy !== null}
+          style={({ pressed }) => [styles.learningExchangeRow, pressed && styles.pressed]}
+        >
+          <View style={styles.learningExchangeLabelWrap}>
+            <Text style={styles.learningExchangeLabel}>Exchange Sharing</Text>
+            <Text style={styles.learningExchangeHint}>{entry.exchange_share_enabled ? "On" : "Off"}</Text>
+          </View>
+          {busy === `exchange:${entry.id}` ? (
+            <ActivityIndicator color={palette.cyan} size={14} />
+          ) : (
+            <View style={[styles.learningExchangeSwitch, entry.exchange_share_enabled && { backgroundColor: palette.cyan, borderColor: palette.cyan }]}>
+              <View style={[styles.learningExchangeKnob, entry.exchange_share_enabled && { transform: [{ translateX: 16 }] }]} />
+            </View>
+          )}
+        </Pressable>
       ) : null}
       {showStatusInfo ? (
         <View style={[styles.learningStatusInfo, { borderColor: `${statusColor}22` }]}>
@@ -2028,7 +2049,7 @@ export default function OpenIntelligenceScreen(): JSX.Element {
                 </View>
               </View>
             ) : null}
-            {feedQuery.isLoading ? <ActivityIndicator color={palette.cyan} style={styles.feedLoader} /> : (feedQuery.data?.length ?? 0) > 0 && filteredFeedEntries.length === 0 ? <Text style={styles.feedEmpty}>No entries match these tags.</Text> : filteredFeedEntries.length > 0 ? filteredFeedEntries.map((entry) => <LearningEntry key={entry.id} entry={entry} domainId={currentDomain} authenticatedUserId={profile?.id} onEdit={handleEditEntry} onDelete={handleWithdrawEntry} busy={busy} />) : <Text style={styles.feedEmpty}>{selectedEagoh ? `No entries for ${selectedEagoh.name} yet. Submit your first observation above.` : "Select an EAGOH and submit an entry to populate the feed."}</Text>}
+            {feedQuery.isLoading ? <ActivityIndicator color={palette.cyan} style={styles.feedLoader} /> : (feedQuery.data?.length ?? 0) > 0 && filteredFeedEntries.length === 0 ? <Text style={styles.feedEmpty}>No entries match these tags.</Text> : filteredFeedEntries.length > 0 ? filteredFeedEntries.map((entry) => <LearningEntry key={entry.id} entry={entry} domainId={currentDomain} authenticatedUserId={profile?.id} onEdit={handleEditEntry} onDelete={handleWithdrawEntry} onToggleExchange={handleToggleExchange} busy={busy} />) : <Text style={styles.feedEmpty}>{selectedEagoh ? `No entries for ${selectedEagoh.name} yet. Submit your first observation above.` : "Select an EAGOH and submit an entry to populate the feed."}</Text>}
           </View>
 
         </ScrollView>
@@ -2496,6 +2517,12 @@ const styles = StyleSheet.create({
   learningActionsRow: { flexDirection: "row", gap: 8, marginTop: 10 },
   learningActionButton: { minHeight: 36, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingHorizontal: 10, borderWidth: 1, borderColor: `${palette.cyan}44`, borderRadius: 8 },
   learningActionText: { fontSize: 11, fontWeight: "800" },
+  learningExchangeRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: "rgba(255,255,255,0.05)", paddingHorizontal: 2 },
+  learningExchangeLabelWrap: { flexDirection: "row", alignItems: "center", gap: 6 },
+  learningExchangeLabel: { color: palette.text, fontSize: 11, fontWeight: "800" },
+  learningExchangeHint: { color: palette.muted, fontSize: 10, fontWeight: "700" },
+  learningExchangeSwitch: { width: 36, height: 20, borderRadius: 10, borderWidth: 1, borderColor: palette.line, backgroundColor: "rgba(255,255,255,0.06)", justifyContent: "center", paddingHorizontal: 2 },
+  learningExchangeKnob: { width: 14, height: 14, borderRadius: 7, backgroundColor: palette.muted },
   tagLimitText: { color: palette.muted, fontSize: 10, marginBottom: 8 },
 
   // General

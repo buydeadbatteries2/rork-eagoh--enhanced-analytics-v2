@@ -3885,10 +3885,10 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
     }
   }
 
-  // Update the entry's validation_status
+  // Auto-validate the new entry and enable Exchange Sharing by default
   const { error: statusUpdateErr } = await serviceClient
     .from("open_intelligence")
-    .update({ validation_status: autoStatus })
+    .update({ validation_status: autoStatus, exchange_share_enabled: true })
     .eq("id", newEntryId);
 
   if (statusUpdateErr) {
@@ -3896,8 +3896,9 @@ async function handleCreateOIEntry(request: Request, env: Env): Promise<Response
     // Don't fail the request — the entry was created successfully.
     // It will remain pending_review and can be moderated manually.
   } else {
-    // Update the returned entry object with the new status
+    // Update the returned entry object with the new status and exchange share flag
     (newEntry as Record<string, unknown>).validation_status = autoStatus;
+    (newEntry as Record<string, unknown>).exchange_share_enabled = true;
     if (DEBUG_OI) {
       console.log("[oi/create] auto-validated entryId=" + newEntryId.slice(0, 8) + " status=" + autoStatus);
     }

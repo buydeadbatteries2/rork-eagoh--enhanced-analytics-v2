@@ -49,7 +49,7 @@ create table if not exists public.open_intelligence (
   selected_category text,
   selected_subtags jsonb default '[]'::jsonb,
   custom_tags jsonb default '[]'::jsonb,
-  exchange_share_enabled boolean not null default false,
+  exchange_share_enabled boolean not null default true,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
@@ -513,7 +513,8 @@ begin
     user_id, eagoh_id, intelligence_domain, entry_type, tag, content,
     character_count_no_spaces, confidence_level, quality_score,
     validation_status, influence_score,
-    selected_category, selected_subtags, custom_tags
+    selected_category, selected_subtags, custom_tags,
+    exchange_share_enabled
   )
   values (
     p_user_id, p_eagoh_id, p_intelligence_domain, p_entry_type, p_tag, p_content,
@@ -521,7 +522,8 @@ begin
     'pending_review', 0,
     p_selected_category,
     case when jsonb_typeof(p_selected_subtags) = 'array' then p_selected_subtags else '[]'::jsonb end,
-    case when jsonb_typeof(p_custom_tags) = 'array' then p_custom_tags else '[]'::jsonb end
+    case when jsonb_typeof(p_custom_tags) = 'array' then p_custom_tags else '[]'::jsonb end,
+    true
   )
   returning id into v_new_entry_id;
 

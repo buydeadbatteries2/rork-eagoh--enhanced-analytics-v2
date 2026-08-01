@@ -442,7 +442,7 @@ create table if not exists public.open_intelligence (
   selected_category text,
   selected_subtags jsonb default '[]'::jsonb,
   custom_tags jsonb default '[]'::jsonb,
-  exchange_share_enabled boolean not null default false,
+  exchange_share_enabled boolean not null default true,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
@@ -3944,13 +3944,15 @@ begin
     user_id, eagoh_id, intelligence_domain, entry_type, tag, content,
     character_count_no_spaces, confidence_level, quality_score,
     validation_status, influence_score,
-    selected_category, selected_subtags, custom_tags
+    selected_category, selected_subtags, custom_tags,
+    exchange_share_enabled
   )
   values (
     p_user_id, p_eagoh_id, p_intelligence_domain, p_entry_type, p_tag, p_content,
     v_char_count, p_confidence_level, 0,
     'pending_review', 0,
-    p_selected_category, p_selected_subtags, p_custom_tags
+    p_selected_category, p_selected_subtags, p_custom_tags,
+    true
   )
   returning id into v_new_entry_id;
 
