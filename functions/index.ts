@@ -7773,8 +7773,11 @@ async function handleCreateJoinRequest(request: Request, env: Env): Promise<Resp
 
 /**
  * POST /factions/join-requests/approve
- * Leader approves a join request. Atomic: inserts member + marks request approved.
- * Body: { requestId: string, decisionReason?: string }
+ * Leader approves a join request. Calls the atomic SECURITY DEFINER RPC
+ * `approve_faction_join_request` — one PostgreSQL transaction for all
+ * critical membership work. Notification is sent after the RPC succeeds;
+ * notification failure does NOT undo the membership approval.
+ * Body: { requestId: string }
  */
 async function handleApproveJoinRequest(request: Request, env: Env): Promise<Response> {
   if (request.method !== "POST") {
@@ -7796,7 +7799,7 @@ async function handleApproveJoinRequest(request: Request, env: Env): Promise<Res
     return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
   }
 
-  let payload: { requestId: string; decisionReason?: string };
+  let payload: { requestId: string };
   try {
     payload = (await request.json()) as typeof payload;
   } catch {
@@ -7807,123 +7810,76 @@ async function handleApproveJoinRequest(request: Request, env: Env): Promise<Res
     return jsonResponse({ ok: false, error: "Request ID is required." }, 400);
   }
 
-  // 1. Fetch the join request
-  const { data: reqRow, error: reqErr } = await serviceClient
-    .from("faction_join_requests")
-    .select("*")
-    .eq("id", payload.requestId)
-    .maybeSingle();
-
-  if (reqErr || !reqRow) {
-    return jsonResponse({ ok: false, error: "Join request not found." }, 404);
-  }
-
-  const req = reqRow as {
-    id: string; faction_id: string; requester_id: string; status: string;
-  };
-
-  // 2. Verify the request is still pending
-  if (req.status !== "pending") {
-    return jsonResponse({ ok: false, error: "This request has already been processed." }, 409);
-  }
-
-  // 3. Verify the acting user is the faction leader
-  const { data: faction } = await serviceClient
-    .from("factions")
-    .select("id, commander_id, current_members, max_members, name")
-    .eq("id", req.faction_id)
-    .maybeSingle();
-
-  if (!faction) {
-    return jsonResponse({ ok: false, error: "Faction not found." }, 404);
-  }
-
-  const f = faction as { id: string; commander_id: string; current_members: number; max_members: number; name: string };
-  if (f.commander_id !== userId) {
-    return jsonResponse({ ok: false, error: "Only the Faction leader can approve requests." }, 403);
-  }
-
-  // 4. Check if requester is already a member (e.g. joined via invite)
-  const { data: existingMember } = await serviceClient
-    .from("faction_members")
-    .select("id")
-    .eq("faction_id", req.faction_id)
-    .eq("user_id", req.requester_id)
-    .maybeSingle();
-  if (existingMember) {
-    // Mark as approved and skip — already a member
-    await serviceClient.from("faction_join_requests").update({
-      status: "approved", reviewed_at: new Date().toISOString(), reviewed_by: userId,
-    }).eq("id", req.id);
-    return jsonResponse({ ok: true, alreadyMember: true });
-  }
-
-  // 5. Check capacity
-  if (f.current_members >= f.max_members) {
-    return jsonResponse({ ok: false, error: "This Faction no longer has an available member slot." }, 400);
-  }
-
-  // 6. Verify requester is still eligible (tier check)
-  const { data: profile } = await serviceClient
-    .from("profiles")
-    .select("subscription_tier")
-    .eq("id", req.requester_id)
-    .maybeSingle();
-  const tier = (profile as { subscription_tier: string })?.subscription_tier ?? "free";
-  if (tier === "free") {
-    // Mark as denied — requester is no longer eligible
-    await serviceClient.from("faction_join_requests").update({
-      status: "denied", reviewed_at: new Date().toISOString(), reviewed_by: userId,
-      decision_reason: "Requester no longer has a paid subscription.",
-    }).eq("id", req.id);
-    return jsonResponse({ ok: false, error: "Requester no longer has an eligible subscription." }, 403);
-  }
-
-  // 7. Atomic: Insert member + mark request approved
-  const { error: memberInsertErr } = await serviceClient.from("faction_members").insert({
-    faction_id: req.faction_id,
-    user_id: req.requester_id,
-    role: "recruit",
-    status: "active",
-  });
-
-  if (memberInsertErr) {
-    console.warn("[factions/join-requests/approve] member insert failed", memberInsertErr.message);
-    return jsonResponse({ ok: false, error: "Failed to add member." }, 500);
-  }
-
-  // Update member count
-  await serviceClient
-    .from("factions")
-    .update({ current_members: f.current_members + 1 })
-    .eq("id", req.faction_id);
-
-  // Mark request approved
-  await serviceClient.from("faction_join_requests").update({
-    status: "approved",
-    reviewed_at: new Date().toISOString(),
-    reviewed_by: userId,
-    decision_reason: payload.decisionReason?.trim().slice(0, 500) || null,
-  }).eq("id", req.id);
-
-  // Log activity
-  await serviceClient.from("faction_activity").insert({
-    faction_id: req.faction_id,
-    user_id: req.requester_id,
-    kind: "member_joined",
-    details: { faction_name: f.name, via: "join_request" },
-  });
-
-  // Notify the requester
-  await createIntelligenceNotification(
-    serviceClient,
-    req.requester_id,
-    null,
-    "faction_join_approved",
-    `Your request to join ${f.name} was accepted.`,
+  // Call the atomic SECURITY DEFINER RPC — one PostgreSQL transaction.
+  // The RPC locks the request + faction rows FOR UPDATE, verifies leader,
+  // checks eligibility/capacity, inserts the member, updates current_members
+  // from the actual member count, marks the request approved, and logs activity.
+  // Notification is sent AFTER the RPC succeeds — notification failure does
+  // NOT undo the membership approval.
+  const { data: rpcResult, error: rpcErr } = await serviceClient.rpc(
+    "approve_faction_join_request",
+    { p_request_id: payload.requestId, p_leader_id: userId },
   );
 
-  return jsonResponse({ ok: true });
+  if (rpcErr) {
+    console.warn("[factions/join-requests/approve] RPC error:", rpcErr.message);
+    return jsonResponse({ ok: false, error: "Failed to process approval." }, 500);
+  }
+
+  const result = rpcResult as Array<{
+    success: boolean;
+    error_code: string | null;
+    error_message: string | null;
+    member_id: string | null;
+    faction_id: string | null;
+    requester_id: string | null;
+    faction_name: string | null;
+    actual_member_count: number | null;
+    already_member: boolean;
+  }>;
+
+  const row = result?.[0];
+  if (!row || !row.success) {
+    const statusMap: Record<string, number> = {
+      NOT_FOUND: 404,
+      ALREADY_PROCESSED: 409,
+      FACTION_NOT_FOUND: 404,
+      NOT_LEADER: 403,
+      NOT_ELIGIBLE: 403,
+      FACTION_FULL: 400,
+    };
+    const httpStatus = (row?.error_code && statusMap[row.error_code]) || 500;
+    return jsonResponse(
+      { ok: false, error: row?.error_message || "Failed to process approval." },
+      httpStatus,
+    );
+  }
+
+  // RPC succeeded — send notification (failure logged, does not undo approval)
+  if (row.requester_id && row.faction_name) {
+    try {
+      await createIntelligenceNotification(
+        serviceClient,
+        row.requester_id,
+        null,
+        "faction_join_approved",
+        `Your request to join ${row.faction_name} was accepted.`,
+      );
+    } catch (notifErr) {
+      console.warn(
+        "[factions/join-requests/approve] notification failed (membership already committed):",
+        notifErr instanceof Error ? notifErr.message : "unknown",
+      );
+      // Do NOT return an error — the membership was successfully committed.
+    }
+  }
+
+  return jsonResponse({
+    ok: true,
+    alreadyMember: row.already_member,
+    memberId: row.member_id,
+    memberCount: row.actual_member_count,
+  });
 }
 
 /**
@@ -7995,22 +7951,38 @@ async function handleDenyJoinRequest(request: Request, env: Env): Promise<Respon
     return jsonResponse({ ok: false, error: "Only the Faction leader can deny requests." }, 403);
   }
 
-  // 3. Mark as denied
-  await serviceClient.from("faction_join_requests").update({
-    status: "denied",
-    reviewed_at: new Date().toISOString(),
-    reviewed_by: userId,
-    decision_reason: payload.decisionReason?.trim().slice(0, 500) || null,
-  }).eq("id", req.id);
+  // 3. Mark as denied — conditional update requires status = 'pending'
+  // This prevents a stale deny from overwriting an already-approved request
+  const { count: denyCount } = await serviceClient.from("faction_join_requests")
+    .update({
+      status: "denied",
+      reviewed_at: new Date().toISOString(),
+      reviewed_by: userId,
+      decision_reason: payload.decisionReason?.trim().slice(0, 500) || null,
+    }, { count: "exact" })
+    .eq("id", req.id)
+    .eq("status", "pending");
 
-  // 4. Notify the requester
-  await createIntelligenceNotification(
-    serviceClient,
-    req.requester_id,
-    null,
-    "faction_join_denied",
-    `Your request to join ${f.name} was not accepted.`,
-  );
+  // If zero rows were updated, the request was processed between our fetch and update
+  if (denyCount === 0) {
+    return jsonResponse({ ok: false, error: "This request has already been processed." }, 409);
+  }
+
+  // 4. Notify the requester (failure logged, does not undo the denial)
+  try {
+    await createIntelligenceNotification(
+      serviceClient,
+      req.requester_id,
+      null,
+      "faction_join_denied",
+      `Your request to join ${f.name} was not accepted.`,
+    );
+  } catch (notifErr) {
+    console.warn(
+      "[factions/join-requests/deny] notification failed (denial already committed):",
+      notifErr instanceof Error ? notifErr.message : "unknown",
+    );
+  }
 
   return jsonResponse({ ok: true });
 }
@@ -8072,10 +8044,19 @@ async function handleCancelJoinRequest(request: Request, env: Env): Promise<Resp
     return jsonResponse({ ok: false, error: "This request has already been processed." }, 409);
   }
 
-  await serviceClient.from("faction_join_requests").update({
-    status: "cancelled",
-    reviewed_at: new Date().toISOString(),
-  }).eq("id", req.id);
+  // Conditional update requires status = 'pending' — prevents a stale cancel
+  // from overwriting an already-approved request (race between fetch and update)
+  const { count: cancelCount } = await serviceClient.from("faction_join_requests")
+    .update({
+      status: "cancelled",
+      reviewed_at: new Date().toISOString(),
+    }, { count: "exact" })
+    .eq("id", req.id)
+    .eq("status", "pending");
+
+  if (cancelCount === 0) {
+    return jsonResponse({ ok: false, error: "This request has already been processed." }, 409);
+  }
 
   return jsonResponse({ ok: true });
 }
