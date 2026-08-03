@@ -815,11 +815,11 @@ export default function SubscriptionScreen(): JSX.Element {
         const tier = revenueCatTier;
         const tierLabel = TIER_LABELS[tier];
         Alert.alert(
-          "Purchases Restored",
+          "Purchases restored successfully.",
           `${tierLabel} subscription restored successfully.`,
         );
       } else {
-        Alert.alert("No Purchases Found", "No previous subscriptions were found to restore.");
+        Alert.alert("No active subscription was found for this App Store account.");
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Restore failed";

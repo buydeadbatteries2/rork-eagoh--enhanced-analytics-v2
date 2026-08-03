@@ -27,7 +27,6 @@ import {
   Coins,
   LockKeyhole,
   Infinity,
-  RefreshCw,
   Sparkles,
   WalletCards,
   WifiOff,
@@ -224,20 +223,6 @@ const styles = StyleSheet.create({
   packBadgeText: { fontSize: 10, fontWeight: "900" as const, letterSpacing: 0.8 },
   packArrow: { opacity: 0.5 },
 
-  // Restore button
-  restoreBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    paddingVertical: 14,
-    borderRadius: 5,
-    borderWidth: 1,
-    borderColor: palette.line,
-    backgroundColor: "rgba(10,18,32,0.60)",
-  },
-  restoreBtnText: { color: palette.muted, fontSize: 13, fontWeight: "700" as const },
-
   // Confirmation modal
   overlay: {
     ...StyleSheet.absoluteFillObject,
@@ -413,9 +398,7 @@ export default function EdgeStoreScreen(): JSX.Element {
     configured: rcConfigured,
     allNeuronPackages: rcNeuronPackages,
     purchase: rcPurchase,
-    restore: rcRestore,
     isPurchasing,
-    isRestoring,
     diagnostics,
     runtimeMode,
     canRealPurchase,
@@ -607,24 +590,6 @@ export default function EdgeStoreScreen(): JSX.Element {
     setConfirmPack(null);
     setConfirmRcPkg(null);
   }, [h]);
-
-  const handleRestore = useCallback(async (): Promise<void> => {
-    h.medium();
-    try {
-      const customerInfo = await rcRestore();
-      const activeCount = customerInfo?.entitlements.active
-        ? Object.keys(customerInfo.entitlements.active).length
-        : 0;
-      if (activeCount > 0) {
-        Alert.alert("Purchases Restored", `${activeCount} active entitlement(s) found and restored.`);
-      } else {
-        Alert.alert("No Purchases Found", "No previous purchases were found to restore.");
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Restore failed";
-      Alert.alert("Restore Failed", msg);
-    }
-  }, [rcRestore, h]);
 
   // Total Edge — show loading placeholder until the profile is fetched from Supabase
   // so the store never displays 0 before the server returns the real balance.
@@ -872,21 +837,6 @@ export default function EdgeStoreScreen(): JSX.Element {
           </View>
         ) : null}
 
-        {/* Restore purchases */}
-        <Pressable
-          onPress={handleRestore}
-          disabled={isRestoring}
-          style={({ pressed }) => [styles.restoreBtn, pressed && { opacity: 0.7 }]}
-        >
-          {isRestoring ? (
-            <ActivityIndicator color={palette.muted} size="small" />
-          ) : (
-            <RefreshCw color={palette.muted} size={16} />
-          )}
-          <Text style={styles.restoreBtnText}>
-            {isRestoring ? "Restoring..." : "Restore Purchases"}
-          </Text>
-        </Pressable>
       </ScrollView>
 
       {/* Confirmation modal */}
