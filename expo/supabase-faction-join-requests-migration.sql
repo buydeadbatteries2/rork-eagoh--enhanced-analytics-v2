@@ -1,5 +1,5 @@
 -- ──────────────────────────────────────────────────────────────────────────
--- FACTION JOIN REQUESTS — Migration (v2: atomic approval RPC)
+-- FACTION JOIN REQUESTS — Migration (v3: safety corrections)
 -- Replaces instant faction joining with a request + leader approval flow.
 -- All mutations go through the secure worker (service_role).
 -- RLS: requesters see their own requests; leaders see their faction's requests.
@@ -36,16 +36,14 @@ alter table public.faction_join_requests
   add column if not exists created_at timestamptz default now(),
   add column if not exists updated_at timestamptz default now();
 
--- Partial unique constraint: only one pending request per user per faction
-do $$ begin
-  if not exists (
-    select 1 from pg_constraint where conname = 'fjr_one_pending_per_user_faction'
-  ) then
-    create unique index fjr_one_pending_per_user_faction
-      on public.faction_join_requests(faction_id, requester_id)
-      where status = 'pending';
-  end if;
-end $$;
+-- Partial unique index: only one pending request per user per faction
+-- Uses IF NOT EXISTS — idempotent. Partial unique indexes live in
+-- pg_class/pg_indexes, NOT pg_constraint, so the previous DO block that
+-- checked pg_constraint would never find it and would attempt to recreate
+-- it, causing "relation already exists" on repeated runs.
+create unique index if not exists fjr_one_pending_per_user_faction
+  on public.faction_join_requests(faction_id, requester_id)
+  where status = 'pending';
 
 -- Indexes
 create index if not exists fjr_faction_id_idx on public.faction_join_requests(faction_id, status);
@@ -53,17 +51,35 @@ create index if not exists fjr_requester_id_idx on public.faction_join_requests(
 create index if not exists fjr_requested_at_idx on public.faction_join_requests(requested_at desc);
 
 -- ── 2. Ensure unique constraint on faction_members(faction_id, user_id) ────
--- The base schema already has unique(faction_id, user_id) in the CREATE TABLE,
--- but older live databases may be missing it. Add it idempotently.
+-- The base schema has unique(faction_id, user_id) in the CREATE TABLE,
+-- but older live databases may be missing it or may have an unrelated
+-- two-column unique constraint. We check for the EXACT column names
+-- (faction_id, user_id) by joining pg_constraint → pg_attribute.
+-- An unrelated two-column unique constraint is NOT sufficient.
 
-do $$ begin
-  if not exists (
-    select 1 from pg_constraint
-    where conrelid = 'public.faction_members'::regclass
-    and contype = 'u'
-    and array_length(conkey, 1) = 2
-  ) then
-    -- Drop any duplicate rows first (keep the earliest by joined_at)
+do $$
+declare
+  v_has_exact boolean;
+begin
+  -- Check for a unique constraint whose columns are exactly faction_id and user_id
+  select exists(
+    select 1
+    from pg_constraint c
+    join pg_attribute a1
+      on a1.attrelid = c.conrelid
+      and a1.attnum = c.conkey[1]
+      and a1.attname = 'faction_id'
+    join pg_attribute a2
+      on a2.attrelid = c.conrelid
+      and a2.attnum = c.conkey[2]
+      and a2.attname = 'user_id'
+    where c.conrelid = 'public.faction_members'::regclass
+      and c.contype = 'u'
+      and array_length(c.conkey, 1) = 2
+  ) into v_has_exact;
+
+  if not v_has_exact then
+    -- Remove duplicate rows first (keep the one with the smallest id)
     delete from public.faction_members fm
     using public.faction_members fm2
     where fm.faction_id = fm2.faction_id
@@ -107,36 +123,92 @@ create policy "fjr_requester_update_cancel" on public.faction_join_requests
 -- No client INSERT, no client DELETE.
 -- All INSERT and approve/deny UPDATE go through the secure worker (service_role).
 
--- ── 4. Add faction join notification types ─────────────────────────────────
+-- ── 4. Preserve all existing notification types + add faction join types ───
+-- Instead of blindly dropping and recreating from a hardcoded list, we:
+--   1. Read the existing constraint definition from pg_constraint
+--   2. Check for any rows with notification_type values absent from the
+--      complete list (8 original + 3 new = 11 total)
+--   3. If orphaned values exist, abort with an error so no data is invalidated
+--   4. Drop the old constraint and recreate with the full 11-type list
+--
+-- Complete notification type list (verified from base schema + worker + app):
+--   Original 8 (from supabase-schema.sql):
+--     community_supported, externally_supported, disputed, rejected,
+--     dispute_dismissed, outdated, exchange_sharing_disabled,
+--     faction_sharing_removed
+--   New 3 (faction join request system):
+--     faction_join_requested, faction_join_approved, faction_join_denied
 
--- Drop and recreate the check constraint to add new notification types
-do $$ begin
-  -- Check if the old constraint exists and needs updating
-  if exists (
+do $$
+declare
+  v_constraint_exists boolean;
+  v_orphaned_count integer;
+  v_existing_def text;
+begin
+  -- Check if the constraint exists
+  select exists(
     select 1 from information_schema.table_constraints
     where table_name = 'intelligence_notifications'
-    and constraint_name = 'intelligence_notifications_notification_type_check'
-  ) then
+      and constraint_name = 'intelligence_notifications_notification_type_check'
+  ) into v_constraint_exists;
+
+  if v_constraint_exists then
+    -- Read the existing constraint definition for audit purposes
+    select pg_get_constraintdef(c.oid)
+      into v_existing_def
+    from pg_constraint c
+    where c.conrelid = 'public.intelligence_notifications'::regclass
+      and c.conname = 'intelligence_notifications_notification_type_check';
+
+    -- Check for any rows with notification_type values not in the complete list
+    -- This prevents accidentally invalidating existing data
+    select count(*) into v_orphaned_count
+    from public.intelligence_notifications
+    where notification_type not in (
+      'community_supported',
+      'externally_supported',
+      'disputed',
+      'rejected',
+      'dispute_dismissed',
+      'outdated',
+      'exchange_sharing_disabled',
+      'faction_sharing_removed',
+      'faction_join_requested',
+      'faction_join_approved',
+      'faction_join_denied'
+    );
+
+    if v_orphaned_count > 0 then
+      raise exception
+        'ABORTING: Found % row(s) with notification_type values not in the new constraint. '
+        'Existing constraint: %. '
+        'Please review and add the missing type(s) before re-running this migration.',
+        v_orphaned_count, v_existing_def
+        using errcode = 'check_violation';
+    end if;
+
+    -- Safe to drop — no orphaned data
     alter table public.intelligence_notifications
       drop constraint intelligence_notifications_notification_type_check;
   end if;
-end $$;
 
-alter table public.intelligence_notifications
-  add constraint intelligence_notifications_notification_type_check
-  check (notification_type in (
-    'community_supported',
-    'externally_supported',
-    'disputed',
-    'rejected',
-    'dispute_dismissed',
-    'outdated',
-    'exchange_sharing_disabled',
-    'faction_sharing_removed',
-    'faction_join_requested',
-    'faction_join_approved',
-    'faction_join_denied'
-  ));
+  -- Create the constraint with all 11 types
+  alter table public.intelligence_notifications
+    add constraint intelligence_notifications_notification_type_check
+    check (notification_type in (
+      'community_supported',
+      'externally_supported',
+      'disputed',
+      'rejected',
+      'dispute_dismissed',
+      'outdated',
+      'exchange_sharing_disabled',
+      'faction_sharing_removed',
+      'faction_join_requested',
+      'faction_join_approved',
+      'faction_join_denied'
+    ));
+end $$;
 
 -- ── 5. Add accepting_requests column to factions ───────────────────────────
 
@@ -149,8 +221,6 @@ alter table public.factions
   add column if not exists blocked_user_ids uuid[] not null default '{}';
 
 -- ── 7. RLS for accepting_requests (commander can update) ───────────────────
--- The existing factions_commander_update policy already covers this column,
--- but let's verify it exists.
 do $$ begin
   if not exists (
     select 1 from pg_policies
