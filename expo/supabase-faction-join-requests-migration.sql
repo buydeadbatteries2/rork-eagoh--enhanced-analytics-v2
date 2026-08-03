@@ -113,15 +113,12 @@ create policy "fjr_select_leader" on public.faction_join_requests
     )
   );
 
--- Requester can cancel their own pending request (update status only)
-create policy "fjr_requester_update_cancel" on public.faction_join_requests
-  for update using (
-    requester_id = auth.uid()
-    and status = 'pending'
-  );
-
--- No client INSERT, no client DELETE.
--- All INSERT and approve/deny UPDATE go through the secure worker (service_role).
+-- No client INSERT, UPDATE, or DELETE.
+-- All mutations (create, cancel, approve, deny) go through the secure
+-- worker (service_role), which bypasses RLS.
+-- The requester UPDATE policy was removed to prevent modified clients from
+-- self-approving or altering status/faction_id/requester_id/reviewed_by/etc.
+-- Cancellation is handled by POST /factions/join-requests/cancel (worker endpoint).
 
 -- ── 4. Preserve all existing notification types + add faction join types ───
 -- Instead of blindly dropping and recreating from a hardcoded list, we:
