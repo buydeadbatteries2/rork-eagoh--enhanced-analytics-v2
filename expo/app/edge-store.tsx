@@ -28,7 +28,6 @@ import {
   LockKeyhole,
   Infinity,
   RefreshCw,
-  ShieldCheck,
   Sparkles,
   WalletCards,
   WifiOff,
@@ -668,12 +667,7 @@ export default function EdgeStoreScreen(): JSX.Element {
               </Text>
             </>
           ) : (
-            <>
-              <ShieldCheck color={palette.cyan} size={16} />
-              <Text style={styles.statusBannerText}>
-                Purchases secured by RevenueCat
-              </Text>
-            </>
+            <View />
           )}
         </View>
 

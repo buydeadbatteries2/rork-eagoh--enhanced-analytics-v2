@@ -2566,40 +2566,6 @@ export default function SettingsScreen(): JSX.Element {
         titleIcon: <Info color={pal.blue} size={15} />,
         rows: [
           {
-            kind: "info",
-            label: "App Name",
-            value: "EAGOH",
-            icon: <Cpu color={pal.cyan} size={18} />,
-          },
-          {
-            kind: "info",
-            label: "Full Name",
-            value: "Enhanced Analytics & Game Oracle Hub",
-            icon: <Info color={pal.muted} size={18} />,
-          },
-          {
-            kind: "info",
-            label: "Company",
-            value: "NDSTRII Studios LLC",
-            icon: <Star color={pal.gold} size={18} />,
-          },
-          {
-            kind: "info",
-            label: "App Version",
-            value: Constants.expoConfig?.version ?? "1.0.0",
-            icon: <Layers3 color={pal.muted} size={18} />,
-          },
-          {
-            kind: "info",
-            label: "Build Number",
-            value: String(
-              Constants.expoConfig?.ios?.buildNumber ??
-                Constants.expoConfig?.android?.versionCode ??
-                "1",
-            ),
-            icon: <Cpu color={pal.muted} size={18} />,
-          },
-          {
             kind: "link",
             label: "Contact Support",
             icon: <MessageCircle color={pal.cyan} size={18} />,
