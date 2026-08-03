@@ -9988,7 +9988,7 @@ async function handleForgeGenerate(request: Request, env: Env): Promise<Response
       style_notes: str(draft.styleNotes) || null,
       cybernetic_intensity: str(draft.cyberneticIntensity, "moderate"),
       pose: str(draft.pose, "calm-sentinel"),
-      lab: str(draft.lab, "neon-vault"),
+      lab: str(draft.lab, "neon_vault"), // canonical lab ID (8 labs)
       dna: mergedDna,
       image_url: imageUrl,
       image_thumb_url: imageUrl,

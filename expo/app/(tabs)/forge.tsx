@@ -100,6 +100,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
+import { LAB_OPTIONS, normalizeLabId } from "@/services/forgeLabs";
 
 const GENERIC_EAGOH_URI = DEFAULT_EAGOH_IMAGE;
 
@@ -197,11 +198,7 @@ const sports: ForgeOption[] = [
   { id: "baseball", label: "Baseball", detail: "pattern patience + precision", tone: "violet" },
 ];
 
-const labs: ForgeOption[] = [
-  { id: "neon-vault", label: "Neon Vault", detail: "identity calibration", tone: "cyan" },
-  { id: "obsidian-bay", label: "Obsidian Bay", detail: "armor diagnostics", tone: "violet" },
-  { id: "gold-ring", label: "Gold Ring", detail: "fanatic resonance", tone: "gold" },
-];
+// Lab options come from the shared forgeLabs config (8 options) — no local copy.
 
 function toneColor(tone: OptionTone): string {
   if (tone === "gold") return palette.gold;
@@ -597,7 +594,7 @@ export default function ForgeScreen(): JSX.Element {
   const [appearance, setAppearance] = useState<Record<string, string>>({});
   const [cyberneticIntensity, setCyberneticIntensity] = useState<string>("moderate");
   const [pose, setPose] = useState<string>("calm-sentinel");
-  const [lab, setLab] = useState<string>("neon-vault");
+  const [lab, setLab] = useState<string>("neon_vault");
   const [currentStepIndex, setCurrentStepIndex] = useState<number>(0);
   const [forgeError, setForgeError] = useState<string | null>(null);
   const [sheetError, setSheetError] = useState<string | null>(null);
@@ -766,7 +763,7 @@ export default function ForgeScreen(): JSX.Element {
     setAppearance(editingEagoh.appearance ?? {});
     setCyberneticIntensity(editingEagoh.cybernetic_intensity ?? "moderate");
     setPose(editingEagoh.pose ?? "calm-sentinel");
-    setLab(editingEagoh.lab ?? editingEagoh.labs?.[0] ?? "neon-vault");
+    setLab(normalizeLabId(editingEagoh.lab ?? editingEagoh.labs?.[0] ?? "neon_vault"));
     setCurrentStepIndex(0);
   }, [editingEagoh, selectedEagohId]);
 
@@ -1455,7 +1452,7 @@ export default function ForgeScreen(): JSX.Element {
     setAppearance({});
     setCyberneticIntensity("moderate");
     setPose("calm-sentinel");
-    setLab("neon-vault");
+    setLab("neon_vault");
     setCurrentStepIndex(0);
     setForgeError(null);
     hasLoadedRef.current = null;
@@ -2034,7 +2031,7 @@ export default function ForgeScreen(): JSX.Element {
     return (
       <>
         <Text style={styles.sectionHint}>Select the forge lab environment for image generation.</Text>
-        {labs.map((opt) => <OptionChip key={opt.id} option={opt} selected={lab === opt.id} onPress={setLab} />)}
+        {LAB_OPTIONS.map((opt) => <OptionChip key={opt.id} option={opt} selected={lab === opt.id} onPress={setLab} />)}
       </>
     );
   }, [
@@ -2363,7 +2360,7 @@ export default function ForgeScreen(): JSX.Element {
                     setAppearance({});
                     setCyberneticIntensity("moderate");
                     setPose("calm-sentinel");
-                    setLab("neon-vault");
+                    setLab("neon_vault");
                     setCurrentStepIndex(0);
                     setForgeError(null);
                     hasLoadedRef.current = null;

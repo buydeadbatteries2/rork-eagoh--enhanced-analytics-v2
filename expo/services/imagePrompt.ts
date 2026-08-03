@@ -15,6 +15,8 @@
  * Reusable for initial forge, full reforge, and partial reforge prompts.
  */
 
+import { getLabGenerationPrompt, getLabLabel, normalizeLabId } from "@/services/forgeLabs";
+
 export type ForgePromptInput = {
   name?: string;
   sport: string;
@@ -149,6 +151,7 @@ export function buildForgePrompt(input: ForgePromptInput, options: ForgePromptOp
   const dnaCue = describeDna(input.dna);
   const teamCue = describeTeams(input.teams);
   const appearanceList = describeAppearance(input.appearance);
+  const labPrompt = getLabGenerationPrompt(normalizeLabId(input.lab));
 
   const identityAnchor = [
     `EAGOH codename "${(input.name ?? "Unnamed EAGOH").slice(0, 48)}"`,
@@ -170,6 +173,7 @@ export function buildForgePrompt(input: ForgePromptInput, options: ForgePromptOp
       teamCue,
       appearanceList.length ? `wearing ${appearanceList.join(", ")}` : "",
       `pose: ${poseCue}`,
+      `lab environment: ${labPrompt}`,
       NEGATIVE_GUARDRAILS,
     ].filter(Boolean);
     return body.join(" — ");
@@ -222,6 +226,7 @@ export function buildForgeSummary(input: ForgePromptInput): string[] {
     lines.push(`Fanatic affinities: ${input.teams.length} selected`);
   }
 
+  lines.push(`Lab: ${getLabLabel(input.lab)}`);
   lines.push(`Appearance layers: ${Object.keys(input.appearance).length}`);
 
   return lines;

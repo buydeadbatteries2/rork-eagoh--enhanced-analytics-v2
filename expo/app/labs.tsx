@@ -35,6 +35,7 @@ import { Animated, DimensionValue, Easing, FlatList, KeyboardAvoidingView, Platf
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useEdge } from "@/providers/EdgeProvider";
 import { getQuickCheckCost, runQuickCheck, runQuickAnalytics, runStandardSession, runDeepDive, type AnalystRequestKind, type AnalystCallError, type ConversationMessage } from "@/services/analyst";
+import { LAB_OPTIONS } from "@/services/forgeLabs";
 
 type LabMode = "forge" | "intelligence" | "analyst";
 type ForgeStep = "Identity" | "DNA" | "Teams" | "Body" | "Pose" | "Preview";
@@ -126,9 +127,7 @@ const intensities: ForgeOption[] = [
 const poses: ForgeOption[] = [
   { id: "arms-crossed", label: "Arms crossed", detail: "unshaken authority", tone: "gold" }, { id: "strategist-stance", label: "Strategist stance", detail: "mid-call calculation", tone: "violet" }, { id: "relaxed-confidence", label: "Relaxed confidence", detail: "premium calm", tone: "success" }, { id: "tactical-stance", label: "Tactical stance", detail: "ready to deploy", tone: "cyan" },
 ];
-const labs: ForgeOption[] = [
-  { id: "neon-vault", label: "Neon Vault", detail: "identity calibration", tone: "cyan" }, { id: "obsidian-bay", label: "Obsidian Bay", detail: "armor diagnostics", tone: "violet" }, { id: "gold-ring", label: "Gold Ring", detail: "fanatic resonance", tone: "gold" },
-];
+// Lab options come from the shared forgeLabs config (8 options) — no local copy.
 const observationTypes: ObservationType[] = [
   { id: "fatigue", label: "Fatigue", tone: "gold" }, { id: "injury-concern", label: "Injury concern", tone: "ember" }, { id: "crowd-pressure", label: "Crowd pressure", tone: "violet" }, { id: "rivalry", label: "Rivalry", tone: "ember" }, { id: "momentum", label: "Momentum", tone: "success" }, { id: "coaching-decisions", label: "Coaching decisions", tone: "cyan" }, { id: "emotional-instability", label: "Emotional instability", tone: "violet" }, { id: "media-pressure", label: "Media pressure", tone: "gold" }, { id: "defensive-weakness", label: "Defensive weakness", tone: "ember" }, { id: "offensive-inconsistency", label: "Offensive inconsistency", tone: "cyan" }, { id: "weather-influence", label: "Weather influence", tone: "success" }, { id: "lineup-chemistry", label: "Lineup chemistry", tone: "gold" },
 ];
@@ -414,7 +413,7 @@ export default function LabsScreen(): JSX.Element {
   const [analystError, setAnalystError] = useState<string | null>(null);
   const [connectedModel, setConnectedModel] = useState<string>("gpt-4o-mini");
   const { deductQuickCheck, total: edgeTotal, isMutating: isEdgeMutating } = useEdge();
-  const [forgeState, setForgeState] = useState<ForgeState>({ name: "Apex Cipher", sport: "football", gender: "androgynous", dna: ["oracle", "icon"], teams: ["austin"], appearance: { headwear: "cyber-helmet", body: "cyber-armor", footwear: "futuristic-cleats", accessories: "diamond-chains" }, cyberneticIntensity: "moderate", pose: "strategist-stance", lab: "neon-vault" });
+  const [forgeState, setForgeState] = useState<ForgeState>({ name: "Apex Cipher", sport: "football", gender: "androgynous", dna: ["oracle", "icon"], teams: ["austin"], appearance: { headwear: "cyber-helmet", body: "cyber-armor", footwear: "futuristic-cleats", accessories: "diamond-chains" }, cyberneticIntensity: "moderate", pose: "strategist-stance", lab: "neon_vault" });
   const stepIndex = steps.indexOf(activeStep);
   const completion = useMemo((): string => `${Math.round(((stepIndex + 1) / steps.length) * 100)}%`, [stepIndex]);
   const maxLength = entryDepths.find((item) => item.id === depth)?.max ?? 110;
@@ -519,7 +518,7 @@ export default function LabsScreen(): JSX.Element {
     if (activeStep === "DNA") return <View style={styles.stepPanel}><SectionTitle eyebrow="02 / DNA ARCHETYPES" title="Stack the behavioral code." />{archetypes.map((item) => <OptionChip key={item.id} option={item} selected={forgeState.dna.includes(item.id)} onPress={(id) => toggleList("dna", id)} />)}<SectionTitle eyebrow="CYBERNETIC INTENSITY" title="Define the machine ratio." />{intensities.map((item) => <OptionChip key={item.id} option={item} selected={forgeState.cyberneticIntensity === item.id} onPress={(id) => setSingle("cyberneticIntensity", id)} />)}</View>;
     if (activeStep === "Teams") return <View style={styles.stepPanel}><SectionTitle eyebrow="03 / FANATIC TEAMS" title="Bind mock team affinities." /><Text style={styles.notice}>No team logos or copyrighted imagery are used. These are fictional mock affinity labels.</Text>{fanaticTeams.map((item) => <OptionChip key={item.id} option={item} selected={forgeState.teams.includes(item.id)} onPress={(id) => toggleList("teams", id)} />)}</View>;
     if (activeStep === "Body") return <View style={styles.stepPanel}><SectionTitle eyebrow="04 / APPEARANCE" title="Forge the premium silhouette." />{appearanceCategories.map((category) => <View key={category.id} style={styles.categoryCard}><View style={styles.categoryHeader}>{category.icon}<Text style={styles.categoryTitle}>{category.title}</Text></View>{category.options.map((item) => <OptionChip key={item.id} option={item} selected={forgeState.appearance[category.id] === item.id} onPress={(id) => setAppearance(category.id, id)} />)}</View>)}</View>;
-    if (activeStep === "Pose") return <View style={styles.stepPanel}><SectionTitle eyebrow="05 / FIXED POSE" title="Lock the render stance." />{poses.map((item) => <OptionChip key={item.id} option={item} selected={forgeState.pose === item.id} onPress={(id) => setSingle("pose", id)} />)}<SectionTitle eyebrow="LAB PREVIEW" title="Choose the selected lab." />{labs.map((item) => <OptionChip key={item.id} option={item} selected={forgeState.lab === item.id} onPress={(id) => setSingle("lab", id)} />)}</View>;
+    if (activeStep === "Pose") return <View style={styles.stepPanel}><SectionTitle eyebrow="05 / FIXED POSE" title="Lock the render stance." />{poses.map((item) => <OptionChip key={item.id} option={item} selected={forgeState.pose === item.id} onPress={(id) => setSingle("pose", id)} />)}<SectionTitle eyebrow="LAB PREVIEW" title="Choose the selected lab." />{LAB_OPTIONS.map((item) => <OptionChip key={item.id} option={item} selected={forgeState.lab === item.id} onPress={(id) => setSingle("lab", id)} />)}</View>;
     return <View style={styles.stepPanel}><SectionTitle eyebrow="06 / FINAL REVIEW" title="Preview selected lab and forged identity." /><TransparentMockRender state={forgeState} /><View style={styles.summaryCard}><Text style={styles.summaryTitle}>{forgeState.name}</Text><Text style={styles.summaryText}>Sport: {forgeState.sport} · Gender: {forgeState.gender}</Text><Text style={styles.summaryText}>DNA: {forgeState.dna.join(" + ")}</Text><Text style={styles.summaryText}>Teams: {forgeState.teams.length} selected · Lab: {forgeState.lab}</Text><Text style={styles.summaryText}>Appearance uses transparent mock render layers only.</Text></View></View>;
   };
 

@@ -267,7 +267,7 @@ export async function createDefaultEagohShell(
       dna: [],
       cybernetic_intensity: "minimal",
       pose: "calm-sentinel",
-      lab: "neon-vault",
+      lab: "neon_vault",
     })
     .select("*")
     .single();
