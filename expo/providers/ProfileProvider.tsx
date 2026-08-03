@@ -2,6 +2,7 @@ import createContextHook from "@nkzw/create-context-hook";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/providers/AuthProvider";
+import { supabase } from "@/lib/supabase";
 import {
   ensureProfile,
   getEffectiveSubscriptionTier,
@@ -30,6 +31,7 @@ import {
   clearTestSubscriptionTier as clearTestTierAsync,
 } from "@/services/testSubscription";
 import { startupLog } from "@/utils/startupLogger";
+import { isComplimentaryActive, type ComplimentaryTier } from "@/services/tiers";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -42,6 +44,30 @@ function needsMonthlyAllocation(lastRolloverAt: string | null | undefined): bool
     last.getUTCFullYear() < now.getUTCFullYear() ||
     (last.getUTCFullYear() === now.getUTCFullYear() && last.getUTCMonth() < now.getUTCMonth())
   );
+}
+
+const FUNCTIONS_BASE_URL = process.env.EXPO_PUBLIC_RORK_FUNCTIONS_URL ?? "";
+
+/**
+ * Trigger the backend complimentary allocation endpoint.
+ * The worker calls the SECURITY DEFINER RPC `grant_complimentary_allocation`
+ * which is idempotent per month. Returns true on success.
+ */
+async function triggerComplimentaryAllocation(token: string, tier: string): Promise<boolean> {
+  if (!FUNCTIONS_BASE_URL) return false;
+  try {
+    const res = await fetch(`${FUNCTIONS_BASE_URL}/complimentary/allocate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ complimentaryTier: tier }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -225,6 +251,11 @@ export const [ProfileProvider, useProfile] = createContextHook(() => {
   // The RevenueCatProvider's syncSubscription() calls the backend
   // /subscription/sync endpoint which is the sole authoritative grant path.
 
+  // ── Complimentary access info ──────────────────────────────────────
+  const complimentaryTier: ComplimentaryTier = profile?.complimentary_tier ?? null;
+  const complimentaryExpiresAt: string | null = profile?.complimentary_tier_expires_at ?? null;
+  const complimentaryActive: boolean = isComplimentaryActive(complimentaryTier, complimentaryExpiresAt);
+
   const isAdminOverrideActive: boolean = hasActiveAdminOverride(profile);
 
   // ── Test subscription helpers (dev-only) ──────────────────────────────
@@ -246,11 +277,48 @@ export const [ProfileProvider, useProfile] = createContextHook(() => {
     [userId],
   );
 
+  // ── Complimentary allocation trigger ──────────────────────────────────
+  // When a user has active complimentary access, call the backend RPC to
+  // grant the monthly allocation. The backend is idempotent — repeated calls
+  // for the same month do not duplicate the grant.
+  const compAllocRanRef = useRef(false);
+  useEffect(() => {
+    if (!profile || !userId) return;
+    if (compAllocRanRef.current) return;
+    if (!complimentaryActive || !complimentaryTier) {
+      compAllocRanRef.current = false;
+      return;
+    }
+
+    // Only trigger if the user needs a monthly allocation
+    const lastRollover = (profile as Record<string, unknown>).last_rollover_at as string | null;
+    if (!needsMonthlyAllocation(lastRollover)) {
+      compAllocRanRef.current = true;
+      return;
+    }
+
+    compAllocRanRef.current = true;
+    supabase.auth.getSession().then(({ data: sessionData }: { data: { session: { access_token: string } | null } }) => {
+      const token = sessionData.session?.access_token;
+      if (!token) return;
+      void triggerComplimentaryAllocation(token, complimentaryTier).then((ok) => {
+        if (ok) {
+          queryClient.invalidateQueries({ queryKey: profileKey(userId) });
+        } else {
+          compAllocRanRef.current = false; // retry next mount
+        }
+      });
+    });
+  }, [profile, userId, queryClient, complimentaryActive, complimentaryTier]);
+
   return {
     profile,
     balances,
     effectiveSubscriptionTier,
     isAdminOverrideActive,
+    complimentaryTier,
+    complimentaryExpiresAt,
+    complimentaryActive,
     isLoading: profileQuery.isLoading,
     isTierLoading,
     error: profileQuery.error as Error | null,

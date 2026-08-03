@@ -108,7 +108,113 @@ export const TIER_TO_TEST_STORE_PRODUCT_ID: Record<Exclude<SubscriptionTier, "fr
   syndicate: "syndicate_sub",
 };
 
-// ── Tier resolution helpers ─────────────────────────────────────────────────
+// ── Tier priority / complimentary resolution ───────────────────────────────
+
+/** Numeric priority for tier comparison. Higher = better. */
+export const TIER_PRIORITY: Record<SubscriptionTier, number> = {
+  free: 0,
+  pro: 1,
+  oracle_elite: 2,
+  syndicate: 3,
+};
+
+/** Allowed complimentary tier values (null = no complimentary access). */
+export type ComplimentaryTier = "pro" | "oracle_elite" | null;
+
+/** Source of the effective tier — used for UI display and diagnostics. */
+export type AccessSource = "revenuecat" | "complimentary" | "development" | "free";
+
+/** Result from the shared effective tier resolver. */
+export type EffectiveTierResult = {
+  effectiveTier: SubscriptionTier;
+  accessSource: AccessSource;
+  complimentaryActive: boolean;
+  complimentaryExpiresAt: string | null;
+};
+
+/**
+ * Check whether a complimentary tier is currently active (not expired).
+ *
+ * A complimentary tier is active when:
+ *   - complimentary_tier is 'pro' or 'oracle_elite'
+ *   - complimentary_tier_expires_at is null (never expires)
+ *   - OR complimentary_tier_expires_at is in the future
+ */
+export function isComplimentaryActive(
+  complimentaryTier: ComplimentaryTier,
+  expiresAt: string | null | undefined,
+): boolean {
+  if (complimentaryTier !== "pro" && complimentaryTier !== "oracle_elite") return false;
+  if (!expiresAt) return true;
+  return new Date(expiresAt).getTime() > Date.now();
+}
+
+/**
+ * Shared effective subscription tier resolver.
+ *
+ * Combines the paid RevenueCat tier, the DB subscription_tier, the complimentary
+ * tier, and the Expo Go development override into a single normalized result.
+ *
+ * Rules:
+ * 1. In __DEV__, if a test tier override is active, use it (accessSource = 'development').
+ * 2. Determine the paid tier from the RevenueCat/DB subscription_tier.
+ * 3. Determine if complimentary access is active.
+ * 4. Use whichever valid tier is higher (by TIER_PRIORITY).
+ * 5. Never downgrade a paying user because their complimentary tier is lower.
+ *
+ * This function does NOT import from profile.ts to avoid circular deps.
+ */
+export function resolveEffectiveSubscriptionTier(params: {
+  paidTier: SubscriptionTier;
+  complimentaryTier: ComplimentaryTier;
+  complimentaryExpiresAt: string | null | undefined;
+  devTestTier?: SubscriptionTier | null;
+}): EffectiveTierResult {
+  const { paidTier, complimentaryTier, complimentaryExpiresAt, devTestTier } = params;
+
+  if (devTestTier) {
+    return {
+      effectiveTier: devTestTier,
+      accessSource: "development",
+      complimentaryActive: isComplimentaryActive(complimentaryTier, complimentaryExpiresAt),
+      complimentaryExpiresAt: complimentaryExpiresAt ?? null,
+    };
+  }
+
+  const paid = paidTier ?? "free";
+  const compActive = isComplimentaryActive(complimentaryTier, complimentaryExpiresAt);
+  const compTier: SubscriptionTier | null =
+    compActive && (complimentaryTier === "pro" || complimentaryTier === "oracle_elite")
+      ? complimentaryTier
+      : null;
+
+  if (compTier && TIER_PRIORITY[compTier] > TIER_PRIORITY[paid]) {
+    return {
+      effectiveTier: compTier,
+      accessSource: "complimentary",
+      complimentaryActive: true,
+      complimentaryExpiresAt: complimentaryExpiresAt ?? null,
+    };
+  }
+
+  if (paid !== "free") {
+    return {
+      effectiveTier: paid,
+      accessSource: "revenuecat",
+      complimentaryActive: compActive,
+      complimentaryExpiresAt: complimentaryExpiresAt ?? null,
+    };
+  }
+
+  return {
+    effectiveTier: "free",
+    accessSource: "free",
+    complimentaryActive: compActive,
+    complimentaryExpiresAt: complimentaryExpiresAt ?? null,
+  };
+}
+
+// ── Tier resolution helpers (legacy, kept for backward compat) ────────────────
 
 /**
  * Map a RevenueCat **package identifier** (`pkg.identifier`) to a subscription tier.

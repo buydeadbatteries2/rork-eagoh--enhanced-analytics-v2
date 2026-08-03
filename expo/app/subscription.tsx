@@ -203,6 +203,18 @@ const styles = StyleSheet.create({
   },
   restoreBtnText: { color: palette.muted, fontSize: 13, fontWeight: "700" as const },
 
+  // Complimentary access status card
+  complimentaryCard: {
+    padding: 14,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "rgba(108,230,255,0.30)",
+    backgroundColor: "rgba(10,18,32,0.60)",
+    gap: 4,
+  },
+  complimentaryTitle: { color: palette.cyan, fontSize: 13, fontWeight: "900" as const },
+  complimentaryExpiry: { color: palette.muted, fontSize: 11, fontWeight: "700" as const },
+
   // Auto-renewal disclosure
   disclosureCard: {
     padding: 14,
@@ -460,6 +472,9 @@ export default function SubscriptionScreen(): JSX.Element {
     clearTestSubscription,
     testTier,
     isTierLoading,
+    complimentaryTier,
+    complimentaryExpiresAt,
+    complimentaryActive,
   } = useProfile();
   const {
     configured: rcConfigured,
@@ -1038,6 +1053,20 @@ export default function SubscriptionScreen(): JSX.Element {
           onSubscribe={handleSubscribe}
           isPurchasing={isPurchasing && purchasingTier === "syndicate"}
         />
+
+        {/* Complimentary access status — shown only when active */}
+        {complimentaryActive && complimentaryTier ? (
+          <View style={styles.complimentaryCard}>
+            <Text style={styles.complimentaryTitle}>
+              Complimentary {complimentaryTier === "oracle_elite" ? "Oracle Elite" : "Pro"} access active
+            </Text>
+            {complimentaryExpiresAt ? (
+              <Text style={styles.complimentaryExpiry}>
+                Complimentary access expires {new Date(complimentaryExpiresAt).toLocaleDateString()}.
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
 
         {/* Restore purchases */}
         <Pressable

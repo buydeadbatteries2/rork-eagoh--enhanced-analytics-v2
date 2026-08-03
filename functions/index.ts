@@ -11035,9 +11035,129 @@ export default {
       return handleSubscriptionSync(request, env);
     }
 
+    // Complimentary tier allocation: calls the SECURITY DEFINER RPC
+    // grant_complimentary_allocation to idempotently grant monthly neurons.
+    if (url.pathname === "/complimentary/allocate" && request.method === "POST") {
+      return handleComplimentaryAllocate(request, env);
+    }
+
     return jsonResponse({ ok: false, error: "Not found" }, 404);
   },
 };
+
+// ── Complimentary Tier Allocation endpoint ─────────────────────────────────
+// Calls the SECURITY DEFINER RPC grant_complimentary_allocation to idempotently
+// grant monthly complimentary neurons. The RPC checks the profile's
+// complimentary_tier and expiration, and uses the complimentary_allocations
+// ledger table for idempotency. The worker reads the complimentary tier from
+// the DB — never trusts the client-supplied value.
+
+async function handleComplimentaryAllocate(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return jsonResponse({ ok: false, error: "Method not allowed." }, 405);
+  }
+
+  if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
+    return jsonResponse({ ok: false, error: "Backend not configured." }, 503);
+  }
+
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const jwt = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  if (!jwt) return jsonResponse({ ok: false, error: "Authentication required." }, 401);
+
+  const supabase = createClient(normalizeSupabaseUrl(env.SUPABASE_URL), env.SUPABASE_ANON_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  const userId = await verifyAuth(supabase, jwt);
+  if (!userId) return jsonResponse({ ok: false, error: "Invalid auth." }, 401);
+
+  const serviceClient = getServiceRoleClient(env);
+  if (!serviceClient) {
+    return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
+  }
+
+  // Parse optional body (client may send the complimentary tier for validation)
+  let payload: { complimentaryTier?: string } = {};
+  try {
+    const body = await request.json();
+    if (body && typeof body === "object") {
+      payload = body as { complimentaryTier?: string };
+    }
+  } catch {
+    // Body is optional
+  }
+
+  // Fetch the profile to get the actual complimentary_tier from the DB
+  // We do NOT trust the client-supplied tier — we read it from the DB
+  const { data: profileRow, error: profileErr } = await serviceClient
+    .from("profiles")
+    .select("complimentary_tier, complimentary_tier_expires_at")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (profileErr || !profileRow) {
+    return jsonResponse({ ok: false, error: "Could not load account." }, 500);
+  }
+
+  const dbCompTier = (profileRow as { complimentary_tier: string | null }).complimentary_tier;
+  const dbCompExpires = (profileRow as { complimentary_tier_expires_at: string | null }).complimentary_tier_expires_at;
+
+  // If the profile has no complimentary tier, nothing to do
+  if (!dbCompTier || (dbCompTier !== "pro" && dbCompTier !== "oracle_elite")) {
+    return jsonResponse({ ok: true, active: false, alreadyGranted: false });
+  }
+
+  // Check expiration
+  if (dbCompExpires) {
+    const expiry = new Date(dbCompExpires);
+    if (expiry <= new Date()) {
+      return jsonResponse({ ok: true, active: false, alreadyGranted: false });
+    }
+  }
+
+  // If the client sent a tier that doesn't match the DB, use the DB value
+  const tierToGrant = dbCompTier;
+
+  // Call the atomic SECURITY DEFINER RPC
+  const { data: rpcResult, error: rpcErr } = await serviceClient.rpc(
+    "grant_complimentary_allocation",
+    { p_user_id: userId, p_complimentary_tier: tierToGrant },
+  );
+
+  if (rpcErr) {
+    console.warn("[complimentary/allocate] RPC error:", rpcErr.message);
+    return jsonResponse({ ok: false, error: "Failed to process complimentary allocation." }, 500);
+  }
+
+  const result = rpcResult as Array<{
+    success: boolean;
+    error_code: string | null;
+    error_message: string | null;
+    allocation_amount: number | null;
+    new_subscription_balance: number | null;
+    already_granted: boolean;
+  }>;
+
+  const row = result?.[0];
+  if (!row || !row.success) {
+    // COMPLIMENTARY_EXPIRED or TIER_MISMATCH are not hard errors — return ok:false with the message
+    const httpStatus = row?.error_code === "PROFILE_NOT_FOUND" ? 404 : 400;
+    return jsonResponse(
+      { ok: false, error: row?.error_message || "Failed to process allocation." },
+      httpStatus,
+    );
+  }
+
+  // Invalidate the profile cache so the client sees the updated balance
+  // The ProfileProvider will refetch after this call
+  return jsonResponse({
+    ok: true,
+    active: true,
+    alreadyGranted: row.already_granted,
+    allocationAmount: row.allocation_amount,
+    newSubscriptionBalance: row.new_subscription_balance,
+  });
+}
 
 // ── Subscription Sync: trusted backend endpoint ─────────────────────────────
 // Verifies RevenueCat entitlements server-side, updates the Supabase tier,

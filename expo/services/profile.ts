@@ -1,4 +1,8 @@
 import { supabase } from "@/lib/supabase";
+import {
+  TIER_PRIORITY,
+  isComplimentaryActive,
+} from "@/services/tiers";
 
 /**
  * Profile service – persists user profile data in the `profiles` Supabase table.
@@ -56,12 +60,16 @@ export type UserProfile = {
   social_verified_platform: string | null;
   last_rollover_at: string | null;
   last_allocation: number;
+  complimentary_tier: "pro" | "oracle_elite" | null;
+  complimentary_tier_expires_at: string | null;
+  complimentary_tier_granted_at: string | null;
+  complimentary_tier_note: string | null;
   created_at?: string;
   updated_at?: string;
 };
 
-/** Users can never update admin override fields from the app. Only service_role / Supabase dashboard can. */
-export type ProfileUpdate = Partial<Omit<UserProfile, "id" | "created_at" | "updated_at" | "admin_tier_override" | "admin_tier_expires_at" | "admin_tier_note" | "is_admin">> & { last_rollover_at?: string | null; last_allocation?: number };
+/** Users can never update admin override or complimentary fields from the app. Only service_role / Supabase dashboard can. */
+export type ProfileUpdate = Partial<Omit<UserProfile, "id" | "created_at" | "updated_at" | "admin_tier_override" | "admin_tier_expires_at" | "admin_tier_note" | "is_admin" | "complimentary_tier" | "complimentary_tier_expires_at" | "complimentary_tier_granted_at" | "complimentary_tier_note">> & { last_rollover_at?: string | null; last_allocation?: number };
 
 const DEFAULT_PROFILE = (id: string, username?: string | null): UserProfile => ({
   id,
@@ -83,6 +91,10 @@ const DEFAULT_PROFILE = (id: string, username?: string | null): UserProfile => (
   social_verified_platform: null,
   last_rollover_at: null,
   last_allocation: 0,
+  complimentary_tier: null,
+  complimentary_tier_expires_at: null,
+  complimentary_tier_granted_at: null,
+  complimentary_tier_note: null,
 });
 
 export async function fetchProfile(userId: string): Promise<UserProfile | null> {
@@ -166,40 +178,66 @@ export async function setPreferences(userId: string, preferences: ProfilePrefere
 // ── Admin Tier Override ────────────────────────────────────────────────────
 
 /**
- * Compute the user's effective subscription tier, respecting any active admin
- * tier override. Rules:
+ * Compute the user's effective subscription tier, respecting:
+ *   1. Active admin tier override (legacy system)
+ *   2. Active complimentary tier (admin-controlled, managed in Supabase Dashboard)
+ *   3. The paid subscription_tier from RevenueCat/backend sync
  *
- * 1. If admin_tier_override is null → normal subscription_tier
- * 2. If admin_tier_expires_at is null → override is permanent (no expiry)
- * 3. If admin_tier_expires_at is in the future → override is active
- * 4. If admin_tier_expires_at is in the past → ignore the override
- * 5. The result is always a valid SubscriptionTier (falls back to "free" when
- *    the profile itself is null/undefined, e.g. before first fetch).
+ * The result is the highest-priority valid tier. Never downgrades a paying
+ * user because their complimentary tier is lower.
  *
- * This function accepts a minimal shape so callers can pass either a full
- * UserProfile or a partial object without needing to import the full type.
+ * Tier priority: free=0, pro=1, oracle_elite=2, syndicate=3
+ *
+ * Falls back to "free" when the profile is null/undefined.
  */
 export function getEffectiveSubscriptionTier(
-  profile: Pick<UserProfile, "subscription_tier" | "admin_tier_override" | "admin_tier_expires_at"> | null | undefined,
+  profile: Pick<
+    UserProfile,
+    "subscription_tier" | "admin_tier_override" | "admin_tier_expires_at" |
+    "complimentary_tier" | "complimentary_tier_expires_at"
+  > | null | undefined,
 ): SubscriptionTier {
   if (!profile) return "free";
 
-  const override = profile.admin_tier_override;
-  if (!override) return profile.subscription_tier ?? "free";
+  // Start with the paid subscription tier
+  const paidTier: SubscriptionTier = profile.subscription_tier ?? "free";
 
-  const expiresAt = profile.admin_tier_expires_at;
-  if (expiresAt) {
-    const now = new Date();
-    const expiry = new Date(expiresAt);
-    if (expiry <= now) return profile.subscription_tier ?? "free";
+  // Check admin override (legacy system)
+  const override = profile.admin_tier_override;
+  let adminTier: SubscriptionTier = paidTier;
+  if (override) {
+    const adminExpires = profile.admin_tier_expires_at;
+    let adminActive = true;
+    if (adminExpires) {
+      const now = new Date();
+      const expiry = new Date(adminExpires);
+      if (expiry <= now) adminActive = false;
+    }
+    if (adminActive && (TIER_PRIORITY[override as SubscriptionTier] ?? 0) > TIER_PRIORITY[adminTier]) {
+      adminTier = override as SubscriptionTier;
+    }
   }
 
-  return override;
+  // Check complimentary tier
+  const compTier = profile.complimentary_tier;
+  let compResolvedTier: SubscriptionTier = adminTier; // start from admin-adjusted paid tier
+  if (compTier && (compTier === "pro" || compTier === "oracle_elite")) {
+    const compActive = isComplimentaryActive(compTier, profile.complimentary_tier_expires_at);
+    if (compActive && TIER_PRIORITY[compTier] > TIER_PRIORITY[compResolvedTier]) {
+      compResolvedTier = compTier;
+    }
+  }
+
+  return compResolvedTier;
 }
 
-/** Returns true when the profile has an active admin tier override. */
+/** Returns true when the profile has an active admin tier override or complimentary tier. */
 export function hasActiveAdminOverride(
-  profile: Pick<UserProfile, "subscription_tier" | "admin_tier_override" | "admin_tier_expires_at"> | null | undefined,
+  profile: Pick<
+    UserProfile,
+    "subscription_tier" | "admin_tier_override" | "admin_tier_expires_at" |
+    "complimentary_tier" | "complimentary_tier_expires_at"
+  > | null | undefined,
 ): boolean {
   if (!profile) return false;
   return getEffectiveSubscriptionTier(profile) !== (profile.subscription_tier ?? "free");
