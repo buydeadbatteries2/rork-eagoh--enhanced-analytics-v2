@@ -6,7 +6,8 @@ import { useProfile } from "@/providers/ProfileProvider";
 import {
   EDGE_COSTS,
   TIER_MONTHLY_ALLOCATION,
-  redeemNeuronPurchase as redeemNeuronPurchaseService,
+  addPurchasedEdge as addPurchasedEdgeService,
+  addSubscriptionEdge as addSubscriptionEdgeService,
   applyMonthlyRollover as applyMonthlyRolloverService,
   deductForCustomization,
   deductForMarketplace,
@@ -107,9 +108,17 @@ export const [EdgeProvider, useEdge] = createContextHook(() => {
   });
 
   const purchaseMutation = useMutation({
-    mutationFn: ({ productId, transactionId }: { productId: string; transactionId: string }) => {
+    mutationFn: ({ amount, note }: { amount: number; note?: string }) => {
       const { uid, p } = requireCtx();
-      return redeemNeuronPurchaseService(uid, p, productId, transactionId);
+      return addPurchasedEdgeService(uid, p, amount, note);
+    },
+    onSuccess: writeBack,
+  });
+
+  const grantMutation = useMutation({
+    mutationFn: ({ amount, reason, note }: { amount: number; reason?: EdgeReason; note?: string }) => {
+      const { uid, p } = requireCtx();
+      return addSubscriptionEdgeService(uid, p, amount, reason ?? "manual", note);
     },
     onSuccess: writeBack,
   });
@@ -153,8 +162,9 @@ export const [EdgeProvider, useEdge] = createContextHook(() => {
       customizationMutation.mutateAsync({ amount, note }),
 
     // additions
-    redeemPurchase: (productId: string, transactionId: string) =>
-      purchaseMutation.mutateAsync({ productId, transactionId }),
+    purchase: (amount: number, note?: string) => purchaseMutation.mutateAsync({ amount, note }),
+    grantSubscription: (amount: number, reason?: EdgeReason, note?: string) =>
+      grantMutation.mutateAsync({ amount, reason, note }),
 
     // monthly cycle
     applyMonthlyRollover: () => rolloverMutation.mutateAsync(),
@@ -166,6 +176,7 @@ export const [EdgeProvider, useEdge] = createContextHook(() => {
       marketplaceMutation.isPending ||
       customizationMutation.isPending ||
       purchaseMutation.isPending ||
+      grantMutation.isPending ||
       rolloverMutation.isPending,
   };
   startupLog("EdgeProvider", "success");
