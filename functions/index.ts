@@ -65,6 +65,7 @@
  * Phase 5B Security — Locked down feedback, disputes, reputation, versions, rate-limits to server-only.
  * Phase 12C — Server-side dev test subs, enforce server cost.
  * Phase 12D — Forge tier-limit false-positive fix: always check dev_test_subscriptions, exclude default shells from count, distinct tier vs limit errors.
+ * Phase NEURON-SECURITY — Secure neuron purchase redemption via /neurons/redeem (service_role RPC, server-side amount lookup).
  */
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
@@ -11041,6 +11042,14 @@ export default {
       return handleComplimentaryAllocate(request, env);
     }
 
+    // Neuron purchase redemption: called by the client AFTER a verified
+    // RevenueCat purchase. The server determines the neuron amount from the
+    // product ID — the client NEVER sends the amount. The RPC is idempotent
+    // via the unique constraint on revenuecat_transaction_id.
+    if (url.pathname === "/neurons/redeem" && request.method === "POST") {
+      return handleNeuronRedeem(request, env);
+    }
+
     return jsonResponse({ ok: false, error: "Not found" }, 404);
   },
 };
@@ -11163,6 +11172,99 @@ async function handleComplimentaryAllocate(request: Request, env: Env): Promise<
     newSubscriptionBalance: row.new_subscription_balance,
     skippedForHigherPaidTier: row.skipped_for_higher_paid_tier,
     effectiveTier: row.effective_tier,
+  });
+}
+
+// ── Neuron Purchase Redemption endpoint ─────────────────────────────────────
+// Called by the client after a successful RevenueCat purchase. The worker:
+//   1. Authenticates the user via Supabase JWT
+//   2. Reads the product_id and transaction_id from the request body
+//   3. Calls the SECURITY DEFINER RPC redeem_neuron_purchase (service_role only)
+//   4. The RPC determines the neuron amount from the product_id (server-side)
+//   5. The RPC is idempotent — duplicate transactions are skipped
+//
+// The client NEVER sends the neuron amount. The server hardcodes the mapping.
+
+async function handleNeuronRedeem(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return jsonResponse({ ok: false, error: "Method not allowed." }, 405);
+  }
+
+  if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
+    return jsonResponse({ ok: false, error: "Backend not configured." }, 503);
+  }
+
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const jwt = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  if (!jwt) return jsonResponse({ ok: false, error: "Authentication required." }, 401);
+
+  const supabase = createClient(normalizeSupabaseUrl(env.SUPABASE_URL), env.SUPABASE_ANON_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  const userId = await verifyAuth(supabase, jwt);
+  if (!userId) return jsonResponse({ ok: false, error: "Invalid auth." }, 401);
+
+  const serviceClient = getServiceRoleClient(env);
+  if (!serviceClient) {
+    return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
+  }
+
+  // Parse body — only product_id and transaction_id are accepted.
+  // The neuron amount is NEVER sent by the client.
+  let payload: { productId?: string; transactionId?: string } = {};
+  try {
+    const body = await request.json();
+    if (body && typeof body === "object") {
+      payload = body as { productId?: string; transactionId?: string };
+    }
+  } catch {
+    return jsonResponse({ ok: false, error: "Invalid request body." }, 400);
+  }
+
+  const productId = payload.productId?.trim();
+  const transactionId = payload.transactionId?.trim();
+
+  if (!productId) {
+    return jsonResponse({ ok: false, error: "Product ID is required." }, 400);
+  }
+  if (!transactionId) {
+    return jsonResponse({ ok: false, error: "Transaction ID is required." }, 400);
+  }
+
+  // Call the atomic SECURITY DEFINER RPC (service_role only)
+  const { data: rpcResult, error: rpcErr } = await serviceClient.rpc(
+    "redeem_neuron_purchase",
+    {
+      p_user_id: userId,
+      p_product_id: productId,
+      p_transaction_id: transactionId,
+    },
+  );
+
+  if (rpcErr) {
+    console.warn("[neurons/redeem] RPC error:", rpcErr.message);
+    return jsonResponse({ ok: false, error: "Failed to redeem neuron purchase." }, 500);
+  }
+
+  const result = rpcResult as {
+    ok: boolean;
+    already_redeemed: boolean;
+    neurons_granted: number;
+    new_subscription?: number;
+    new_purchased?: number;
+    error?: string;
+  };
+
+  if (!result || !result.ok) {
+    return jsonResponse({ ok: false, error: result?.error || "Redemption failed." }, 400);
+  }
+
+  return jsonResponse({
+    ok: true,
+    alreadyRedeemed: result.already_redeemed,
+    neuronsGranted: result.neurons_granted,
+    newSubscription: result.new_subscription ?? 0,
+    newPurchased: result.new_purchased ?? 0,
   });
 }
 

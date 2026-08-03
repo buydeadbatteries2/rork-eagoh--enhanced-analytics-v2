@@ -6,7 +6,7 @@ import { useProfile } from "@/providers/ProfileProvider";
 import {
   EDGE_COSTS,
   TIER_MONTHLY_ALLOCATION,
-  addPurchasedEdge as addPurchasedEdgeService,
+  redeemNeuronPurchase as redeemNeuronPurchaseService,
   applyMonthlyRollover as applyMonthlyRolloverService,
   deductForCustomization,
   deductForMarketplace,
@@ -107,9 +107,9 @@ export const [EdgeProvider, useEdge] = createContextHook(() => {
   });
 
   const purchaseMutation = useMutation({
-    mutationFn: ({ amount, note }: { amount: number; note?: string }) => {
+    mutationFn: ({ productId, transactionId }: { productId: string; transactionId: string }) => {
       const { uid, p } = requireCtx();
-      return addPurchasedEdgeService(uid, p, amount, note);
+      return redeemNeuronPurchaseService(uid, p, productId, transactionId);
     },
     onSuccess: writeBack,
   });
@@ -153,7 +153,8 @@ export const [EdgeProvider, useEdge] = createContextHook(() => {
       customizationMutation.mutateAsync({ amount, note }),
 
     // additions
-    purchase: (amount: number, note?: string) => purchaseMutation.mutateAsync({ amount, note }),
+    redeemPurchase: (productId: string, transactionId: string) =>
+      purchaseMutation.mutateAsync({ productId, transactionId }),
 
     // monthly cycle
     applyMonthlyRollover: () => rolloverMutation.mutateAsync(),

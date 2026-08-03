@@ -18,7 +18,6 @@ import {
   type UserProfile,
 } from "@/services/profile";
 import {
-  addPurchasedEdge as addPurchasedEdgeService,
   applyMonthlyRollover as applyMonthlyRolloverService,
   getBalances,
   spendEdge as spendEdgeService,
@@ -182,14 +181,6 @@ export const [ProfileProvider, useProfile] = createContextHook(() => {
     },
   });
 
-  const addPurchasedEdgeMutation = useMutation({
-    mutationFn: (amount: number): Promise<UserProfile> => {
-      if (!userId || !profile) throw new Error("Profile not loaded");
-      return addPurchasedEdgeService(userId, profile, amount);
-    },
-    onSuccess: (next) => queryClient.setQueryData(profileKey(userId), next),
-  });
-
   const spendEdgeMutation = useMutation({
     mutationFn: (amount: number): Promise<UserProfile> => {
       if (!userId || !profile) throw new Error("Profile not loaded");
@@ -341,7 +332,6 @@ export const [ProfileProvider, useProfile] = createContextHook(() => {
     setSelectedEagohs: (eagohs: string[]) => setEagohsMutation.mutateAsync(eagohs),
     setPreferences: (preferences: ProfilePreferences) => setPreferencesMutation.mutateAsync(preferences),
 
-    addPurchasedEdge: (amount: number) => addPurchasedEdgeMutation.mutateAsync(amount),
     spendEdge: (amount: number) => spendEdgeMutation.mutateAsync(amount),
     applyMonthlyRollover: (capPct?: number) => rolloverMutation.mutateAsync(capPct ?? 0.1),
   };

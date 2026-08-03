@@ -206,33 +206,63 @@ export const deductForCustomization = (
 ) => spendEdge(userId, profile, amount ?? EDGE_COSTS.customization, "customization", note, effectiveTier);
 
 /**
- * Add purchased Edge after a verified RevenueCat/App Store purchase.
- * The server credits `edge_purchased` via the `grant_purchased_edge` SECURITY
- * DEFINER RPC. The client NEVER touches `edge_subscription` or sends final
- * balance values. The server locks the row, adds the amount, and audits.
+ * Redeem a verified RevenueCat neuron-pack purchase via the secure backend.
+ *
+ * The client sends ONLY the product ID and the RevenueCat transaction ID.
+ * The server determines the neuron amount from the product ID — the client
+ * NEVER sends the amount. The server-side RPC is idempotent (unique
+ * constraint on transaction_id), so duplicate calls for the same transaction
+ * are safely skipped.
+ *
+ * This calls the Worker `/neurons/redeem` endpoint, which authenticates the
+ * user via JWT and calls the `redeem_neuron_purchase` SECURITY DEFINER RPC
+ * (service_role only).
  */
-export async function addPurchasedEdge(
+export async function redeemNeuronPurchase(
   userId: string,
   profile: UserProfile,
-  amount: number,
-  note?: string,
+  productId: string,
+  transactionId: string,
 ): Promise<UserProfile> {
-  const add = Math.max(0, Math.floor(amount));
-  if (add === 0) return profile;
+  const FUNCTIONS_BASE_URL = process.env.EXPO_PUBLIC_RORK_FUNCTIONS_URL ?? "";
+  if (!FUNCTIONS_BASE_URL) {
+    throw new Error("Backend URL not configured.");
+  }
 
-  const { data, error } = await supabase.rpc("grant_purchased_edge", {
-    p_user_id: userId,
-    p_amount: add,
-    p_note: note ?? null,
+  const { data: sessionData } = await supabase.auth.getSession();
+  const token = sessionData.session?.access_token;
+  if (!token) throw new Error("Not authenticated.");
+
+  const res = await fetch(`${FUNCTIONS_BASE_URL}/neurons/redeem`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ productId, transactionId }),
   });
-  if (error) throw error;
-  const result = data as { ok: boolean; new_subscription: number; new_purchased: number; error?: string };
-  if (!result.ok) throw new Error(result.error ?? "Edge purchase credit failed");
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { error?: string };
+    throw new Error(body.error ?? `Redemption failed (HTTP ${res.status})`);
+  }
+
+  const result = await res.json() as {
+    ok: boolean;
+    alreadyRedeemed: boolean;
+    neuronsGranted: number;
+    newSubscription: number;
+    newPurchased: number;
+  };
+
+  if (!result.ok) {
+    throw new Error("Neuron redemption failed.");
+  }
 
   return {
     ...profile,
-    edge_subscription: result.new_subscription,
-    edge_purchased: result.new_purchased,
+    edge_subscription: result.newSubscription,
+    edge_purchased: result.newPurchased,
   };
 }
 

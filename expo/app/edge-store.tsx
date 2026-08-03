@@ -15,7 +15,7 @@ import { useEdge } from "@/providers/EdgeProvider";
 import { useProfile } from "@/providers/ProfileProvider";
 import { useRevenueCat } from "@/providers/RevenueCatProvider";
 import { NEURON_PRODUCT_AMOUNTS } from "@/services/revenuecat";
-import { EDGE_PACKS, type EdgePack, isMockPurchaseAllowed, recordNeuronPurchaseOnce } from "@/services/edgeStore";
+import { EDGE_PACKS, type EdgePack, isMockPurchaseAllowed } from "@/services/edgeStore";
 import { canPurchaseNeuronPacks } from "@/services/permissions";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeBack } from "@/hooks/useSafeBack";
@@ -393,7 +393,7 @@ export default function EdgeStoreScreen(): JSX.Element {
   const router = useRouter();
   const { user } = useAuth();
   const { profile, effectiveSubscriptionTier, isLoading: isProfileLoading } = useProfile();
-  const { balances, purchase: creditEdge, isMutating } = useEdge();
+  const { balances, redeemPurchase, isMutating } = useEdge();
   const {
     configured: rcConfigured,
     allNeuronPackages: rcNeuronPackages,
@@ -486,7 +486,7 @@ export default function EdgeStoreScreen(): JSX.Element {
     const neuronAmount = confirmPack.edgeAmount;
     const productId = confirmPack.productId;
 
-    console.log("[NeuronStore] Purchase attempt — product:", productId, "|", neuronAmount, "Neurons | RC configured:", rcConfigured, "| has RC package:", !!confirmRcPkg);
+    console.log("[NeuronStore] Purchase attempt — product:", productId, "| RC configured:", rcConfigured, "| has RC package:", !!confirmRcPkg);
 
     try {
       if (rcConfigured && confirmRcPkg) {
@@ -495,24 +495,15 @@ export default function EdgeStoreScreen(): JSX.Element {
         const purchaseResult = await rcPurchase(confirmRcPkg);
         console.log("[NeuronStore] RevenueCat purchase confirmed — tx:", purchaseResult.transactionIdentifier);
 
-        // Idempotency check — prevent double-crediting across restarts/refreshes
-        const isNew = await recordNeuronPurchaseOnce(
-          user.id,
-          productId,
-          purchaseResult.transactionIdentifier,
-          neuronAmount,
-        );
-
-        if (isNew) {
-          console.log("[NeuronStore] New purchase — crediting", neuronAmount, "Neurons");
-          await creditEdge(neuronAmount, `RevenueCat purchase: ${confirmPack.label} (${productId})`);
-        } else {
-          console.log("[NeuronStore] Duplicate purchase detected — skipping credit");
-        }
+        // Redeem via secure backend — server determines neuron amount from productId.
+        // Idempotency is handled server-side via unique constraint on transaction_id.
+        console.log("[NeuronStore] Redeeming purchase via /neurons/redeem — product:", productId, "tx:", purchaseResult.transactionIdentifier);
+        const updatedProfile = await redeemPurchase(productId, purchaseResult.transactionIdentifier);
+        const granted = updatedProfile.edge_purchased - (profile?.edge_purchased ?? 0);
 
         setConfirmPack(null);
         setConfirmRcPkg(null);
-        Alert.alert("Purchase Successful", `${neuronAmount.toLocaleString()} Neurons added to your wallet.`);
+        Alert.alert("Purchase Successful", `${Math.max(0, granted).toLocaleString()} Neurons added to your wallet.`);
       } else if (rcConfigured && !confirmRcPkg) {
         // RC is configured but the selected pack wasn't matched to an RC package.
         // This happens when the store shows local packs but RC has no matching products.
@@ -524,24 +515,22 @@ export default function EdgeStoreScreen(): JSX.Element {
         setConfirmPack(null);
         setConfirmRcPkg(null);
       } else if (isMockPurchaseAllowed()) {
-        // Mock purchase: RevenueCat not available in dev — use direct Supabase credit.
-        // The creditEdge mutation calls addPurchasedEdge which updates profiles.edge_purchased
-        // in Supabase. If the DB update fails, the mutation throws and we catch it below —
-        // the UI balance is NOT updated unless the DB write succeeds.
-        console.log("[NeuronStore] Using mock purchase for:", productId, "|", neuronAmount, "Neurons");
+        // Mock purchase: RevenueCat not available in dev — generate a synthetic
+        // transaction ID and redeem via the secure backend. The server determines
+        // the neuron amount from the product ID, same as real purchases.
+        console.log("[NeuronStore] Using mock purchase for:", productId);
         try {
-          const updatedProfile = await creditEdge(neuronAmount, `Mock Neuron purchase: ${confirmPack.label} (${productId})`);
-          // Verify the Supabase profile was actually updated — the mutation returns the updated row.
+          const mockTxId = `mock_${productId}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+          const updatedProfile = await redeemPurchase(productId, mockTxId);
           if (!updatedProfile || typeof updatedProfile.edge_purchased !== "number") {
-            throw new Error("Supabase profile update returned no data.");
+            throw new Error("Backend returned no data.");
           }
           console.log("[NeuronStore] Mock purchase succeeded — edge_purchased is now:", updatedProfile.edge_purchased);
           setConfirmPack(null);
           setConfirmRcPkg(null);
           Alert.alert("Test Purchase", `${neuronAmount.toLocaleString()} Neurons added to your wallet (mock).`);
         } catch (mockErr) {
-          // DB update failed — do NOT update the displayed balance.
-          console.error("[NeuronStore] Mock purchase DB update failed:", mockErr instanceof Error ? mockErr.message : String(mockErr));
+          console.error("[NeuronStore] Mock purchase failed:", mockErr instanceof Error ? mockErr.message : String(mockErr));
           setConfirmPack(null);
           setConfirmRcPkg(null);
           Alert.alert("Purchase Failed", "Test Neurons could not be added.");
@@ -583,7 +572,7 @@ export default function EdgeStoreScreen(): JSX.Element {
     } finally {
       setPurchasing(false);
     }
-  }, [confirmPack, confirmRcPkg, user?.id, profile, rcConfigured, rcPurchase, creditEdge, h]);
+  }, [confirmPack, confirmRcPkg, user?.id, profile, rcConfigured, rcPurchase, redeemPurchase, h]);
 
   const handleCancelConfirm = useCallback((): void => {
     h.selection();
@@ -800,7 +789,8 @@ export default function EdgeStoreScreen(): JSX.Element {
                   h.heavy();
                   setPurchasing(true);
                   try {
-                    await creditEdge(pack.edgeAmount, `DEV TEST: ${pack.label} (${pack.productId})`);
+                    const mockTxId = `mock_${pack.productId}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+                  await redeemPurchase(pack.productId, mockTxId);
                     Alert.alert("Dev Test Complete", `${pack.edgeAmount.toLocaleString()} Neurons credited (mock).`);
                   } catch (err: unknown) {
                     const msg = err instanceof Error ? err.message : "Unknown error";

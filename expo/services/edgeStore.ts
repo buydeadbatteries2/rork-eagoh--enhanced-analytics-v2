@@ -16,7 +16,7 @@
  *  - The service layer enforces the spend priority; mutations log transactions.
  */
 
-import { addPurchasedEdge } from "@/services/edge";
+import { redeemNeuronPurchase } from "@/services/edge";
 import { supabase } from "@/lib/supabase";
 import type { UserProfile } from "@/services/profile";
 
@@ -99,16 +99,17 @@ export const EDGE_PACKS: EdgePack[] = [
  * Execute a mock purchase for the given pack.
  *
  * ONLY call when isMockPurchaseAllowed() returns true.
- * This directly adds Neurons to `edge_purchased` with a descriptive
- * transaction note for testing purposes.
+ * Generates a synthetic transaction ID and calls the secure backend
+ * /neurons/redeem endpoint — the server determines the neuron amount
+ * from the product ID, not the client.
  */
 export async function mockPurchasePack(
   userId: string,
   profile: UserProfile,
   pack: EdgePack,
 ): Promise<UserProfile> {
-  const note = `Mock Neuron purchase: ${pack.label} (${pack.productId})`;
-  return addPurchasedEdge(userId, profile, pack.edgeAmount, note);
+  const mockTxId = `mock_${pack.productId}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  return redeemNeuronPurchase(userId, profile, pack.productId, mockTxId);
 }
 
 // ── Idempotent Neuron purchase tracking (prevents double-crediting) ──────
