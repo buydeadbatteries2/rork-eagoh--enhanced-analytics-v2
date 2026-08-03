@@ -50,6 +50,7 @@ import { getVendorStats } from "@/services/marketplace";
 import { getBulkReputations, rankColor as repRankColor, RANK_TIERS } from "@/services/reputation";
 import type { ReputationRow } from "@/services/reputation";
 import type { EagohRecord } from "@/services/eagohs";
+import PublicSocialLinks from "@/app/_components/PublicSocialLinks";
 
 type P = typeof palette;
 
@@ -560,6 +561,9 @@ export default function PublicProfileScreen(): JSX.Element {
             </Text>
           ) : null}
         </View>
+
+        {/* Social Links */}
+        <PublicSocialLinks userId={userId} />
 
         {/* Source Credentials badge */}
         {credentials && (

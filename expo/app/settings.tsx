@@ -79,6 +79,7 @@ import { captureRef } from "react-native-view-shot";
 import * as Sharing from "expo-sharing";
 import { useRef } from "react";
 import EagohShareCard from "@/app/_components/EagohShareCard";
+import SocialLinksEditor from "@/app/_components/SocialLinksEditor";
 
 type P = typeof palette;
 
@@ -2417,6 +2418,17 @@ export default function SettingsScreen(): JSX.Element {
             helperText: "Recommended: 1500 × 500 px (3:1 ratio). PNG or JPG. Max 5 MB.",
             infoTitle: "Banner Tips",
             infoBody: "Recommended size: 1500 × 500 px.\nImages may be cropped on smaller devices.\nKeep important content centered.",
+          },
+        ],
+      },
+      {
+        id: "socialLinks",
+        title: "Social Links",
+        titleIcon: <Link2 color={pal.cyan} size={15} />,
+        rows: [
+          {
+            kind: "custom" as const,
+            render: () => <SocialLinksEditor />,
           },
         ],
       },

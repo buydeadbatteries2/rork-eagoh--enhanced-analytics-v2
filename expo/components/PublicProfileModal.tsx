@@ -59,6 +59,7 @@ import { PLATFORM_DISPLAY, PLATFORM_BASE_URL, type SocialPlatform, getSocialVeri
 import { rankColor as repRankColor } from "@/services/reputation";
 import { Linking } from "react-native";
 import SocialVerifiedBadge from "@/app/_components/SocialVerifiedBadge";
+import PublicSocialLinks from "@/app/_components/PublicSocialLinks";
 
 // ── Props ──────────────────────────────────────────────────────────────
 
@@ -954,6 +955,9 @@ export default function PublicProfileModal({
                   <Text style={styles.emptyText}>This user has not added a public bio.</Text>
                 )}
               </View>
+
+              {/* Social Links */}
+              {userId ? <PublicSocialLinks userId={userId} /> : null}
 
               {/* Stats overview */}
               <View style={styles.section}>
