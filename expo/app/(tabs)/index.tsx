@@ -52,6 +52,7 @@ import {
   type EnrichedBanner,
 } from "@/services/sponsoredBanners";
 import { canTransact } from "@/services/marketplace";
+import { FreeUserWelcomePopup } from "@/app/_components/FreeUserWelcomePopup";
 import type { EagohRecord } from "@/services/eagohs";
 import { getBulkReputations, rankColor as repRankColor, rankEmoji, RANK_TIERS, type RankTier } from "@/services/reputation";
 import type { ReputationRow } from "@/services/reputation";
@@ -1152,6 +1153,7 @@ export default function HomeScreen(): JSX.Element {
         onPurchased={() => {}}
         userId={user?.id ?? null}
       />
+      <FreeUserWelcomePopup />
     </View>
   );
 }
