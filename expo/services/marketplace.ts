@@ -1,5 +1,5 @@
 import { supabase } from "@/lib/supabase";
-import { spendEdge, addSubscriptionEdge } from "@/services/edge";
+import { spendEdge } from "@/services/edge";
 import type { UserProfile, SubscriptionTier } from "@/services/profile";
 import type { EagohRecord } from "@/services/eagohs";
 import { getTeamById } from "@/data/teams";

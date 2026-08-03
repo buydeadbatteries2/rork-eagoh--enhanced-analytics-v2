@@ -12,11 +12,14 @@ import {
  * authenticated/anon (see supabase-complimentary-tier-migration.sql).
  *
  *   - update_own_safe_profile: username, bio, avatar, preferences, etc.
- *   - update_own_edge_balances: edge_subscription, edge_purchased, rollover fields
- *   - update_own_verification_status: is_social_verified, social_verified_platform
+ *   - spend_own_edge: neuron deduction (server-computed balances)
+ *   - grant_purchased_edge: neuron purchase credit (server-computed balances)
+ *   - apply_free_tier_allocation: free-tier monthly grant (server-validated)
  *
  * Admin-only fields (complimentary_tier, subscription_tier, admin_tier_override,
- * is_admin, etc.) are NEVER accepted by any client RPC.
+ * is_admin, edge balances, verification status) are NEVER accepted by any
+ * client RPC. The generic update_own_edge_balances and
+ * update_own_verification_status RPCs have been removed.
  */
 
 export type SubscriptionTier = "free" | "pro" | "oracle_elite" | "syndicate";
@@ -83,15 +86,26 @@ export type ProfileUpdate = {
 };
 
 /**
- * Edge balance fields. These go through the update_own_edge_balances
- * SECURITY DEFINER RPC. Only edge_subscription, edge_purchased,
- * last_rollover_at, and last_allocation are accepted.
+ * Partial profile returned by the update_own_safe_profile RPC.
+ * Contains only safe, owner-facing fields — never internal/admin/balance columns.
+ * Callers merge this with the existing cached profile.
  */
-export type EdgeBalanceUpdate = {
-  edge_subscription?: number;
-  edge_purchased?: number;
-  last_rollover_at?: string | null;
-  last_allocation?: number;
+export type SafeProfileUpdateResult = {
+  username: string | null;
+  display_name: string | null;
+  bio: string | null;
+  avatar_url: string | null;
+  banner_url: string | null;
+  public_display_title: string | null;
+  selected_labs: string[];
+  selected_eagohs: string[];
+  preferences: ProfilePreferences;
+  public_profile_enabled: boolean;
+  show_social_accounts: boolean;
+  show_credentials: boolean;
+  show_public_eagohs: boolean;
+  show_faction: boolean;
+  updated_at: string;
 };
 
 const DEFAULT_PROFILE = (id: string, username?: string | null): UserProfile => ({
@@ -173,35 +187,18 @@ export async function ensureProfile(userId: string, username?: string | null): P
 /**
  * Update user-editable profile fields via the update_own_safe_profile RPC.
  * Only whitelisted fields are accepted; admin/complimentary/edge/subscription
- * fields are rejected by the RPC.
+ * fields are rejected by the RPC. Returns only safe fields — callers merge
+ * this with the existing cached profile.
  */
-export async function updateProfile(userId: string, patch: ProfileUpdate): Promise<UserProfile> {
+export async function updateProfile(userId: string, patch: ProfileUpdate): Promise<SafeProfileUpdateResult> {
   const { data, error } = await supabase.rpc("update_own_safe_profile", {
     p_user_id: userId,
     p_updates: patch,
   });
   if (error) throw error;
-  const result = data as { ok: boolean; profile?: UserProfile; error?: string };
+  const result = data as { ok: boolean; profile?: SafeProfileUpdateResult; error?: string };
   if (!result.ok || !result.profile) {
     throw new Error(result.error ?? "Profile update failed");
-  }
-  return result.profile;
-}
-
-/**
- * Update edge balance fields via the update_own_edge_balances RPC.
- * Only edge_subscription, edge_purchased, last_rollover_at, last_allocation
- * are accepted.
- */
-export async function updateEdgeBalances(userId: string, patch: EdgeBalanceUpdate): Promise<UserProfile> {
-  const { data, error } = await supabase.rpc("update_own_edge_balances", {
-    p_user_id: userId,
-    p_updates: patch,
-  });
-  if (error) throw error;
-  const result = data as { ok: boolean; profile?: UserProfile; error?: string };
-  if (!result.ok || !result.profile) {
-    throw new Error(result.error ?? "Edge balance update failed");
   }
   return result.profile;
 }
@@ -218,15 +215,15 @@ export async function setSubscriptionTier(_userId: string, _tier: SubscriptionTi
   );
 }
 
-export async function setSelectedLabs(userId: string, labs: string[]): Promise<UserProfile> {
+export async function setSelectedLabs(userId: string, labs: string[]): Promise<SafeProfileUpdateResult> {
   return updateProfile(userId, { selected_labs: labs });
 }
 
-export async function setSelectedEagohs(userId: string, eagohs: string[]): Promise<UserProfile> {
+export async function setSelectedEagohs(userId: string, eagohs: string[]): Promise<SafeProfileUpdateResult> {
   return updateProfile(userId, { selected_eagohs: eagohs });
 }
 
-export async function setPreferences(userId: string, preferences: ProfilePreferences): Promise<UserProfile> {
+export async function setPreferences(userId: string, preferences: ProfilePreferences): Promise<SafeProfileUpdateResult> {
   return updateProfile(userId, { preferences });
 }
 

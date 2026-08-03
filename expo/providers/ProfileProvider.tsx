@@ -13,16 +13,15 @@ import {
   updateProfile as updateProfileService,
   type ProfilePreferences,
   type ProfileUpdate,
+  type SafeProfileUpdateResult,
   type SubscriptionTier,
   type UserProfile,
 } from "@/services/profile";
 import {
   addPurchasedEdge as addPurchasedEdgeService,
-  addSubscriptionEdge as addSubscriptionEdgeService,
   applyMonthlyRollover as applyMonthlyRolloverService,
   getBalances,
   spendEdge as spendEdgeService,
-  type EdgeReason,
 } from "@/services/edge";
 import {
   getTestSubscriptionTier,
@@ -133,11 +132,17 @@ export const [ProfileProvider, useProfile] = createContextHook(() => {
   }, [queryClient, userId]);
 
   const updateMutation = useMutation({
-    mutationFn: (patch: ProfileUpdate): Promise<UserProfile> => {
+    mutationFn: (patch: ProfileUpdate): Promise<SafeProfileUpdateResult> => {
       if (!userId) throw new Error("Not signed in");
       return updateProfileService(userId, patch);
     },
-    onSuccess: (next) => queryClient.setQueryData(profileKey(userId), next),
+    onSuccess: (next) => {
+      // The RPC returns only safe fields — merge with the cached profile
+      const cached = queryClient.getQueryData<UserProfile | null>(profileKey(userId));
+      if (cached) {
+        queryClient.setQueryData(profileKey(userId), { ...cached, ...next });
+      }
+    },
   });
 
   // ── setSubscriptionTier removed ──────────────────────────────────
@@ -145,41 +150,42 @@ export const [ProfileProvider, useProfile] = createContextHook(() => {
   // endpoint is the sole authority. The RPC throws if called.
 
   const setLabsMutation = useMutation({
-    mutationFn: (labs: string[]): Promise<UserProfile> => {
+    mutationFn: (labs: string[]): Promise<SafeProfileUpdateResult> => {
       if (!userId) throw new Error("Not signed in");
       return setSelectedLabsService(userId, labs);
     },
-    onSuccess: (next) => queryClient.setQueryData(profileKey(userId), next),
+    onSuccess: (next) => {
+      const cached = queryClient.getQueryData<UserProfile | null>(profileKey(userId));
+      if (cached) queryClient.setQueryData(profileKey(userId), { ...cached, ...next });
+    },
   });
 
   const setEagohsMutation = useMutation({
-    mutationFn: (eagohs: string[]): Promise<UserProfile> => {
+    mutationFn: (eagohs: string[]): Promise<SafeProfileUpdateResult> => {
       if (!userId) throw new Error("Not signed in");
       return setSelectedEagohsService(userId, eagohs);
     },
-    onSuccess: (next) => queryClient.setQueryData(profileKey(userId), next),
+    onSuccess: (next) => {
+      const cached = queryClient.getQueryData<UserProfile | null>(profileKey(userId));
+      if (cached) queryClient.setQueryData(profileKey(userId), { ...cached, ...next });
+    },
   });
 
   const setPreferencesMutation = useMutation({
-    mutationFn: (preferences: ProfilePreferences): Promise<UserProfile> => {
+    mutationFn: (preferences: ProfilePreferences): Promise<SafeProfileUpdateResult> => {
       if (!userId) throw new Error("Not signed in");
       return setPreferencesService(userId, preferences);
     },
-    onSuccess: (next) => queryClient.setQueryData(profileKey(userId), next),
+    onSuccess: (next) => {
+      const cached = queryClient.getQueryData<UserProfile | null>(profileKey(userId));
+      if (cached) queryClient.setQueryData(profileKey(userId), { ...cached, ...next });
+    },
   });
 
   const addPurchasedEdgeMutation = useMutation({
     mutationFn: (amount: number): Promise<UserProfile> => {
       if (!userId || !profile) throw new Error("Profile not loaded");
       return addPurchasedEdgeService(userId, profile, amount);
-    },
-    onSuccess: (next) => queryClient.setQueryData(profileKey(userId), next),
-  });
-
-  const addSubscriptionEdgeMutation = useMutation({
-    mutationFn: (amount: number): Promise<UserProfile> => {
-      if (!userId || !profile) throw new Error("Profile not loaded");
-      return addSubscriptionEdgeService(userId, profile, amount);
     },
     onSuccess: (next) => queryClient.setQueryData(profileKey(userId), next),
   });
@@ -336,10 +342,8 @@ export const [ProfileProvider, useProfile] = createContextHook(() => {
     setPreferences: (preferences: ProfilePreferences) => setPreferencesMutation.mutateAsync(preferences),
 
     addPurchasedEdge: (amount: number) => addPurchasedEdgeMutation.mutateAsync(amount),
-    addSubscriptionEdge: (amount: number) => addSubscriptionEdgeMutation.mutateAsync(amount),
     spendEdge: (amount: number) => spendEdgeMutation.mutateAsync(amount),
     applyMonthlyRollover: (capPct?: number) => rolloverMutation.mutateAsync(capPct ?? 0.1),
-    _edgeReason: undefined as EdgeReason | undefined,
   };
   startupLog("ProfileProvider", "success");
 });

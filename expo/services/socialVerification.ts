@@ -9,6 +9,14 @@ import { supabase } from "@/lib/supabase";
  *   - platform (text — "instagram", "facebook", "x", "youtube", "tiktok", "linkedin")
  *   - handle, profile_url, is_connected, is_platform_verified, verified_checked_at
  *
+ * SECURITY: The client may connect/disconnect social accounts and read
+ * verification status, but it MUST NOT write `is_social_verified`,
+ * `social_verified_platform`, `verified_share_count`, or badge/reward fields
+ * on the `profiles` table. Those are only written by:
+ *   - the secure screenshot verification Worker
+ *   - the atomic verified-share reward RPC (service-role)
+ *   - an approved service-role administrative process
+ *
  * v1: mock/manual connect — real OAuth can be wired later.
  */
 
@@ -197,8 +205,16 @@ export async function disconnectSocialAccount(
 
 /**
  * Refresh the user's overall social verification status.
- * Checks all connected accounts — if any has is_platform_verified = true,
- * the user is considered verified. Updates profiles.is_social_verified.
+ *
+ * Reads the connected social accounts and derives the verification status.
+ * This function is READ-ONLY — it does NOT write `is_social_verified` or
+ * `social_verified_platform` to the profiles table. Those fields are only
+ * written by the secure Worker (screenshot verification) or service-role
+ * processes.
+ *
+ * The returned status is derived from the connected accounts'
+ * `is_platform_verified` flags. The authoritative profile-level verification
+ * fields may lag behind this computed value until the Worker updates them.
  */
 export async function refreshSocialVerificationStatus(
   userId: string,
@@ -209,23 +225,9 @@ export async function refreshSocialVerificationStatus(
     (a) => a.is_connected && a.is_platform_verified,
   );
 
-  const isVerified = !!verifiedAccount;
-  const verifiedPlatform = verifiedAccount?.platform ?? null;
-
-  // Update via SECURITY DEFINER RPC — direct table UPDATE is revoked.
-  const { error } = await supabase.rpc("update_own_verification_status", {
-    p_user_id: userId,
-    p_is_social_verified: isVerified,
-    p_social_verified_platform: verifiedPlatform,
-  });
-
-  if (error) {
-    console.warn("[socialVerification] refreshSocialVerificationStatus update error", error.message);
-  }
-
   return {
-    isVerified,
-    verifiedPlatform,
+    isVerified: !!verifiedAccount,
+    verifiedPlatform: verifiedAccount?.platform ?? null,
     connectedAccounts: accounts.filter((a) => a.is_connected),
   };
 }

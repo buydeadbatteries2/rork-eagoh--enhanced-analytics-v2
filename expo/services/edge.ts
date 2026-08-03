@@ -1,6 +1,6 @@
 import { supabase } from "@/lib/supabase";
 import { getQuickCheckCost } from "@/services/analyst";
-import { getEffectiveSubscriptionTier, updateEdgeBalances, type UserProfile } from "@/services/profile";
+import { getEffectiveSubscriptionTier, type UserProfile } from "@/services/profile";
 import {
   TIER_MAX_EAGOHS as TIER_MAX_EAGOHS_SHARED,
   TIER_MONTHLY_ALLOCATION as TIER_MONTHLY_ALLOCATION_SHARED,
@@ -125,16 +125,14 @@ export function getBalances(
   return { subscription, purchased, total: subscription + purchased };
 }
 
-async function logTransaction(entry: Omit<EdgeTransaction, "id" | "created_at">): Promise<void> {
-  const { error } = await supabase.from("edge_transactions").insert(entry);
-  if (error) {
-    console.warn("[edge] failed to log transaction", error.message);
-  }
-}
-
 /**
  * Spend Edge — subscription bucket first, then purchased. Throws when balance
- * is insufficient. Writes a `deduction` transaction.
+ * is insufficient. The server computes the new balances and inserts the audit
+ * transaction row via the `spend_own_edge` SECURITY DEFINER RPC.
+ *
+ * The client NEVER sends final balance values — it sends only the amount and
+ * reason. The server locks the profile row, validates sufficient balance,
+ * deducts subscription-first/purchased-second, and returns the new balances.
  */
 export async function spendEdge(
   userId: string,
@@ -147,40 +145,32 @@ export async function spendEdge(
   const cost = Math.max(0, Math.floor(amount));
   if (cost === 0) return profile;
 
-  // Use the provided effective tier (which may include a dev test override),
-  // otherwise fall back to computing from the raw DB profile.
+  // Client-side UX guard — the server RPC also validates balance.
   const tier = effectiveTier ?? getEffectiveSubscriptionTier(profile);
   if (tier === "free" && reason !== "quick_check") {
     throw new Error("Upgrade to Pro or higher to use this feature.");
   }
 
-  const { total, subscription, purchased } = getBalances(profile);
+  const { total } = getBalances(profile);
   if (cost > total) throw new Error("Insufficient Neuron balance");
 
-  const fromSub = Math.min(subscription, cost);
-  const fromPurchased = cost - fromSub;
-  const nextSub = subscription - fromSub;
-  const nextPurchased = purchased - fromPurchased;
-
-  const next = await updateEdgeBalances(userId, {
-    edge_subscription: nextSub,
-    edge_purchased: nextPurchased,
+  // Server-side deduction: locks row, validates balance, deducts, audits.
+  const { data, error } = await supabase.rpc("spend_own_edge", {
+    p_user_id: userId,
+    p_amount: cost,
+    p_reason: reason,
+    p_note: note ?? null,
   });
+  if (error) throw error;
+  const result = data as { ok: boolean; new_subscription: number; new_purchased: number; error?: string };
+  if (!result.ok) throw new Error(result.error ?? "Edge deduction failed");
 
-  await logTransaction({
-    user_id: userId,
-    kind: "deduction",
-    reason,
-    amount: cost,
-    bucket: fromSub > 0 && fromPurchased > 0 ? "mixed" : fromPurchased > 0 ? "purchased" : "subscription",
-    from_subscription: fromSub,
-    from_purchased: fromPurchased,
-    balance_subscription_after: nextSub,
-    balance_purchased_after: nextPurchased,
-    note: note ?? null,
-  });
-
-  return next;
+  // Merge server-computed balances into the profile.
+  return {
+    ...profile,
+    edge_subscription: result.new_subscription,
+    edge_purchased: result.new_purchased,
+  };
 }
 
 /** Convenience deduction helpers for the standard action surfaces. */
@@ -215,7 +205,12 @@ export const deductForCustomization = (
   effectiveTier?: SubscriptionTier,
 ) => spendEdge(userId, profile, amount ?? EDGE_COSTS.customization, "customization", note, effectiveTier);
 
-/** Add purchased Edge (mock purchase). Logs a `purchase` transaction. */
+/**
+ * Add purchased Edge after a verified RevenueCat/App Store purchase.
+ * The server credits `edge_purchased` via the `grant_purchased_edge` SECURITY
+ * DEFINER RPC. The client NEVER touches `edge_subscription` or sends final
+ * balance values. The server locks the row, adds the amount, and audits.
+ */
 export async function addPurchasedEdge(
   userId: string,
   profile: UserProfile,
@@ -224,142 +219,91 @@ export async function addPurchasedEdge(
 ): Promise<UserProfile> {
   const add = Math.max(0, Math.floor(amount));
   if (add === 0) return profile;
-  const nextPurchased = (profile.edge_purchased ?? 0) + add;
-  const next = await updateEdgeBalances(userId, { edge_purchased: nextPurchased });
-  await logTransaction({
-    user_id: userId,
-    kind: "purchase",
-    reason: "purchase",
-    amount: add,
-    bucket: "purchased",
-    from_subscription: 0,
-    from_purchased: 0,
-    balance_subscription_after: profile.edge_subscription ?? 0,
-    balance_purchased_after: nextPurchased,
-    note: note ?? "Mock Edge purchase",
-  });
-  return next;
-}
 
-/** Add subscription Edge (manual top-up / bonus). Logs an `addition`. */
-export async function addSubscriptionEdge(
-  userId: string,
-  profile: UserProfile,
-  amount: number,
-  reason: EdgeReason = "manual",
-  note?: string,
-): Promise<UserProfile> {
-  const add = Math.max(0, Math.floor(amount));
-  if (add === 0) return profile;
-  const nextSub = (profile.edge_subscription ?? 0) + add;
-  const next = await updateEdgeBalances(userId, { edge_subscription: nextSub });
-  await logTransaction({
-    user_id: userId,
-    kind: "addition",
-    reason,
-    amount: add,
-    bucket: "subscription",
-    from_subscription: 0,
-    from_purchased: 0,
-    balance_subscription_after: nextSub,
-    balance_purchased_after: profile.edge_purchased ?? 0,
-    note: note ?? null,
+  const { data, error } = await supabase.rpc("grant_purchased_edge", {
+    p_user_id: userId,
+    p_amount: add,
+    p_note: note ?? null,
   });
-  return next;
+  if (error) throw error;
+  const result = data as { ok: boolean; new_subscription: number; new_purchased: number; error?: string };
+  if (!result.ok) throw new Error(result.error ?? "Edge purchase credit failed");
+
+  return {
+    ...profile,
+    edge_subscription: result.new_subscription,
+    edge_purchased: result.new_purchased,
+  };
 }
 
 /**
- * Monthly subscription rollover.
+ * @deprecated Subscription neurons are ONLY granted by:
+ *   - the backend /subscription/sync endpoint (RevenueCat-verified)
+ *   - the backend /complimentary/allocate endpoint (admin-controlled)
+ *   - the apply_free_tier_allocation RPC (free-tier monthly grant)
+ * The client must NEVER add subscription neurons directly.
+ */
+export async function addSubscriptionEdge(
+  _userId: string,
+  _profile: UserProfile,
+  _amount: number,
+  _reason?: EdgeReason,
+  _note?: string,
+): Promise<never> {
+  throw new Error(
+    "Subscription neurons can only be granted by the backend /subscription/sync or /complimentary/allocate endpoints. " +
+    "The client must never add subscription neurons directly.",
+  );
+}
+
+/**
+ * Monthly allocation for the FREE tier only.
  *
- * Rule: rollover keeps up to {@link ROLLOVER_CAP_PCT} (10%) of the prior month's
- * allocation, but ONLY if the user retained at least {@link ROLLOVER_RETENTION_PCT}
- * (10%) of that allocation at the moment of rollover. Otherwise the leftover
- * subscription Edge is forfeited. Purchased Edge is never touched.
+ * Calls the `apply_free_tier_allocation` SECURITY DEFINER RPC which:
+ *   - locks the profile row FOR UPDATE
+ *   - verifies the effective tier is actually free (server-side check)
+ *   - checks monthly idempotency (last_rollover_at month vs current month)
+ *   - sets edge_subscription = 25 (no rollover for free tier)
+ *   - inserts an edge_transactions audit row
+ *   - returns the new balances
  *
- * Then the new month's allocation is added on top.
+ * Paid-tier allocations are handled exclusively by the backend
+ * /subscription/sync endpoint. The client must NEVER call this for paid tiers.
  */
 export async function applyMonthlyRollover(
   userId: string,
   profile: UserProfile,
   tier: SubscriptionTier,
 ): Promise<UserProfile> {
-  const now = new Date().toISOString();
-
-  // ── Free tier: no rollover, capped allocation ──────────────────────
-  if (tier === "free") {
-    const lastAlloc = profile.last_allocation;
-    const allocation = getFreeTierAllocation(lastAlloc);
-
-    // Set subscription balance directly to the allocation (cap, no rollover).
-    // Purchased neurons are never touched.
-    const next = await updateEdgeBalances(userId, {
-      edge_subscription: allocation,
-      last_rollover_at: now,
-      last_allocation: allocation,
-    });
-
-    await logTransaction({
-      user_id: userId,
-      kind: "addition",
-      reason: "subscription_allocation",
-      amount: allocation,
-      bucket: "subscription",
-      from_subscription: 0,
-      from_purchased: 0,
-      balance_subscription_after: allocation,
-      balance_purchased_after: profile.edge_purchased ?? 0,
-      note: `Free tier monthly allocation (${allocation} Neurons, no rollover)`,
-    });
-
-    return next;
+  if (tier !== "free") {
+    throw new Error(
+      "Paid tier allocations are handled by the backend /subscription/sync endpoint. " +
+      "The client must never grant paid-tier subscription neurons.",
+    );
   }
 
-  // ── Paid tiers: standard rollover + allocation ─────────────────────
-  const allocation = TIER_MONTHLY_ALLOCATION[tier] ?? 0;
-  const priorAllocation = Math.max(0, profile.last_allocation ?? allocation);
-  const currentSub = Math.max(0, profile.edge_subscription ?? 0);
-
-  const retentionThreshold = Math.floor(priorAllocation * ROLLOVER_RETENTION_PCT);
-  const cap = Math.floor(priorAllocation * ROLLOVER_CAP_PCT);
-  const rollover = currentSub >= retentionThreshold ? Math.min(currentSub, cap) : 0;
-
-  const nextSub = rollover + allocation;
-
-  const next = await updateEdgeBalances(userId, {
-    edge_subscription: nextSub,
-    last_rollover_at: now,
-    last_allocation: allocation,
+  const { data, error } = await supabase.rpc("apply_free_tier_allocation", {
+    p_user_id: userId,
   });
+  if (error) throw error;
+  const result = data as {
+    ok: boolean;
+    already_allocated: boolean;
+    new_subscription: number;
+    new_purchased: number;
+    last_rollover_at: string;
+    last_allocation: number;
+    error?: string;
+  };
+  if (!result.ok) throw new Error(result.error ?? "Free tier allocation failed");
 
-  await logTransaction({
-    user_id: userId,
-    kind: "rollover",
-    reason: "rollover",
-    amount: rollover,
-    bucket: "subscription",
-    from_subscription: 0,
-    from_purchased: 0,
-    balance_subscription_after: nextSub,
-    balance_purchased_after: profile.edge_purchased ?? 0,
-    note: `Rollover ${rollover} of ${priorAllocation} (retention ${retentionThreshold})`,
-  });
-
-  if (allocation > 0) {
-    await logTransaction({
-      user_id: userId,
-      kind: "addition",
-      reason: "subscription_allocation",
-      amount: allocation,
-      bucket: "subscription",
-      from_subscription: 0,
-      from_purchased: 0,
-      balance_subscription_after: nextSub,
-      balance_purchased_after: profile.edge_purchased ?? 0,
-      note: `${tier} monthly allocation`,
-    });
-  }
-
-  return next;
+  return {
+    ...profile,
+    edge_subscription: result.new_subscription,
+    edge_purchased: result.new_purchased,
+    last_rollover_at: result.last_rollover_at,
+    last_allocation: result.last_allocation,
+  };
 }
 
 /** Fetch the latest transaction history (newest first). */

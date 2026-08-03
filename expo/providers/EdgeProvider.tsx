@@ -7,7 +7,6 @@ import {
   EDGE_COSTS,
   TIER_MONTHLY_ALLOCATION,
   addPurchasedEdge as addPurchasedEdgeService,
-  addSubscriptionEdge as addSubscriptionEdgeService,
   applyMonthlyRollover as applyMonthlyRolloverService,
   deductForCustomization,
   deductForMarketplace,
@@ -115,14 +114,6 @@ export const [EdgeProvider, useEdge] = createContextHook(() => {
     onSuccess: writeBack,
   });
 
-  const grantMutation = useMutation({
-    mutationFn: ({ amount, reason, note }: { amount: number; reason?: EdgeReason; note?: string }) => {
-      const { uid, p } = requireCtx();
-      return addSubscriptionEdgeService(uid, p, amount, reason ?? "manual", note);
-    },
-    onSuccess: writeBack,
-  });
-
   const rolloverMutation = useMutation({
     mutationFn: () => {
       const { uid, p } = requireCtx();
@@ -163,8 +154,6 @@ export const [EdgeProvider, useEdge] = createContextHook(() => {
 
     // additions
     purchase: (amount: number, note?: string) => purchaseMutation.mutateAsync({ amount, note }),
-    grantSubscription: (amount: number, reason?: EdgeReason, note?: string) =>
-      grantMutation.mutateAsync({ amount, reason, note }),
 
     // monthly cycle
     applyMonthlyRollover: () => rolloverMutation.mutateAsync(),
@@ -176,7 +165,6 @@ export const [EdgeProvider, useEdge] = createContextHook(() => {
       marketplaceMutation.isPending ||
       customizationMutation.isPending ||
       purchaseMutation.isPending ||
-      grantMutation.isPending ||
       rolloverMutation.isPending,
   };
   startupLog("EdgeProvider", "success");
