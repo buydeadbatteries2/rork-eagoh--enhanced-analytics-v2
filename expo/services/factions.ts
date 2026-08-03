@@ -1041,3 +1041,231 @@ export function getRoleLabel(role: FactionRole): string {
     case "dormant": return "Dormant";
   }
 }
+
+// ── Join Requests (Phase FACTION-JR) ─────────────────────────────────────
+
+export type JoinRequestStatus = "pending" | "approved" | "denied" | "cancelled";
+
+export type JoinRequestRow = {
+  id: string;
+  faction_id: string;
+  requester_id: string;
+  status: JoinRequestStatus;
+  message: string | null;
+  requested_at: string;
+  reviewed_at: string | null;
+  reviewed_by: string | null;
+  decision_reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type JoinRequestProfile = {
+  username: string | null;
+  avatar_url: string | null;
+  subscription_tier: string;
+};
+
+export type JoinRequestWithProfile = JoinRequestRow & {
+  profile?: JoinRequestProfile;
+};
+
+/**
+ * Fetch the authenticated user's own join requests.
+ * Uses the secure worker endpoint.
+ */
+export async function listMyJoinRequests(): Promise<JoinRequestRow[]> {
+  const functionsUrl = process.env.EXPO_PUBLIC_RORK_FUNCTIONS_URL;
+  if (!functionsUrl) throw new Error("Server not configured.");
+
+  const { data: sessionData } = await supabase.auth.getSession();
+  const jwt = sessionData.session?.access_token;
+  if (!jwt) throw new Error("Authentication required.");
+
+  const res = await fetch(`${functionsUrl}/factions/join-requests`, {
+    headers: { Authorization: `Bearer ${jwt}` },
+  });
+  if (!res.ok) throw new Error("Failed to fetch join requests.");
+  const data = await res.json() as { ok: boolean; requests?: JoinRequestRow[] };
+  return data.requests ?? [];
+}
+
+/**
+ * Fetch pending join requests for a faction (leader only).
+ * Returns requests with requester profile info.
+ */
+export async function listFactionJoinRequests(
+  factionId: string,
+): Promise<JoinRequestWithProfile[]> {
+  const functionsUrl = process.env.EXPO_PUBLIC_RORK_FUNCTIONS_URL;
+  if (!functionsUrl) throw new Error("Server not configured.");
+
+  const { data: sessionData } = await supabase.auth.getSession();
+  const jwt = sessionData.session?.access_token;
+  if (!jwt) throw new Error("Authentication required.");
+
+  const res = await fetch(
+    `${functionsUrl}/factions/join-requests?factionId=${encodeURIComponent(factionId)}`,
+    { headers: { Authorization: `Bearer ${jwt}` } },
+  );
+  if (!res.ok) throw new Error("Failed to fetch faction join requests.");
+  const data = await res.json() as {
+    ok: boolean;
+    requests?: JoinRequestRow[];
+    profiles?: Record<string, JoinRequestProfile>;
+  };
+  const profiles = data.profiles ?? {};
+  return (data.requests ?? []).map((r) => ({
+    ...r,
+    profile: profiles[r.requester_id],
+  }));
+}
+
+export type CreateJoinRequestResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
+/**
+ * Create a pending join request through the secure worker.
+ * Server-side validates eligibility, capacity, and duplicates.
+ */
+export async function createJoinRequest(
+  factionId: string,
+  message?: string,
+): Promise<CreateJoinRequestResult> {
+  const functionsUrl = process.env.EXPO_PUBLIC_RORK_FUNCTIONS_URL;
+  if (!functionsUrl) return { ok: false, error: "Server not configured." };
+
+  const { data: sessionData } = await supabase.auth.getSession();
+  const jwt = sessionData.session?.access_token;
+  if (!jwt) return { ok: false, error: "Authentication required." };
+
+  try {
+    const res = await fetch(`${functionsUrl}/factions/join-requests/create`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`,
+      },
+      body: JSON.stringify({
+        factionId,
+        message: message?.trim().slice(0, 250) || undefined,
+      }),
+    });
+    const data = await res.json().catch(() => ({})) as { ok?: boolean; error?: string };
+    if (!res.ok || !data.ok) {
+      return { ok: false, error: data.error ?? "Failed to send request." };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "Network error. Please try again." };
+  }
+}
+
+export type ApproveJoinRequestResult =
+  | { ok: true; alreadyMember?: boolean }
+  | { ok: false; error: string };
+
+/**
+ * Leader approves a join request. Atomic server-side transaction.
+ */
+export async function approveJoinRequest(
+  requestId: string,
+  decisionReason?: string,
+): Promise<ApproveJoinRequestResult> {
+  const functionsUrl = process.env.EXPO_PUBLIC_RORK_FUNCTIONS_URL;
+  if (!functionsUrl) return { ok: false, error: "Server not configured." };
+
+  const { data: sessionData } = await supabase.auth.getSession();
+  const jwt = sessionData.session?.access_token;
+  if (!jwt) return { ok: false, error: "Authentication required." };
+
+  try {
+    const res = await fetch(`${functionsUrl}/factions/join-requests/approve`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`,
+      },
+      body: JSON.stringify({
+        requestId,
+        decisionReason: decisionReason?.trim().slice(0, 500) || undefined,
+      }),
+    });
+    const data = await res.json().catch(() => ({})) as { ok?: boolean; error?: string; alreadyMember?: boolean };
+    if (!res.ok || !data.ok) {
+      return { ok: false, error: data.error ?? "Failed to approve request." };
+    }
+    return { ok: true, alreadyMember: data.alreadyMember };
+  } catch {
+    return { ok: false, error: "Network error. Please try again." };
+  }
+}
+
+/**
+ * Leader denies a join request.
+ */
+export async function denyJoinRequest(
+  requestId: string,
+  decisionReason?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const functionsUrl = process.env.EXPO_PUBLIC_RORK_FUNCTIONS_URL;
+  if (!functionsUrl) return { ok: false, error: "Server not configured." };
+
+  const { data: sessionData } = await supabase.auth.getSession();
+  const jwt = sessionData.session?.access_token;
+  if (!jwt) return { ok: false, error: "Authentication required." };
+
+  try {
+    const res = await fetch(`${functionsUrl}/factions/join-requests/deny`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`,
+      },
+      body: JSON.stringify({
+        requestId,
+        decisionReason: decisionReason?.trim().slice(0, 500) || undefined,
+      }),
+    });
+    const data = await res.json().catch(() => ({})) as { ok?: boolean; error?: string };
+    if (!res.ok || !data.ok) {
+      return { ok: false, error: data.error ?? "Failed to deny request." };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "Network error. Please try again." };
+  }
+}
+
+/**
+ * Requester cancels their own pending request.
+ */
+export async function cancelJoinRequest(
+  requestId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const functionsUrl = process.env.EXPO_PUBLIC_RORK_FUNCTIONS_URL;
+  if (!functionsUrl) return { ok: false, error: "Server not configured." };
+
+  const { data: sessionData } = await supabase.auth.getSession();
+  const jwt = sessionData.session?.access_token;
+  if (!jwt) return { ok: false, error: "Authentication required." };
+
+  try {
+    const res = await fetch(`${functionsUrl}/factions/join-requests/cancel`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`,
+      },
+      body: JSON.stringify({ requestId }),
+    });
+    const data = await res.json().catch(() => ({})) as { ok?: boolean; error?: string };
+    if (!res.ok || !data.ok) {
+      return { ok: false, error: data.error ?? "Failed to cancel request." };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "Network error. Please try again." };
+  }
+}

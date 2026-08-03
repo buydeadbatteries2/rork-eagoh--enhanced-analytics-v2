@@ -1,5 +1,6 @@
 /**
- * EAGOH Analyst Chat — Cloudflare Worker (v6-oi-diag-deploy)
+ * EAGOH Analyst Chat — Cloudflare Worker (v6-oi-diag-deploy-fjr)
+ * Phase FACTION-JR — Faction join request + leader approval system
  * Phase RETAINED-OI-2 — Trusted purchase reversal status (record_exchange_purchase_reversal RPC)
  * Phase RETAINED-OI-1 + Cap — Retained Exchange Intelligence + 25% Cumulative Cap
   * Phase 12A — Social sharing + faction invite by email/username
@@ -4510,15 +4511,29 @@ const NOTIFICATION_TEMPLATES: Record<
     message:
       "Faction sharing was removed because of your entry's status.",
   },
+  faction_join_requested: {
+    title: "New Join Request",
+    message: "A user has requested to join your Faction.",
+  },
+  faction_join_approved: {
+    title: "Request Approved",
+    message: "Your request to join the Faction was accepted.",
+  },
+  faction_join_denied: {
+    title: "Request Denied",
+    message: "Your request to join the Faction was not accepted.",
+  },
 };
 
 /** Create a notification for the entry owner. Reporter identity is never included.
- *  Notification failures are logged but do NOT undo a successful moderation action. */
+ *  Notification failures are logged but do NOT undo a successful moderation action.
+ *  entryId may be null for non-entry notifications (e.g. faction join requests). */
 async function createIntelligenceNotification(
   serviceClient: SupabaseClient,
   userId: string,
-  entryId: string,
+  entryId: string | null,
   notificationType: string,
+  customMessage?: string,
 ): Promise<void> {
   const template = NOTIFICATION_TEMPLATES[notificationType];
   if (!template) {
@@ -4531,7 +4546,7 @@ async function createIntelligenceNotification(
       entry_id: entryId,
       notification_type: notificationType,
       title: template.title,
-      message: template.message,
+      message: customMessage ?? template.message,
       is_read: false,
     });
   } catch (e) {
@@ -7529,6 +7544,542 @@ async function handleFactionInvite(request: Request, env: Env): Promise<Response
   return jsonResponse({ ok: true });
 }
 
+// ── Faction Join Requests (Phase FACTION-JR) ─────────────────────────────────
+
+/**
+ * GET /factions/join-requests
+ * Returns pending join requests for a faction (leader only) or the user's own requests.
+ * Query param: factionId=xxx  → returns requests for that faction (leader only)
+ * No factionId → returns the authenticated user's own requests
+ */
+async function handleGetJoinRequests(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "GET") {
+    return jsonResponse({ ok: false, error: "Method not allowed." }, 405);
+  }
+
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const jwt = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  if (!jwt) return jsonResponse({ ok: false, error: "Authentication required." }, 401);
+
+  const supabase = createClient(normalizeSupabaseUrl(env.SUPABASE_URL), env.SUPABASE_ANON_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  const userId = await verifyAuth(supabase, jwt);
+  if (!userId) return jsonResponse({ ok: false, error: "Invalid auth." }, 401);
+
+  const serviceClient = getServiceRoleClient(env);
+  if (!serviceClient) {
+    return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
+  }
+
+  const url = new URL(request.url);
+  const factionId = url.searchParams.get("factionId");
+
+  if (factionId) {
+    // Verify the user is the faction leader
+    const { data: faction } = await serviceClient
+      .from("factions")
+      .select("commander_id")
+      .eq("id", factionId)
+      .maybeSingle();
+
+    if (!faction) return jsonResponse({ ok: false, error: "Faction not found." }, 404);
+    if ((faction as { commander_id: string }).commander_id !== userId) {
+      return jsonResponse({ ok: false, error: "Only the Faction leader can view join requests." }, 403);
+    }
+
+    // Fetch pending requests with requester profile info
+    const { data: requests, error } = await serviceClient
+      .from("faction_join_requests")
+      .select("*")
+      .eq("faction_id", factionId)
+      .eq("status", "pending")
+      .order("requested_at", { ascending: false });
+
+    if (error) {
+      return jsonResponse({ ok: false, error: "Failed to fetch requests." }, 500);
+    }
+
+    // Fetch requester profiles
+    const requesterIds = (requests ?? []).map((r: { requester_id: string }) => r.requester_id);
+    let profilesMap: Record<string, { username: string | null; avatar_url: string | null; subscription_tier: string }> = {};
+    if (requesterIds.length > 0) {
+      const { data: profiles } = await serviceClient
+        .from("profiles")
+        .select("id, username, avatar_url, subscription_tier")
+        .in("id", requesterIds);
+      for (const p of (profiles ?? []) as { id: string; username: string | null; avatar_url: string | null; subscription_tier: string }[]) {
+        profilesMap[p.id] = {
+          username: p.username,
+          avatar_url: p.avatar_url,
+          subscription_tier: p.subscription_tier,
+        };
+      }
+    }
+
+    return jsonResponse({ ok: true, requests: requests ?? [], profiles: profilesMap });
+  } else {
+    // Return the user's own requests
+    const { data: requests, error } = await serviceClient
+      .from("faction_join_requests")
+      .select("*")
+      .eq("requester_id", userId)
+      .order("requested_at", { ascending: false });
+
+    if (error) {
+      return jsonResponse({ ok: false, error: "Failed to fetch requests." }, 500);
+    }
+
+    return jsonResponse({ ok: true, requests: requests ?? [] });
+  }
+}
+
+/**
+ * POST /factions/join-requests/create
+ * Create a pending join request.
+ * Body: { factionId: string, message?: string }
+ */
+async function handleCreateJoinRequest(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return jsonResponse({ ok: false, error: "Method not allowed." }, 405);
+  }
+
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const jwt = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  if (!jwt) return jsonResponse({ ok: false, error: "Authentication required." }, 401);
+
+  const supabase = createClient(normalizeSupabaseUrl(env.SUPABASE_URL), env.SUPABASE_ANON_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  const userId = await verifyAuth(supabase, jwt);
+  if (!userId) return jsonResponse({ ok: false, error: "Invalid auth." }, 401);
+
+  const serviceClient = getServiceRoleClient(env);
+  if (!serviceClient) {
+    return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
+  }
+
+  let payload: { factionId: string; message?: string };
+  try {
+    payload = (await request.json()) as typeof payload;
+  } catch {
+    return jsonResponse({ ok: false, error: "Invalid request." }, 400);
+  }
+
+  if (!payload.factionId) {
+    return jsonResponse({ ok: false, error: "Faction ID is required." }, 400);
+  }
+
+  const message = payload.message?.trim().slice(0, 250) || null;
+
+  // 1. Verify faction exists, is active, and is accepting requests
+  const { data: faction, error: factionErr } = await serviceClient
+    .from("factions")
+    .select("id, commander_id, current_members, max_members, accepting_requests, blocked_user_ids")
+    .eq("id", payload.factionId)
+    .maybeSingle();
+
+  if (factionErr || !faction) {
+    return jsonResponse({ ok: false, error: "Faction not found." }, 404);
+  }
+
+  const f = faction as {
+    id: string; commander_id: string; current_members: number;
+    max_members: number; accepting_requests: boolean; blocked_user_ids: string[];
+  };
+
+  // 2. Check if user is the leader
+  if (f.commander_id === userId) {
+    return jsonResponse({ ok: false, error: "You are already the leader of this Faction." }, 400);
+  }
+
+  // 3. Check if user is blocked
+  if (f.blocked_user_ids?.includes(userId)) {
+    return jsonResponse({ ok: false, error: "You are not able to join this Faction." }, 403);
+  }
+
+  // 4. Check accepting requests
+  if (!f.accepting_requests) {
+    return jsonResponse({ ok: false, error: "This Faction is not accepting join requests." }, 400);
+  }
+
+  // 5. Check if already a member
+  const { data: existingMember } = await serviceClient
+    .from("faction_members")
+    .select("id")
+    .eq("faction_id", payload.factionId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (existingMember) {
+    return jsonResponse({ ok: false, error: "You are already a member of this Faction." }, 409);
+  }
+
+  // 6. Check for existing pending request (unique constraint also enforces)
+  const { data: existingReq } = await serviceClient
+    .from("faction_join_requests")
+    .select("id, status")
+    .eq("faction_id", payload.factionId)
+    .eq("requester_id", userId)
+    .eq("status", "pending")
+    .maybeSingle();
+  if (existingReq) {
+    return jsonResponse({ ok: false, error: "You already have a pending request to join this Faction." }, 409);
+  }
+
+  // 7. Check capacity
+  if (f.current_members >= f.max_members) {
+    return jsonResponse({ ok: false, error: "This Faction is at maximum capacity." }, 400);
+  }
+
+  // 8. Verify subscription tier eligibility
+  const { data: profile } = await serviceClient
+    .from("profiles")
+    .select("subscription_tier")
+    .eq("id", userId)
+    .maybeSingle();
+
+  const tier = (profile as { subscription_tier: string })?.subscription_tier ?? "free";
+  if (tier === "free") {
+    return jsonResponse({ ok: false, error: "Free users cannot join Factions. Upgrade to a paid tier." }, 403);
+  }
+
+  // 9. Create the request
+  const { error: insertErr } = await serviceClient.from("faction_join_requests").insert({
+    faction_id: payload.factionId,
+    requester_id: userId,
+    status: "pending",
+    message,
+  });
+
+  if (insertErr) {
+    if (insertErr.message.includes("fjr_one_pending_per_user_faction")) {
+      return jsonResponse({ ok: false, error: "You already have a pending request to join this Faction." }, 409);
+    }
+    console.warn("[factions/join-requests/create] insert failed", insertErr.message);
+    return jsonResponse({ ok: false, error: "Failed to create join request." }, 500);
+  }
+
+  // 10. Notify the faction leader
+  await createIntelligenceNotification(
+    serviceClient,
+    f.commander_id,
+    null,
+    "faction_join_requested",
+    "A user has requested to join your Faction.",
+  );
+
+  return jsonResponse({ ok: true });
+}
+
+/**
+ * POST /factions/join-requests/approve
+ * Leader approves a join request. Atomic: inserts member + marks request approved.
+ * Body: { requestId: string, decisionReason?: string }
+ */
+async function handleApproveJoinRequest(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return jsonResponse({ ok: false, error: "Method not allowed." }, 405);
+  }
+
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const jwt = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  if (!jwt) return jsonResponse({ ok: false, error: "Authentication required." }, 401);
+
+  const supabase = createClient(normalizeSupabaseUrl(env.SUPABASE_URL), env.SUPABASE_ANON_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  const userId = await verifyAuth(supabase, jwt);
+  if (!userId) return jsonResponse({ ok: false, error: "Invalid auth." }, 401);
+
+  const serviceClient = getServiceRoleClient(env);
+  if (!serviceClient) {
+    return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
+  }
+
+  let payload: { requestId: string; decisionReason?: string };
+  try {
+    payload = (await request.json()) as typeof payload;
+  } catch {
+    return jsonResponse({ ok: false, error: "Invalid request." }, 400);
+  }
+
+  if (!payload.requestId) {
+    return jsonResponse({ ok: false, error: "Request ID is required." }, 400);
+  }
+
+  // 1. Fetch the join request
+  const { data: reqRow, error: reqErr } = await serviceClient
+    .from("faction_join_requests")
+    .select("*")
+    .eq("id", payload.requestId)
+    .maybeSingle();
+
+  if (reqErr || !reqRow) {
+    return jsonResponse({ ok: false, error: "Join request not found." }, 404);
+  }
+
+  const req = reqRow as {
+    id: string; faction_id: string; requester_id: string; status: string;
+  };
+
+  // 2. Verify the request is still pending
+  if (req.status !== "pending") {
+    return jsonResponse({ ok: false, error: "This request has already been processed." }, 409);
+  }
+
+  // 3. Verify the acting user is the faction leader
+  const { data: faction } = await serviceClient
+    .from("factions")
+    .select("id, commander_id, current_members, max_members, name")
+    .eq("id", req.faction_id)
+    .maybeSingle();
+
+  if (!faction) {
+    return jsonResponse({ ok: false, error: "Faction not found." }, 404);
+  }
+
+  const f = faction as { id: string; commander_id: string; current_members: number; max_members: number; name: string };
+  if (f.commander_id !== userId) {
+    return jsonResponse({ ok: false, error: "Only the Faction leader can approve requests." }, 403);
+  }
+
+  // 4. Check if requester is already a member (e.g. joined via invite)
+  const { data: existingMember } = await serviceClient
+    .from("faction_members")
+    .select("id")
+    .eq("faction_id", req.faction_id)
+    .eq("user_id", req.requester_id)
+    .maybeSingle();
+  if (existingMember) {
+    // Mark as approved and skip — already a member
+    await serviceClient.from("faction_join_requests").update({
+      status: "approved", reviewed_at: new Date().toISOString(), reviewed_by: userId,
+    }).eq("id", req.id);
+    return jsonResponse({ ok: true, alreadyMember: true });
+  }
+
+  // 5. Check capacity
+  if (f.current_members >= f.max_members) {
+    return jsonResponse({ ok: false, error: "This Faction no longer has an available member slot." }, 400);
+  }
+
+  // 6. Verify requester is still eligible (tier check)
+  const { data: profile } = await serviceClient
+    .from("profiles")
+    .select("subscription_tier")
+    .eq("id", req.requester_id)
+    .maybeSingle();
+  const tier = (profile as { subscription_tier: string })?.subscription_tier ?? "free";
+  if (tier === "free") {
+    // Mark as denied — requester is no longer eligible
+    await serviceClient.from("faction_join_requests").update({
+      status: "denied", reviewed_at: new Date().toISOString(), reviewed_by: userId,
+      decision_reason: "Requester no longer has a paid subscription.",
+    }).eq("id", req.id);
+    return jsonResponse({ ok: false, error: "Requester no longer has an eligible subscription." }, 403);
+  }
+
+  // 7. Atomic: Insert member + mark request approved
+  const { error: memberInsertErr } = await serviceClient.from("faction_members").insert({
+    faction_id: req.faction_id,
+    user_id: req.requester_id,
+    role: "recruit",
+    status: "active",
+  });
+
+  if (memberInsertErr) {
+    console.warn("[factions/join-requests/approve] member insert failed", memberInsertErr.message);
+    return jsonResponse({ ok: false, error: "Failed to add member." }, 500);
+  }
+
+  // Update member count
+  await serviceClient
+    .from("factions")
+    .update({ current_members: f.current_members + 1 })
+    .eq("id", req.faction_id);
+
+  // Mark request approved
+  await serviceClient.from("faction_join_requests").update({
+    status: "approved",
+    reviewed_at: new Date().toISOString(),
+    reviewed_by: userId,
+    decision_reason: payload.decisionReason?.trim().slice(0, 500) || null,
+  }).eq("id", req.id);
+
+  // Log activity
+  await serviceClient.from("faction_activity").insert({
+    faction_id: req.faction_id,
+    user_id: req.requester_id,
+    kind: "member_joined",
+    details: { faction_name: f.name, via: "join_request" },
+  });
+
+  // Notify the requester
+  await createIntelligenceNotification(
+    serviceClient,
+    req.requester_id,
+    null,
+    "faction_join_approved",
+    `Your request to join ${f.name} was accepted.`,
+  );
+
+  return jsonResponse({ ok: true });
+}
+
+/**
+ * POST /factions/join-requests/deny
+ * Leader denies a join request.
+ * Body: { requestId: string, decisionReason?: string }
+ */
+async function handleDenyJoinRequest(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return jsonResponse({ ok: false, error: "Method not allowed." }, 405);
+  }
+
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const jwt = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  if (!jwt) return jsonResponse({ ok: false, error: "Authentication required." }, 401);
+
+  const supabase = createClient(normalizeSupabaseUrl(env.SUPABASE_URL), env.SUPABASE_ANON_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  const userId = await verifyAuth(supabase, jwt);
+  if (!userId) return jsonResponse({ ok: false, error: "Invalid auth." }, 401);
+
+  const serviceClient = getServiceRoleClient(env);
+  if (!serviceClient) {
+    return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
+  }
+
+  let payload: { requestId: string; decisionReason?: string };
+  try {
+    payload = (await request.json()) as typeof payload;
+  } catch {
+    return jsonResponse({ ok: false, error: "Invalid request." }, 400);
+  }
+
+  if (!payload.requestId) {
+    return jsonResponse({ ok: false, error: "Request ID is required." }, 400);
+  }
+
+  // 1. Fetch the join request
+  const { data: reqRow } = await serviceClient
+    .from("faction_join_requests")
+    .select("*")
+    .eq("id", payload.requestId)
+    .maybeSingle();
+
+  if (!reqRow) {
+    return jsonResponse({ ok: false, error: "Join request not found." }, 404);
+  }
+
+  const req = reqRow as { id: string; faction_id: string; requester_id: string; status: string };
+
+  if (req.status !== "pending") {
+    return jsonResponse({ ok: false, error: "This request has already been processed." }, 409);
+  }
+
+  // 2. Verify leadership
+  const { data: faction } = await serviceClient
+    .from("factions")
+    .select("id, commander_id, name")
+    .eq("id", req.faction_id)
+    .maybeSingle();
+
+  if (!faction) {
+    return jsonResponse({ ok: false, error: "Faction not found." }, 404);
+  }
+
+  const f = faction as { id: string; commander_id: string; name: string };
+  if (f.commander_id !== userId) {
+    return jsonResponse({ ok: false, error: "Only the Faction leader can deny requests." }, 403);
+  }
+
+  // 3. Mark as denied
+  await serviceClient.from("faction_join_requests").update({
+    status: "denied",
+    reviewed_at: new Date().toISOString(),
+    reviewed_by: userId,
+    decision_reason: payload.decisionReason?.trim().slice(0, 500) || null,
+  }).eq("id", req.id);
+
+  // 4. Notify the requester
+  await createIntelligenceNotification(
+    serviceClient,
+    req.requester_id,
+    null,
+    "faction_join_denied",
+    `Your request to join ${f.name} was not accepted.`,
+  );
+
+  return jsonResponse({ ok: true });
+}
+
+/**
+ * POST /factions/join-requests/cancel
+ * Requester cancels their own pending request.
+ * Body: { requestId: string }
+ */
+async function handleCancelJoinRequest(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return jsonResponse({ ok: false, error: "Method not allowed." }, 405);
+  }
+
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const jwt = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  if (!jwt) return jsonResponse({ ok: false, error: "Authentication required." }, 401);
+
+  const supabase = createClient(normalizeSupabaseUrl(env.SUPABASE_URL), env.SUPABASE_ANON_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  const userId = await verifyAuth(supabase, jwt);
+  if (!userId) return jsonResponse({ ok: false, error: "Invalid auth." }, 401);
+
+  const serviceClient = getServiceRoleClient(env);
+  if (!serviceClient) {
+    return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
+  }
+
+  let payload: { requestId: string };
+  try {
+    payload = (await request.json()) as typeof payload;
+  } catch {
+    return jsonResponse({ ok: false, error: "Invalid request." }, 400);
+  }
+
+  if (!payload.requestId) {
+    return jsonResponse({ ok: false, error: "Request ID is required." }, 400);
+  }
+
+  // Fetch the request and verify ownership + pending status
+  const { data: reqRow } = await serviceClient
+    .from("faction_join_requests")
+    .select("*")
+    .eq("id", payload.requestId)
+    .maybeSingle();
+
+  if (!reqRow) {
+    return jsonResponse({ ok: false, error: "Join request not found." }, 404);
+  }
+
+  const req = reqRow as { id: string; requester_id: string; status: string };
+
+  if (req.requester_id !== userId) {
+    return jsonResponse({ ok: false, error: "You can only cancel your own requests." }, 403);
+  }
+
+  if (req.status !== "pending") {
+    return jsonResponse({ ok: false, error: "This request has already been processed." }, 409);
+  }
+
+  await serviceClient.from("faction_join_requests").update({
+    status: "cancelled",
+    reviewed_at: new Date().toISOString(),
+  }).eq("id", req.id);
+
+  return jsonResponse({ ok: true });
+}
+
 // ── Forge: secure image generation (Phase 12B) ───────────────────────────────
 
 /**
@@ -10432,6 +10983,23 @@ export default {
     // Faction invite by email or username (secure, JWT-authed)
     if (url.pathname === "/factions/invite" && request.method === "POST") {
       return handleFactionInvite(request, env);
+    }
+
+    // Faction join requests (Phase FACTION-JR)
+    if (url.pathname === "/factions/join-requests" && request.method === "GET") {
+      return handleGetJoinRequests(request, env);
+    }
+    if (url.pathname === "/factions/join-requests/create" && request.method === "POST") {
+      return handleCreateJoinRequest(request, env);
+    }
+    if (url.pathname === "/factions/join-requests/approve" && request.method === "POST") {
+      return handleApproveJoinRequest(request, env);
+    }
+    if (url.pathname === "/factions/join-requests/deny" && request.method === "POST") {
+      return handleDenyJoinRequest(request, env);
+    }
+    if (url.pathname === "/factions/join-requests/cancel" && request.method === "POST") {
+      return handleCancelJoinRequest(request, env);
     }
 
     // Forge: secure image generation (auth + tier + balance + OpenAI + atomic deduction)

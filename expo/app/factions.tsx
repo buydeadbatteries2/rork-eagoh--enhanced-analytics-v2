@@ -12,7 +12,6 @@ import {
   getMemberStatusColor,
   getMemberStatusLabel,
   getRoleLabel,
-  joinFaction,
   leaveFaction,
   listAllFactions,
   listUserFactions,
@@ -29,6 +28,12 @@ import {
   describeActivity,
   FACTION_VALIDATION,
   countUserFactionMemberships,
+  createJoinRequest,
+  listMyJoinRequests,
+  listFactionJoinRequests,
+  approveJoinRequest,
+  denyJoinRequest,
+  cancelJoinRequest,
   type FactionRow,
   type FactionFull,
   type FactionMemberRow,
@@ -36,6 +41,8 @@ import {
   type FactionActivityRow,
   type MemberStatus,
   type FactionRole,
+  type JoinRequestRow,
+  type JoinRequestWithProfile,
 } from "@/services/factions";
 import { INTELLIGENCE_DOMAINS, getDomainColor } from "@/services/domains";
 import { getBulkReputations, rankColor as repRankColor, RANK_TIERS, type RankTier } from "@/services/reputation";
@@ -84,6 +91,7 @@ import {
   ArrowUp,
   Search,
   SlidersHorizontal,
+  Mail,
 } from "lucide-react-native";
 import { Image } from "expo-image";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
@@ -305,6 +313,92 @@ function CreateFactionModal({
   );
 }
 
+// ── Join Request Modal ────────────────────────────────────────────────
+
+function JoinRequestModal({
+  visible,
+  factionName,
+  onClose,
+  onSend,
+  isSending,
+}: {
+  visible: boolean;
+  factionName: string;
+  onClose: () => void;
+  onSend: (message: string) => void;
+  isSending: boolean;
+}): JSX.Element {
+  const h = useHaptics();
+  const [message, setMessage] = useState("");
+
+  const reset = useCallback(() => setMessage(""), []);
+
+  const handleSend = useCallback(() => {
+    onSend(message);
+    reset();
+  }, [message, onSend, reset]);
+
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <LinearGradient colors={[palette.void, palette.obsidian, palette.graphite]} style={styles.modalRoot}>
+        <SafeAreaView edges={["top"]} style={styles.modalSafe}>
+          <View style={styles.modalHeader}>
+            <Pressable onPress={onClose} hitSlop={12}><X color={palette.muted} size={22} /></Pressable>
+            <Text style={styles.modalTitle}>Request to Join</Text>
+            <View style={{ width: 22 }} />
+          </View>
+
+          <KeyboardAvoidingView
+            style={styles.modalKav}
+            behavior={Platform.OS === "ios" ? "padding" : undefined}
+            keyboardVerticalOffset={0}
+          >
+            <ScrollView contentContainerStyle={styles.modalBody} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive">
+              <Text style={styles.joinRequestFactionName}>{factionName}</Text>
+              <Text style={styles.fieldLabel}>MESSAGE TO THE FACTION LEADER (OPTIONAL)</Text>
+              <TextInput
+                style={[styles.fieldInput, styles.fieldTextArea]}
+                value={message}
+                onChangeText={setMessage}
+                placeholder="Introduce yourself and why you'd like to join..."
+                placeholderTextColor={palette.muted}
+                multiline
+                numberOfLines={4}
+                maxLength={250}
+                autoFocus
+              />
+              <Text style={styles.fieldHint}>{message.length}/250</Text>
+
+              <View style={styles.joinRequestActions}>
+                <Pressable
+                  style={styles.joinRequestCancelBtn}
+                  onPress={() => { h.light(); onClose(); reset(); }}
+                >
+                  <Text style={styles.joinRequestCancelText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.joinRequestSendBtn, isSending && { opacity: 0.6 }]}
+                  onPress={handleSend}
+                  disabled={isSending}
+                >
+                  {isSending ? (
+                    <ActivityIndicator color={palette.void} size="small" />
+                  ) : (
+                    <>
+                      <Mail color={palette.void} size={16} />
+                      <Text style={styles.joinRequestSendText}>Send Request</Text>
+                    </>
+                  )}
+                </Pressable>
+              </View>
+            </ScrollView>
+          </KeyboardAvoidingView>
+        </SafeAreaView>
+      </LinearGradient>
+    </Modal>
+  );
+}
+
 // ── Faction Card ──────────────────────────────────────────────────────
 
 function FactionCard({
@@ -427,6 +521,9 @@ function FactionDetail({
   const [inviteSending, setInviteSending] = useState(false);
   const [promoteTarget, setPromoteTarget] = useState<string | null>(null);
   const [promoteRole, setPromoteRole] = useState<FactionRole>("strategist");
+  const [joinRequests, setJoinRequests] = useState<JoinRequestWithProfile[]>([]);
+  const [joinRequestsLoading, setJoinRequestsLoading] = useState(false);
+  const [processingRequestId, setProcessingRequestId] = useState<string | null>(null);
   const [memberRepMap, setMemberRepMap] = useState<Map<string, ReputationRow>>(new Map());
   const [userToEagohMap, setUserToEagohMap] = useState<Map<string, string>>(new Map());
   const [memberProfileMap, setMemberProfileMap] = useState<Map<string, { username: string | null; avatar_url: string | null }>>(new Map());
@@ -583,6 +680,72 @@ function FactionDetail({
   const eagohIdForMember = (userId: string): string => userToEagohMap.get(userId) ?? "";
 
   // ── Handlers ────────────────────────────────────────────────────────
+
+  // ── Leader: Load pending join requests ─────────────────────────────
+  useEffect(() => {
+    if (!isCommander || !faction.id) {
+      setJoinRequests([]);
+      return;
+    }
+    let cancelled = false;
+    setJoinRequestsLoading(true);
+    listFactionJoinRequests(faction.id)
+      .then((requests) => {
+        if (!cancelled) setJoinRequests(requests);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setJoinRequestsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [isCommander, faction.id]);
+
+  const handleApproveRequest = useCallback(
+    async (requestId: string) => {
+      h.medium();
+      setProcessingRequestId(requestId);
+      try {
+        const result = await approveJoinRequest(requestId);
+        if (result.ok) {
+          queryClient.invalidateQueries({ queryKey: ["faction", faction.id] });
+          queryClient.invalidateQueries({ queryKey: ["factions"] });
+          queryClient.invalidateQueries({ queryKey: ["factions", "join-requests"] });
+          // Remove from local list immediately
+          setJoinRequests((prev) => prev.filter((r) => r.id !== requestId));
+          h.success();
+        } else {
+          Alert.alert("Error", result.error);
+        }
+      } catch {
+        Alert.alert("Error", "Failed to approve request.");
+      } finally {
+        setProcessingRequestId(null);
+      }
+    },
+    [faction.id, queryClient, h],
+  );
+
+  const handleDenyRequest = useCallback(
+    async (requestId: string) => {
+      h.medium();
+      setProcessingRequestId(requestId);
+      try {
+        const result = await denyJoinRequest(requestId);
+        if (result.ok) {
+          queryClient.invalidateQueries({ queryKey: ["factions", "join-requests"] });
+          setJoinRequests((prev) => prev.filter((r) => r.id !== requestId));
+          h.selection();
+        } else {
+          Alert.alert("Error", result.error ?? "Failed to deny request.");
+        }
+      } catch {
+        Alert.alert("Error", "Failed to deny request.");
+      } finally {
+        setProcessingRequestId(null);
+      }
+    },
+    [queryClient, h],
+  );
 
   const handleInvite = useCallback(async () => {
     if (!inviteQuery.trim() || !userId) return;
@@ -858,6 +1021,77 @@ function FactionDetail({
               </Pressable>
             ))}
           </View>
+        </View>
+      )}
+
+      {/* ── Join Requests (Leader only) ──────────────────────────────── */}
+      {isCommander && (
+        <View style={styles.commanderSection}>
+          <SectionHeader eyebrow="JOIN REQUESTS" title="Pending Requests" />
+          {joinRequestsLoading ? (
+            <View style={styles.joinReqLoading}>
+              <ActivityIndicator color={palette.cyan} size="small" />
+            </View>
+          ) : joinRequests.length === 0 ? (
+            <Text style={styles.emptyText}>No pending join requests.</Text>
+          ) : (
+            joinRequests.map((req) => (
+              <View key={req.id} style={styles.joinReqCard}>
+                <View style={styles.joinReqAvatar}>
+                  {req.profile?.avatar_url ? (
+                    <Image
+                      source={{ uri: req.profile.avatar_url }}
+                      style={styles.memberAvatarImg}
+                      contentFit="cover"
+                    />
+                  ) : (
+                    <View style={styles.memberAvatarFallback}>
+                      <Text style={styles.memberAvatarInitials}>
+                        {(req.profile?.username ?? "?").slice(0, 1).toUpperCase()}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+                <View style={styles.rowText}>
+                  <Text style={styles.rowTitle}>
+                    {req.profile?.username ?? "Unknown"}
+                  </Text>
+                  <Text style={styles.rowSub}>
+                    {req.profile?.subscription_tier ?? "unknown"} tier
+                    {"  ·  "}
+                    {new Date(req.requested_at).toLocaleDateString()}
+                  </Text>
+                  {req.message ? (
+                    <Text style={styles.joinReqMessage} numberOfLines={3}>
+                      {req.message}
+                    </Text>
+                  ) : null}
+                </View>
+                <View style={styles.joinReqActions}>
+                  {processingRequestId === req.id ? (
+                    <ActivityIndicator color={palette.cyan} size="small" />
+                  ) : (
+                    <>
+                      <Pressable
+                        style={[styles.inviteActionBtn, { backgroundColor: palette.success }]}
+                        onPress={() => handleApproveRequest(req.id)}
+                        hitSlop={8}
+                      >
+                        <Check color={palette.void} size={14} />
+                      </Pressable>
+                      <Pressable
+                        style={[styles.inviteActionBtn, { backgroundColor: palette.ember }]}
+                        onPress={() => handleDenyRequest(req.id)}
+                        hitSlop={8}
+                      >
+                        <X color={palette.void} size={14} />
+                      </Pressable>
+                    </>
+                  )}
+                </View>
+              </View>
+            ))
+          )}
         </View>
       )}
 
@@ -1165,6 +1399,8 @@ export default function FactionsScreen(): JSX.Element {
 
   const [createModalVisible, setCreateModalVisible] = useState(false);
   const [expandedFactionId, setExpandedFactionId] = useState<string | null>(null);
+  const [joinRequestFaction, setJoinRequestFaction] = useState<{ id: string; name: string } | null>(null);
+  const [joinRequestSending, setJoinRequestSending] = useState(false);
 
   // Queries
   const userFactionsQuery = useQuery<FactionRow[]>({
@@ -1189,6 +1425,13 @@ export default function FactionsScreen(): JSX.Element {
     queryKey: ["faction", expandedFactionId],
     enabled: !!expandedFactionId,
     queryFn: () => (expandedFactionId ? getFactionFull(expandedFactionId) : Promise.resolve(null)),
+  });
+
+  // Join requests — the authenticated user's own requests (all statuses)
+  const myJoinRequestsQuery = useQuery<JoinRequestRow[]>({
+    queryKey: ["factions", "join-requests", userId],
+    enabled: !!userId,
+    queryFn: () => (userId ? listMyJoinRequests() : Promise.resolve([])),
   });
 
   // Create faction mutation
@@ -1298,24 +1541,57 @@ export default function FactionsScreen(): JSX.Element {
     [createMutation],
   );
 
-  const handleJoin = useCallback(
-    async (factionId: string) => {
+  // ── Join request flow ───────────────────────────────────────────────
+  // Replaces instant joinFaction — user now sends a request for leader approval.
+  const handleRequestJoin = useCallback(
+    (faction: FactionRow) => {
       if (!userId || !profile) return;
+      h.light();
+      setJoinRequestFaction({ id: faction.id, name: faction.name });
+    },
+    [userId, profile, h],
+  );
+
+  const handleSendJoinRequest = useCallback(
+    async (message: string) => {
+      if (!joinRequestFaction) return;
+      setJoinRequestSending(true);
       try {
-        const result = await joinFaction(userId, profile, factionId, tier);
+        const result = await createJoinRequest(joinRequestFaction.id, message);
         if (result.ok) {
-          queryClient.invalidateQueries({ queryKey: ["factions", "user", userId] });
+          queryClient.invalidateQueries({ queryKey: ["factions", "join-requests", userId] });
           queryClient.invalidateQueries({ queryKey: ["factions", "all"] });
-          queryClient.invalidateQueries({ queryKey: ["faction", factionId] });
           h.success();
+          setJoinRequestFaction(null);
         } else {
           Alert.alert("Error", result.error);
         }
       } catch {
-        Alert.alert("Error", "Failed to join faction.");
+        Alert.alert("Error", "Failed to send join request.");
+      } finally {
+        setJoinRequestSending(false);
       }
     },
-    [userId, profile, queryClient],
+    [joinRequestFaction, userId, queryClient, h],
+  );
+
+  const handleCancelJoinRequest = useCallback(
+    async (requestId: string, factionId: string) => {
+      h.medium();
+      try {
+        const result = await cancelJoinRequest(requestId);
+        if (result.ok) {
+          queryClient.invalidateQueries({ queryKey: ["factions", "join-requests", userId] });
+          queryClient.invalidateQueries({ queryKey: ["factions", "all"] });
+          h.selection();
+        } else {
+          Alert.alert("Error", result.error ?? "Failed to cancel request.");
+        }
+      } catch {
+        Alert.alert("Error", "Failed to cancel request.");
+      }
+    },
+    [userId, queryClient, h],
   );
 
   const renderSection = useCallback(
@@ -1454,40 +1730,88 @@ export default function FactionsScreen(): JSX.Element {
 
       // ── Discover ────────────────────────────────────────────────────
       if (item.kind === "discover") {
+        const myRequests = myJoinRequestsQuery.data ?? [];
+        const userFactionIds = new Set((userFactionsQuery.data ?? []).map((f) => f.id));
         return (
           <View>
             <SectionHeader eyebrow="DISCOVER" title="All Factions" />
-            {item.factions.map((faction) => (
-              <View key={faction.id} style={styles.discoverCard}>
-                <View style={styles.discoverInfo}>
-                  <View style={[styles.discoverEmblem, { borderColor: palette.cyan, backgroundColor: "rgba(108,230,255,0.10)" }]}>
-                    <Text style={styles.discoverEmblemText}>
-                      {(faction.emblem ?? faction.name.slice(0, 2)).toUpperCase()}
-                    </Text>
-                  </View>
-                  <View style={styles.rowText}>
-                    <Text style={styles.discoverName}>{faction.name}</Text>
-                    {faction.motto ? (
-                      <Text style={styles.discoverMotto} numberOfLines={1}>"{faction.motto}"</Text>
-                    ) : null}
-                    <View style={styles.discoverMeta}>
-                      <Text style={styles.discoverMetaText}>{faction.intelligence_domain}</Text>
-                      <Text style={styles.discoverMetaText}>·</Text>
-                      <Text style={styles.discoverMetaText}>{faction.current_members}/{faction.max_members} members</Text>
-                      <Text style={styles.discoverMetaText}>·</Text>
-                      <Text style={[styles.discoverMetaText, { color: palette.cyan }]}>{faction.influence_score} score</Text>
+            {item.factions.map((faction) => {
+              // Determine button state
+              const isFull = faction.current_members >= faction.max_members;
+              const myReq = myRequests.find(
+                (r) => r.faction_id === faction.id && r.status === "pending",
+              );
+              const myDeniedReq = myRequests.find(
+                (r) => r.faction_id === faction.id && r.status === "denied",
+              );
+              const isLeader = faction.commander_id === userId;
+
+              let btnLabel = "Request to Join";
+              let btnIcon = <UserPlus color={palette.cyan} size={14} />;
+              let btnStyle = styles.joinBtn;
+              let btnDisabled = false;
+              let btnOnPress: (() => void) | null = () => handleRequestJoin(faction);
+
+              if (isLeader) {
+                btnLabel = "Your Faction";
+                btnIcon = <Crown color={palette.gold} size={14} />;
+                btnStyle = styles.joinBtnDisabled;
+                btnDisabled = true;
+                btnOnPress = null;
+              } else if (myReq) {
+                btnLabel = "Request Pending";
+                btnIcon = <Clock color={palette.muted} size={14} />;
+                btnStyle = styles.joinBtnPending;
+                btnDisabled = true;
+                btnOnPress = () => handleCancelJoinRequest(myReq.id, faction.id);
+              } else if (isFull) {
+                btnLabel = "Faction Full";
+                btnIcon = <Users color={palette.muted} size={14} />;
+                btnStyle = styles.joinBtnDisabled;
+                btnDisabled = true;
+                btnOnPress = null;
+              } else if (myDeniedReq) {
+                btnLabel = "Request Again";
+                btnIcon = <UserPlus color={palette.cyan} size={14} />;
+              }
+
+              return (
+                <View key={faction.id} style={styles.discoverCard}>
+                  <View style={styles.discoverInfo}>
+                    <View style={[styles.discoverEmblem, { borderColor: palette.cyan, backgroundColor: "rgba(108,230,255,0.10)" }]}>
+                      <Text style={styles.discoverEmblemText}>
+                        {(faction.emblem ?? faction.name.slice(0, 2)).toUpperCase()}
+                      </Text>
+                    </View>
+                    <View style={styles.rowText}>
+                      <Text style={styles.discoverName}>{faction.name}</Text>
+                      {faction.motto ? (
+                        <Text style={styles.discoverMotto} numberOfLines={1}>"{faction.motto}"</Text>
+                      ) : null}
+                      <View style={styles.discoverMeta}>
+                        <Text style={styles.discoverMetaText}>{faction.intelligence_domain}</Text>
+                        <Text style={styles.discoverMetaText}>·</Text>
+                        <Text style={styles.discoverMetaText}>{faction.current_members}/{faction.max_members} members</Text>
+                        <Text style={styles.discoverMetaText}>·</Text>
+                        <Text style={[styles.discoverMetaText, { color: palette.cyan }]}>{faction.influence_score} score</Text>
+                      </View>
+                      {/* Show cancel hint for pending requests */}
+                      {myReq && (
+                        <Text style={styles.cancelHint}>Tap "Request Pending" to cancel</Text>
+                      )}
                     </View>
                   </View>
+                  <Pressable
+                    style={btnStyle}
+                    onPress={btnOnPress ?? undefined}
+                    disabled={btnDisabled}
+                  >
+                    {btnIcon}
+                    <Text style={styles.joinBtnText}>{btnLabel}</Text>
+                  </Pressable>
                 </View>
-                <Pressable
-                  style={styles.joinBtn}
-                  onPress={() => handleJoin(faction.id)}
-                >
-                  <UserPlus color={palette.cyan} size={14} />
-                  <Text style={styles.joinBtnText}>Join</Text>
-                </Pressable>
-              </View>
-            ))}
+              );
+            })}
           </View>
         );
       }
@@ -1558,7 +1882,9 @@ export default function FactionsScreen(): JSX.Element {
       expandedQuery.data,
       acceptMutation,
       declineMutation,
-      handleJoin,
+      handleRequestJoin,
+      handleCancelJoinRequest,
+      myJoinRequestsQuery.data,
       userId,
     ],
   );
@@ -1590,6 +1916,14 @@ export default function FactionsScreen(): JSX.Element {
         onClose={() => setCreateModalVisible(false)}
         onCreate={handleCreateFaction}
         isCreating={createMutation.isPending}
+      />
+
+      <JoinRequestModal
+        visible={joinRequestFaction !== null}
+        factionName={joinRequestFaction?.name ?? ""}
+        onClose={() => setJoinRequestFaction(null)}
+        onSend={handleSendJoinRequest}
+        isSending={joinRequestSending}
       />
     </LinearGradient>
   );
@@ -1908,7 +2242,81 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: palette.cyan,
   },
+  joinBtnPending: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: palette.muted,
+    backgroundColor: "rgba(255,255,255,0.04)",
+  },
+  joinBtnDisabled: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: palette.muted,
+    backgroundColor: "rgba(255,255,255,0.02)",
+    opacity: 0.6,
+  },
   joinBtnText: { color: palette.cyan, fontSize: 11, fontWeight: "900" as const },
+  cancelHint: { color: palette.muted, fontSize: 9, fontWeight: "700" as const, marginTop: 2, fontStyle: "italic" as const },
+
+  // Join Request Modal
+  joinRequestFactionName: { color: palette.text, fontSize: 18, fontWeight: "900" as const, marginBottom: 8 },
+  joinRequestActions: { flexDirection: "row", gap: 10, marginTop: 16, justifyContent: "flex-end" },
+  joinRequestCancelBtn: {
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: palette.line,
+  },
+  joinRequestCancelText: { color: palette.muted, fontSize: 13, fontWeight: "900" as const },
+  joinRequestSendBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: palette.cyan,
+    borderRadius: 5,
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+  },
+  joinRequestSendText: { color: palette.void, fontSize: 13, fontWeight: "900" as const },
+
+  // Leader Join Requests
+  joinReqLoading: { paddingVertical: 16, alignItems: "center" },
+  joinReqCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: palette.line,
+  },
+  joinReqAvatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: palette.line,
+  },
+  joinReqMessage: {
+    color: palette.muted,
+    fontSize: 11,
+    fontWeight: "700" as const,
+    marginTop: 4,
+    fontStyle: "italic" as const,
+    lineHeight: 16,
+  },
+  joinReqActions: { flexDirection: "row", gap: 6 },
 
   // Invite card (in list)
   inviteCard: {

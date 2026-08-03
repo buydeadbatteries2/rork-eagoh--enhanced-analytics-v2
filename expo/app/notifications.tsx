@@ -33,6 +33,8 @@ import {
   MessageSquare,
   ShieldAlert,
   Star,
+  UserPlus,
+  UserCheck,
   XCircle,
 } from "lucide-react-native";
 import React, { memo, useCallback, useState } from "react";
@@ -70,6 +72,12 @@ function notificationIcon(type: string): JSX.Element {
       return <BellOff color={palette.ember} size={size} />;
     case "faction_sharing_removed":
       return <BellOff color={palette.violet} size={size} />;
+    case "faction_join_requested":
+      return <UserPlus color={palette.cyan} size={size} />;
+    case "faction_join_approved":
+      return <UserCheck color={palette.success} size={size} />;
+    case "faction_join_denied":
+      return <XCircle color={palette.ember} size={size} />;
     default:
       return <Bell color={palette.cyan} size={size} />;
   }
@@ -93,6 +101,12 @@ function notificationColor(type: string): string {
       return palette.ember;
     case "faction_sharing_removed":
       return palette.violet;
+    case "faction_join_requested":
+      return palette.cyan;
+    case "faction_join_approved":
+      return palette.success;
+    case "faction_join_denied":
+      return palette.ember;
     default:
       return palette.cyan;
   }
