@@ -10591,6 +10591,7 @@ async function handleSubscriptionSync(request: Request, env: Env): Promise<Respo
   const currentTier = str((profileRow as Record<string, unknown>).subscription_tier, "free");
   const currentSub = (profileRow as { edge_subscription: number | null }).edge_subscription ?? 0;
   const currentPurch = (profileRow as { edge_purchased: number | null }).edge_purchased ?? 0;
+  const currentLastAllocation = (profileRow as { last_allocation: number | null }).last_allocation ?? 0;
 
   // If no recognized entitlement was found but the user previously had a paid
   // tier, PRESERVE the existing tier temporarily (receipt replay in progress).
@@ -10632,26 +10633,83 @@ async function handleSubscriptionSync(request: Request, env: Env): Promise<Respo
     ? `${lastRolloverDate.getUTCFullYear()}-${lastRolloverDate.getUTCMonth()}`
     : null;
 
+  // ── Hard idempotency: check edge_transactions for a prior grant this month ──
+  // This prevents duplicate grants from duplicate CustomerInfo callbacks,
+  // temporary→final entitlement transitions, restore purchases, and app
+  // restarts. The idempotency key is embedded in the transaction note.
+  const idempotencyKey = `sub_alloc:${userId.slice(0, 8)}:${verifiedTier}:${currentMonthKey}`;
+  let alreadyGrantedThisMonth = false;
+  if (verifiedTier !== "free" && lastRolloverMonthKey === currentMonthKey && !tierChanged) {
+    // Same tier, same month — check if we already granted
+    try {
+      const { count: grantCount } = await serviceClient
+        .from("edge_transactions")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .eq("reason", "subscription_allocation")
+        .gte("created_at", new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString());
+      if (grantCount && grantCount > 0) {
+        alreadyGrantedThisMonth = true;
+        console.log("[subscription-sync] idempotency: allocation already granted this month", {
+          userIdPrefix: userId.slice(0, 8),
+          tier: verifiedTier,
+          grantCount,
+        });
+      }
+    } catch {
+      // If the query fails, fall through to the calendar-month check
+    }
+  }
+
   // Grant allocation if:
-  // 1. Tier changed (upgrade/downgrade) — always grant the new tier's allocation
-  // 2. No rollover has happened this calendar month — normal monthly allocation
-  const needsAllocation = tierChanged || lastRolloverMonthKey !== currentMonthKey;
+  // 1. Tier changed (upgrade/downgrade) — replace allocation with new tier's
+  // 2. No rollover has happened this calendar month — normal monthly renewal
+  // 3. Not already granted this month (idempotency)
+  const needsAllocation = (tierChanged || lastRolloverMonthKey !== currentMonthKey) && !alreadyGrantedThisMonth;
 
   let newSubBalance = currentSub;
   let allocationGranted = 0;
+  let rolloverAmount = 0;
+  let grantEventType = "subscription_initial_grant";
 
   if (verifiedTier !== "free" && needsAllocation) {
     const allocation = TIER_MONTHLY_ALLOCATION_SERVER[verifiedTier] ?? 0;
     if (allocation > 0) {
-      // For tier upgrades from free → paid, set subscription balance to the
-      // new allocation (don't add on top of the free tier's small balance).
-      // For monthly renewals of the same tier, add the allocation.
       if (currentTier === "free") {
+        // ── First paid subscription (free → paid): set balance to allocation ──
+        // No rollover. The user had at most 25 free neurons.
         newSubBalance = allocation;
+        allocationGranted = allocation;
+        rolloverAmount = 0;
+        grantEventType = "subscription_initial_grant";
+      } else if (tierChanged) {
+        // ── Upgrade or downgrade between paid tiers: replace allocation ──
+        // Do NOT add the new allocation on top of the existing balance.
+        // Do NOT calculate rollover — rollover is only for same-tier renewals.
+        // The user's remaining subscription balance is forfeited and replaced
+        // with the new tier's monthly allocation.
+        newSubBalance = allocation;
+        allocationGranted = allocation;
+        rolloverAmount = 0;
+        grantEventType = (TIER_PRIORITY_SERVER[verifiedTier] ?? 0) > (TIER_PRIORITY_SERVER[currentTier] ?? 0)
+          ? "subscription_upgrade"
+          : "subscription_downgrade";
       } else {
-        newSubBalance = currentSub + allocation;
+        // ── Same-tier monthly renewal: allocation + eligible rollover ──
+        // Rollover is 10% of the PRIOR month's allocation, but ONLY if the
+        // user retained at least 10% of that prior allocation at renewal time.
+        // The rollover source is the prior allocation, NOT the current balance
+        // and NOT the new allocation.
+        const priorAllocation = Math.max(0, currentLastAllocation || allocation);
+        const retentionThreshold = Math.floor(priorAllocation * 0.1);
+        const rolloverCap = Math.floor(priorAllocation * 0.1);
+        rolloverAmount = currentSub >= retentionThreshold
+          ? Math.min(currentSub, rolloverCap)
+          : 0;
+        newSubBalance = rolloverAmount + allocation;
+        allocationGranted = allocation;
+        grantEventType = "subscription_renewal";
       }
-      allocationGranted = allocation;
     }
   }
 
@@ -10682,9 +10740,8 @@ async function handleSubscriptionSync(request: Request, env: Env): Promise<Respo
       return jsonResponse({ ok: false, error: "Failed to update subscription." }, 500);
     }
 
-    // Log the neuron grant transaction with an idempotency note
+    // Log the neuron grant transaction with full audit trail
     if (allocationGranted > 0) {
-      const idempotencyKey = `sub_alloc:${userId.slice(0, 8)}:${verifiedTier}:${currentMonthKey}`;
       try {
         await serviceClient.from("edge_transactions").insert({
           user_id: userId,
@@ -10696,7 +10753,7 @@ async function handleSubscriptionSync(request: Request, env: Env): Promise<Respo
           from_purchased: 0,
           balance_subscription_after: newSubBalance,
           balance_purchased_after: currentPurch,
-          note: `${verifiedTier} subscription allocation — idempotency:${idempotencyKey}`,
+          note: `${grantEventType} — tier:${verifiedTier} base:${allocationGranted} rollover:${rolloverAmount} — idempotency:${idempotencyKey}`,
         });
       } catch (txErr) {
         // Non-fatal — the balance was already updated, the log is best-effort
@@ -10705,7 +10762,7 @@ async function handleSubscriptionSync(request: Request, env: Env): Promise<Respo
     }
   }
 
-  // ── Return the updated state so the client can refresh immediately ──
+  // ── Return the updated state so the client can refresh immediately (v2) ──
   return jsonResponse({
     ok: true,
     tier: verifiedTier,

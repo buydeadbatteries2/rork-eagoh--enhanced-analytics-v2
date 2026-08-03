@@ -182,17 +182,27 @@ export const [ProfileProvider, useProfile] = createContextHook(() => {
 
   const balances = profile ? getBalances(profile) : { subscription: 0, purchased: 0, total: 0 };
 
-  // ── Auto-allocation: grant Neurons on first login and monthly thereafter ──
-  // Wait for test tier to load so dev test subscriptions get the correct allocation.
+  // ── Auto-allocation: grant free-tier Neurons on first login and monthly thereafter ──
+  // IMPORTANT: The client ONLY grants free-tier (25) monthly neurons.
+  // Paid-tier subscription allocations are ALWAYS handled by the backend
+  // /subscription/sync endpoint, which verifies RevenueCat entitlements and
+  // grants neurons idempotently. The client must NEVER call
+  // applyMonthlyRollover for a paid tier — doing so applies a rollover on top
+  // of the backend's already-correct grant, producing e.g. 1540 instead of 1400.
   const allocRanRef = useRef(false);
   useEffect(() => {
     if (!profile || !userId) return;
     if (allocRanRef.current) return;
-    // Don't run until the test tier has been loaded from AsyncStorage
-    // (in __DEV__) so we use the correct effective tier for allocation.
     if (!testTierLoaded) return;
 
     const tier = effectiveSubscriptionTier;
+
+    // ── Guard: only client-grant for the free tier ──
+    // Paid tiers are granted exclusively by the backend /subscription/sync.
+    if (tier !== "free") {
+      allocRanRef.current = true;
+      return;
+    }
 
     // Only grant if the user hasn't received allocation this calendar month.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -203,38 +213,17 @@ export const [ProfileProvider, useProfile] = createContextHook(() => {
     applyMonthlyRolloverService(userId, profile, tier).then((next) => {
       queryClient.setQueryData(profileKey(userId), next);
     }).catch((err) => {
-      console.warn("[ProfileProvider] auto-allocation failed:", (err as Error).message);
+      console.warn("[ProfileProvider] free-tier auto-allocation failed:", (err as Error).message);
       allocRanRef.current = false; // retry next mount
     });
   }, [profile, userId, queryClient, testTierLoaded, effectiveSubscriptionTier]);
 
-  // ── Upgrade allocation: trigger rollover when effective tier changes from free → paid ──
-  // Uses effectiveSubscriptionTier so dev test tier upgrades also trigger allocation.
-  const prevTierRef = useRef<SubscriptionTier | null>(null);
-  useEffect(() => {
-    if (!profile || !userId) return;
-    // Don't track until test tier has loaded to avoid false upgrade detection.
-    if (!testTierLoaded) return;
-
-    const tier = effectiveSubscriptionTier;
-    const prevTier = prevTierRef.current;
-    prevTierRef.current = tier;
-
-    // Only trigger on actual upgrade from free to paid (not on first mount)
-    if (!prevTier || prevTier === tier) return;
-    if (prevTier !== "free") return;
-    if (tier === "free") return;
-
-    // Grant the new paid tier's monthly allocation immediately
-    if (__DEV__) {
-      console.log(`[ProfileProvider] Tier upgrade detected: ${prevTier} → ${tier} — triggering allocation`);
-    }
-    applyMonthlyRolloverService(userId, profile, tier).then((next) => {
-      queryClient.setQueryData(profileKey(userId), next);
-    }).catch((err) => {
-      console.warn("[ProfileProvider] upgrade allocation failed:", (err as Error).message);
-    });
-  }, [profile, userId, queryClient, testTierLoaded, effectiveSubscriptionTier]);
+  // ── Paid tier grants are handled exclusively by the backend ──
+  // The previous client-side upgrade effect (free → paid) was removed because
+  // it called applyMonthlyRollover AFTER the backend already granted the
+  // correct allocation, adding a spurious 10% rollover (e.g. 1400 → 1540).
+  // The RevenueCatProvider's syncSubscription() calls the backend
+  // /subscription/sync endpoint which is the sole authoritative grant path.
 
   const isAdminOverrideActive: boolean = hasActiveAdminOverride(profile);
 
