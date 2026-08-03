@@ -7,25 +7,16 @@ import {
 /**
  * Profile service – persists user profile data in the `profiles` Supabase table.
  *
- * Expected schema (run in Supabase SQL editor):
- * ```
- * create table public.profiles (
- *   id uuid primary key references auth.users(id) on delete cascade,
- *   username text,
- *   subscription_tier text default 'free',
- *   edge_subscription int default 0,
- *   edge_purchased int default 0,
- *   selected_labs jsonb default '[]'::jsonb,
- *   selected_eagohs jsonb default '[]'::jsonb,
- *   preferences jsonb default '{}'::jsonb,
- *   created_at timestamptz default now(),
- *   updated_at timestamptz default now()
- * );
- * alter table public.profiles enable row level security;
- * create policy "profiles_self_select" on public.profiles for select using (auth.uid() = id);
- * create policy "profiles_self_upsert" on public.profiles for insert with check (auth.uid() = id);
- * create policy "profiles_self_update" on public.profiles for update using (auth.uid() = id);
- * ```
+ * SECURITY: All profile updates go through SECURITY DEFINER RPCs that
+ * whitelist user-editable fields. Direct table UPDATE is revoked from
+ * authenticated/anon (see supabase-complimentary-tier-migration.sql).
+ *
+ *   - update_own_safe_profile: username, bio, avatar, preferences, etc.
+ *   - update_own_edge_balances: edge_subscription, edge_purchased, rollover fields
+ *   - update_own_verification_status: is_social_verified, social_verified_platform
+ *
+ * Admin-only fields (complimentary_tier, subscription_tier, admin_tier_override,
+ * is_admin, etc.) are NEVER accepted by any client RPC.
  */
 
 export type SubscriptionTier = "free" | "pro" | "oracle_elite" | "syndicate";
@@ -68,8 +59,40 @@ export type UserProfile = {
   updated_at?: string;
 };
 
-/** Users can never update admin override or complimentary fields from the app. Only service_role / Supabase dashboard can. */
-export type ProfileUpdate = Partial<Omit<UserProfile, "id" | "created_at" | "updated_at" | "admin_tier_override" | "admin_tier_expires_at" | "admin_tier_note" | "is_admin" | "complimentary_tier" | "complimentary_tier_expires_at" | "complimentary_tier_granted_at" | "complimentary_tier_note">> & { last_rollover_at?: string | null; last_allocation?: number };
+/**
+ * User-editable profile fields. These are the ONLY fields the client can
+ * modify, and they go through the update_own_safe_profile SECURITY DEFINER RPC.
+ * Admin, complimentary, subscription_tier, edge balance, and verification
+ * fields are excluded — they are managed by dedicated RPCs or backend only.
+ */
+export type ProfileUpdate = {
+  username?: string | null;
+  display_name?: string | null;
+  bio?: string | null;
+  avatar_url?: string | null;
+  banner_url?: string | null;
+  public_display_title?: string | null;
+  selected_labs?: string[];
+  selected_eagohs?: string[];
+  preferences?: ProfilePreferences;
+  public_profile_enabled?: boolean;
+  show_social_accounts?: boolean;
+  show_credentials?: boolean;
+  show_public_eagohs?: boolean;
+  show_faction?: boolean;
+};
+
+/**
+ * Edge balance fields. These go through the update_own_edge_balances
+ * SECURITY DEFINER RPC. Only edge_subscription, edge_purchased,
+ * last_rollover_at, and last_allocation are accepted.
+ */
+export type EdgeBalanceUpdate = {
+  edge_subscription?: number;
+  edge_purchased?: number;
+  last_rollover_at?: string | null;
+  last_allocation?: number;
+};
 
 const DEFAULT_PROFILE = (id: string, username?: string | null): UserProfile => ({
   id,
@@ -147,20 +170,52 @@ export async function ensureProfile(userId: string, username?: string | null): P
   return newProfile;
 }
 
+/**
+ * Update user-editable profile fields via the update_own_safe_profile RPC.
+ * Only whitelisted fields are accepted; admin/complimentary/edge/subscription
+ * fields are rejected by the RPC.
+ */
 export async function updateProfile(userId: string, patch: ProfileUpdate): Promise<UserProfile> {
-  const payload = { ...patch, updated_at: new Date().toISOString() };
-  const { data, error } = await supabase
-    .from("profiles")
-    .update(payload)
-    .eq("id", userId)
-    .select("*")
-    .single();
+  const { data, error } = await supabase.rpc("update_own_safe_profile", {
+    p_user_id: userId,
+    p_updates: patch,
+  });
   if (error) throw error;
-  return data as UserProfile;
+  const result = data as { ok: boolean; profile?: UserProfile; error?: string };
+  if (!result.ok || !result.profile) {
+    throw new Error(result.error ?? "Profile update failed");
+  }
+  return result.profile;
 }
 
-export async function setSubscriptionTier(userId: string, tier: SubscriptionTier): Promise<UserProfile> {
-  return updateProfile(userId, { subscription_tier: tier });
+/**
+ * Update edge balance fields via the update_own_edge_balances RPC.
+ * Only edge_subscription, edge_purchased, last_rollover_at, last_allocation
+ * are accepted.
+ */
+export async function updateEdgeBalances(userId: string, patch: EdgeBalanceUpdate): Promise<UserProfile> {
+  const { data, error } = await supabase.rpc("update_own_edge_balances", {
+    p_user_id: userId,
+    p_updates: patch,
+  });
+  if (error) throw error;
+  const result = data as { ok: boolean; profile?: UserProfile; error?: string };
+  if (!result.ok || !result.profile) {
+    throw new Error(result.error ?? "Edge balance update failed");
+  }
+  return result.profile;
+}
+
+/**
+ * @deprecated subscription_tier is NEVER set by the client. Tier changes go
+ * through the backend /subscription/sync endpoint which verifies RevenueCat
+ * entitlements. This function throws to prevent accidental client-side writes.
+ */
+export async function setSubscriptionTier(_userId: string, _tier: SubscriptionTier): Promise<never> {
+  throw new Error(
+    "subscription_tier can only be set by the backend /subscription/sync endpoint. " +
+    "The client must never write subscription_tier directly.",
+  );
 }
 
 export async function setSelectedLabs(userId: string, labs: string[]): Promise<UserProfile> {

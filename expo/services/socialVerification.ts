@@ -212,15 +212,12 @@ export async function refreshSocialVerificationStatus(
   const isVerified = !!verifiedAccount;
   const verifiedPlatform = verifiedAccount?.platform ?? null;
 
-  // Update the profiles row
-  const { error } = await supabase
-    .from("profiles")
-    .update({
-      is_social_verified: isVerified,
-      social_verified_platform: verifiedPlatform,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", userId);
+  // Update via SECURITY DEFINER RPC — direct table UPDATE is revoked.
+  const { error } = await supabase.rpc("update_own_verification_status", {
+    p_user_id: userId,
+    p_is_social_verified: isVerified,
+    p_social_verified_platform: verifiedPlatform,
+  });
 
   if (error) {
     console.warn("[socialVerification] refreshSocialVerificationStatus update error", error.message);

@@ -10,7 +10,6 @@ import {
   setPreferences as setPreferencesService,
   setSelectedEagohs as setSelectedEagohsService,
   setSelectedLabs as setSelectedLabsService,
-  setSubscriptionTier as setSubscriptionTierService,
   updateProfile as updateProfileService,
   type ProfilePreferences,
   type ProfileUpdate,
@@ -141,13 +140,9 @@ export const [ProfileProvider, useProfile] = createContextHook(() => {
     onSuccess: (next) => queryClient.setQueryData(profileKey(userId), next),
   });
 
-  const setTierMutation = useMutation({
-    mutationFn: (tier: SubscriptionTier): Promise<UserProfile> => {
-      if (!userId) throw new Error("Not signed in");
-      return setSubscriptionTierService(userId, tier);
-    },
-    onSuccess: (next) => queryClient.setQueryData(profileKey(userId), next),
-  });
+  // ── setSubscriptionTier removed ──────────────────────────────────
+  // subscription_tier is NEVER set by the client. The backend /subscription/sync
+  // endpoint is the sole authority. The RPC throws if called.
 
   const setLabsMutation = useMutation({
     mutationFn: (labs: string[]): Promise<UserProfile> => {
@@ -303,6 +298,9 @@ export const [ProfileProvider, useProfile] = createContextHook(() => {
       if (!token) return;
       void triggerComplimentaryAllocation(token, complimentaryTier).then((ok) => {
         if (ok) {
+          // Refresh profile to pick up any balance changes from the RPC.
+          // The RPC may skip the allocation if the paid tier is higher —
+          // in that case the balance is unchanged and this is a no-op refetch.
           queryClient.invalidateQueries({ queryKey: profileKey(userId) });
         } else {
           compAllocRanRef.current = false; // retry next mount
@@ -333,7 +331,6 @@ export const [ProfileProvider, useProfile] = createContextHook(() => {
     clearTestSubscription,
 
     updateProfile: (patch: ProfileUpdate) => updateMutation.mutateAsync(patch),
-    setSubscriptionTier: (tier: SubscriptionTier) => setTierMutation.mutateAsync(tier),
     setSelectedLabs: (labs: string[]) => setLabsMutation.mutateAsync(labs),
     setSelectedEagohs: (eagohs: string[]) => setEagohsMutation.mutateAsync(eagohs),
     setPreferences: (preferences: ProfilePreferences) => setPreferencesMutation.mutateAsync(preferences),

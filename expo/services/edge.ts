@@ -1,6 +1,6 @@
 import { supabase } from "@/lib/supabase";
 import { getQuickCheckCost } from "@/services/analyst";
-import { getEffectiveSubscriptionTier, updateProfile, type UserProfile } from "@/services/profile";
+import { getEffectiveSubscriptionTier, updateEdgeBalances, type UserProfile } from "@/services/profile";
 import {
   TIER_MAX_EAGOHS as TIER_MAX_EAGOHS_SHARED,
   TIER_MONTHLY_ALLOCATION as TIER_MONTHLY_ALLOCATION_SHARED,
@@ -162,7 +162,7 @@ export async function spendEdge(
   const nextSub = subscription - fromSub;
   const nextPurchased = purchased - fromPurchased;
 
-  const next = await updateProfile(userId, {
+  const next = await updateEdgeBalances(userId, {
     edge_subscription: nextSub,
     edge_purchased: nextPurchased,
   });
@@ -225,7 +225,7 @@ export async function addPurchasedEdge(
   const add = Math.max(0, Math.floor(amount));
   if (add === 0) return profile;
   const nextPurchased = (profile.edge_purchased ?? 0) + add;
-  const next = await updateProfile(userId, { edge_purchased: nextPurchased });
+  const next = await updateEdgeBalances(userId, { edge_purchased: nextPurchased });
   await logTransaction({
     user_id: userId,
     kind: "purchase",
@@ -252,7 +252,7 @@ export async function addSubscriptionEdge(
   const add = Math.max(0, Math.floor(amount));
   if (add === 0) return profile;
   const nextSub = (profile.edge_subscription ?? 0) + add;
-  const next = await updateProfile(userId, { edge_subscription: nextSub });
+  const next = await updateEdgeBalances(userId, { edge_subscription: nextSub });
   await logTransaction({
     user_id: userId,
     kind: "addition",
@@ -292,7 +292,7 @@ export async function applyMonthlyRollover(
 
     // Set subscription balance directly to the allocation (cap, no rollover).
     // Purchased neurons are never touched.
-    const next = await updateProfile(userId, {
+    const next = await updateEdgeBalances(userId, {
       edge_subscription: allocation,
       last_rollover_at: now,
       last_allocation: allocation,
@@ -325,7 +325,7 @@ export async function applyMonthlyRollover(
 
   const nextSub = rollover + allocation;
 
-  const next = await updateProfile(userId, {
+  const next = await updateEdgeBalances(userId, {
     edge_subscription: nextSub,
     last_rollover_at: now,
     last_allocation: allocation,

@@ -11047,10 +11047,11 @@ export default {
 
 // ── Complimentary Tier Allocation endpoint ─────────────────────────────────
 // Calls the SECURITY DEFINER RPC grant_complimentary_allocation to idempotently
-// grant monthly complimentary neurons. The RPC checks the profile's
-// complimentary_tier and expiration, and uses the complimentary_allocations
-// ledger table for idempotency. The worker reads the complimentary tier from
-// the DB — never trusts the client-supplied value.
+// grant monthly complimentary neurons. The RPC compares paid tier priority vs
+// complimentary tier priority and only grants when complimentary is higher.
+// The worker reads the complimentary tier from the DB — never trusts the
+// client-supplied value. Returns skippedForHigherPaidTier when the paid tier
+// is equal or higher than the complimentary tier.
 
 async function handleComplimentaryAllocate(request: Request, env: Env): Promise<Response> {
   if (request.method !== "POST") {
@@ -11136,6 +11137,8 @@ async function handleComplimentaryAllocate(request: Request, env: Env): Promise<
     allocation_amount: number | null;
     new_subscription_balance: number | null;
     already_granted: boolean;
+    skipped_for_higher_paid_tier: boolean;
+    effective_tier: string | null;
   }>;
 
   const row = result?.[0];
@@ -11148,14 +11151,18 @@ async function handleComplimentaryAllocate(request: Request, env: Env): Promise<
     );
   }
 
-  // Invalidate the profile cache so the client sees the updated balance
-  // The ProfileProvider will refetch after this call
+  // Return the authoritative RPC result to the client.
+  // skipped_for_higher_paid_tier = true means the paid tier is equal or higher
+  // than the complimentary tier, so no allocation was applied.
+  // The client must NOT overwrite the balance in this case.
   return jsonResponse({
     ok: true,
     active: true,
     alreadyGranted: row.already_granted,
     allocationAmount: row.allocation_amount,
     newSubscriptionBalance: row.new_subscription_balance,
+    skippedForHigherPaidTier: row.skipped_for_higher_paid_tier,
+    effectiveTier: row.effective_tier,
   });
 }
 
