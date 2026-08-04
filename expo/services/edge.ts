@@ -1,6 +1,6 @@
 import { supabase } from "@/lib/supabase";
 import { getQuickCheckCost } from "@/services/analyst";
-import { getEffectiveSubscriptionTier, updateProfile, type UserProfile } from "@/services/profile";
+import { fetchProfile, getEffectiveSubscriptionTier, updateProfile, type UserProfile } from "@/services/profile";
 import {
   TIER_MAX_EAGOHS as TIER_MAX_EAGOHS_SHARED,
   TIER_MONTHLY_ALLOCATION as TIER_MONTHLY_ALLOCATION_SHARED,
@@ -135,6 +135,12 @@ async function logTransaction(entry: Omit<EdgeTransaction, "id" | "created_at">)
 /**
  * Spend Edge — subscription bucket first, then purchased. Throws when balance
  * is insufficient. Writes a `deduction` transaction.
+ *
+ * IMPORTANT: This function refetches the fresh profile from the DB before
+ * computing the deduction to avoid stale-cache failures. The caller's cached
+ * profile may be outdated if another operation (e.g. auto-allocation, a
+ * concurrent session, or a backend sync) modified the balance between the UI
+ * balance check and the actual deduction.
  */
 export async function spendEdge(
   userId: string,
@@ -154,18 +160,41 @@ export async function spendEdge(
     throw new Error("Upgrade to Pro or higher to use this feature.");
   }
 
-  const { total, subscription, purchased } = getBalances(profile);
-  if (cost > total) throw new Error("Insufficient Neuron balance");
+  // ── Refetch fresh balances from DB to avoid stale-cache races ──
+  // The cached `profile` may be outdated if a concurrent operation modified
+  // the balance. Fetching the authoritative row here ensures the balance
+  // check and the UPDATE use the same current values.
+  let freshProfile = profile;
+  try {
+    const fetched = await fetchProfile(userId);
+    if (fetched) freshProfile = fetched;
+  } catch (fetchErr) {
+    // If the refetch fails, fall back to the cached profile — the UPDATE
+    // below will still work if the cache is approximately correct.
+    console.warn("[edge] failed to refetch profile before deduction, using cached values", fetchErr instanceof Error ? fetchErr.message : fetchErr);
+  }
+
+  const { total, subscription, purchased } = getBalances(freshProfile);
+  if (cost > total) {
+    throw new Error(`Insufficient Neuron balance (need ${cost}, have ${total})`);
+  }
 
   const fromSub = Math.min(subscription, cost);
   const fromPurchased = cost - fromSub;
   const nextSub = subscription - fromSub;
   const nextPurchased = purchased - fromPurchased;
 
-  const next = await updateProfile(userId, {
-    edge_subscription: nextSub,
-    edge_purchased: nextPurchased,
-  });
+  let next: UserProfile;
+  try {
+    next = await updateProfile(userId, {
+      edge_subscription: nextSub,
+      edge_purchased: nextPurchased,
+    });
+  } catch (updateErr) {
+    const msg = updateErr instanceof Error ? updateErr.message : String(updateErr);
+    console.error("[edge] profile UPDATE failed during deduction", { userId: userId.slice(0, 8), reason, cost, error: msg });
+    throw new Error(`Failed to update Neuron balance. Please try again. (${msg})`);
+  }
 
   await logTransaction({
     user_id: userId,

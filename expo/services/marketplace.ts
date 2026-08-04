@@ -911,7 +911,15 @@ export async function purchaseSync(
       `Sync purchase: ${syncLevel} for ${days} day(s)`,
     );
   } catch (err: unknown) {
-    return { ok: false, error: "Neuron deduction failed. Please try again." };
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error("[marketplace] Neuron deduction failed for sync purchase", { buyerId: buyerId.slice(0, 8), totalCost, error: errMsg });
+    if (errMsg.toLowerCase().includes("insufficient")) {
+      return { ok: false, error: `Insufficient Neurons. Need ${totalCost} Neurons for this sync purchase.` };
+    }
+    if (errMsg.toLowerCase().includes("upgrade")) {
+      return { ok: false, error: errMsg };
+    }
+    return { ok: false, error: `Neuron deduction failed: ${errMsg}. Please try again.` };
   }
 
   // Transfer Edge to vendor — single atomic update (no double-credit)

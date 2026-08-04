@@ -677,8 +677,16 @@ export async function purchaseFactionSlots(
       "faction_slot_expansion",
       `+${slotsToBuy} slots for ${f.name}`,
     );
-  } catch {
-    return { ok: false, error: "Neuron deduction failed. Insufficient balance." };
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error("[factions] Neuron deduction failed for slot expansion", { userId: userId.slice(0, 8), cost: costEntry.cost, error: errMsg });
+    if (errMsg.toLowerCase().includes("insufficient")) {
+      return { ok: false, error: `Insufficient Neurons. Need ${costEntry.cost} Neurons for slot expansion.` };
+    }
+    if (errMsg.toLowerCase().includes("upgrade")) {
+      return { ok: false, error: errMsg };
+    }
+    return { ok: false, error: `Neuron deduction failed: ${errMsg}. Please try again.` };
   }
 
   const newMax = f.max_members + slotsToBuy;

@@ -470,11 +470,13 @@ export default function LabsScreen(): JSX.Element {
       try {
         await deductQuickCheck(prompt, `Quick Check (${kind}) · ${cost} Neurons`);
       } catch (deductionErr) {
-        console.warn("Neuron deduction failed after successful analyst call", deductionErr instanceof Error ? deductionErr.message : deductionErr);
+        const errMsg = deductionErr instanceof Error ? deductionErr.message : String(deductionErr);
+        console.error("[labs] Neuron deduction failed after successful analyst call", { cost, error: errMsg });
         // Still show the reply — Edge deduction is a secondary concern
         setConnectedModel(result.model);
         setMessages((current) => [...current, { id: `a-${Date.now()}`, sender: "analyst", text: result.reply, confidence: result.confidence }]);
-        setAnalystError("Neuron deduction failed, but here's your analysis.");
+        const isInsufficient = errMsg.toLowerCase().includes("insufficient");
+        setAnalystError(isInsufficient ? `Insufficient Neurons (${cost} needed). Here's your analysis anyway.` : "Neuron deduction failed, but here's your analysis.");
         setIsAnalystTyping(false);
         return;
       }

@@ -701,8 +701,17 @@ function AnalystChatThread({
       };
       try {
         await spend(cost, reasonMap[currentSession.id] ?? "manual", `${currentSession.name} · ${cost} Neurons`);
-      } catch {
-        setError("Neuron deduction failed.");
+      } catch (deductErr: unknown) {
+        const errMsg = deductErr instanceof Error ? deductErr.message : String(deductErr);
+        console.error("[sessions] Neuron deduction failed (initial)", { session: currentSession.id, cost, error: errMsg });
+        // Show the actual error to the user if it's a known message, otherwise generic
+        const isInsufficient = errMsg.toLowerCase().includes("insufficient");
+        const isUpgrade = errMsg.toLowerCase().includes("upgrade");
+        setError(
+          isUpgrade ? errMsg :
+          isInsufficient ? `Insufficient Neurons. Need ${cost} Neurons for this session.` :
+          "Neuron deduction failed. Please try again."
+        );
         setIsSending(false);
         setIsInitialising(false);
         return;
@@ -841,9 +850,17 @@ function AnalystChatThread({
     };
     try {
       await spend(cost, reasonMap[session.id] ?? "manual", `${session.name} follow-up · ${cost} Neurons`);
-    } catch {
+    } catch (deductErr: unknown) {
+      const errMsg = deductErr instanceof Error ? deductErr.message : String(deductErr);
+      console.error("[sessions] Neuron deduction failed (follow-up)", { session: session.id, cost, error: errMsg });
       setMessages((prev) => [...prev, { id: `u-${Date.now()}`, sender: "user", text, cost }]);
-      setError("Neuron deduction failed.");
+      const isInsufficient = errMsg.toLowerCase().includes("insufficient");
+      const isUpgrade = errMsg.toLowerCase().includes("upgrade");
+      setError(
+        isUpgrade ? errMsg :
+        isInsufficient ? `Insufficient Neurons. Need ${cost} Neurons for this session.` :
+        "Neuron deduction failed. Please try again."
+      );
       setIsSending(false);
       return;
     }
