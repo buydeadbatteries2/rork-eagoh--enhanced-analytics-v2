@@ -622,16 +622,20 @@ export default function BannerPurchaseModal({
         h.success();
         const dateList = selectedDates.map((d) => formatDisplayDate(d)).join(", ");
         Alert.alert(
-          "Banner Purchased",
-          `Your EAGOH will be promoted on: ${dateList}.`,
+          result.duplicate ? "Already Purchased" : "Banner Purchased",
+          result.duplicate
+            ? `This banner was already purchased. Your EAGOH will be promoted on: ${dateList}.`
+            : `Your EAGOH will be promoted on: ${dateList}.`,
         );
         onPurchased();
         onClose();
       } else {
+        h.error();
         Alert.alert("Purchase Failed", result.error);
       }
     } catch (err: unknown) {
-      Alert.alert("Error", (err as Error).message ?? "Failed to purchase banner.");
+      h.error();
+      Alert.alert("Purchase Failed", "Banner purchase failed. No neurons were charged.");
     } finally {
       setPurchasing(false);
     }

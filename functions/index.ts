@@ -1,5 +1,5 @@
 /**
- * EAGOH Analyst Chat — Cloudflare Worker (v6-oi-diag-deploy-fjr-banner)
+ * EAGOH Analyst Chat — Cloudflare Worker (v6-oi-diag-deploy-fjr-banner-atomic)
  * Phase FACTION-JR — Faction join request + leader approval system
  * Phase RETAINED-OI-2 — Trusted purchase reversal status (record_exchange_purchase_reversal RPC)
  * Phase RETAINED-OI-1 + Cap — Retained Exchange Intelligence + 25% Cumulative Cap
@@ -11335,44 +11335,17 @@ async function handleSubscriptionSync(request: Request, env: Env): Promise<Respo
 }
 
 
-// ── Banner Purchase: server-side validation ─────────────────────────────────
-// Verifies authenticated user, paid-tier eligibility, EAGOH ownership,
-// listing ownership + active status, date count 1-5, no past/today dates,
-// no duplicates, server-side cost calculation, and sufficient neuron balance.
-// The client must not decide the final price — the server computes it.
-
-const BANNER_COSTS_SERVER: Record<string, number> = {
-  home: 250,
-  marketplace: 150,
-};
-
-const BANNER_PREMIUM_COSTS_SERVER = {
-  coloredBorder: 10,
-  hotBadge: 15,
-} as const;
-
-const MAX_BANNER_DATES_SERVER = 5;
-
-/** Get tomorrow's date in America/New_York as "YYYY-MM-DD". */
-function getEarliestSelectableDateET(): string {
-  const now = new Date();
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  const parts = fmt.formatToParts(now);
-  const year = parts.find((p) => p.type === "year")?.value ?? "2026";
-  const month = parts.find((p) => p.type === "month")?.value ?? "01";
-  const day = parts.find((p) => p.type === "day")?.value ?? "01";
-  const todayStr = `${year}-${month}-${day}`;
-  // Tomorrow — current day is never selectable
-  const [y, m, d] = todayStr.split("-").map(Number);
-  const tomorrow = new Date(Date.UTC(y, m - 1, d));
-  tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
-  return tomorrow.toISOString().slice(0, 10);
-}
+// ── Banner Purchase: atomic server-side transaction ────────────────────────
+// Calls the purchase_banner_atomic PostgreSQL RPC which does EVERYTHING in
+// one transaction: validation, neuron deduction, banner insert, purchase
+// history, and edge transaction logging. If any step fails, the entire
+// transaction rolls back — zero neurons deducted, zero banner rows created.
+//
+// The client never directly deducts neurons or inserts banner rows.
+// The server computes the final price — the client never decides it.
+// Idempotency: a client-supplied idempotency_key prevents duplicate purchases
+// from repeated taps or network retries. A duplicate key returns the original
+// successful result.
 
 async function handleBannerPurchase(request: Request, env: Env): Promise<Response> {
   if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
@@ -11399,6 +11372,7 @@ async function handleBannerPurchase(request: Request, env: Env): Promise<Respons
     listingId?: unknown;
     coloredBorder?: unknown;
     hotBadge?: unknown;
+    idempotencyKey?: unknown;
   };
   try {
     payload = (await request.json()) as typeof payload;
@@ -11406,19 +11380,17 @@ async function handleBannerPurchase(request: Request, env: Env): Promise<Respons
     return jsonResponse({ ok: false, error: "Invalid request." }, 400);
   }
 
-  // ── Validate location ──
-  const location = typeof payload.location === "string" ? payload.location : "";
-  if (location !== "home" && location !== "marketplace") {
-    return jsonResponse({ ok: false, error: "Invalid banner location." }, 400);
-  }
-
-  // ── Validate EAGOH ID ──
+  // ── Basic field extraction (the RPC does the full validation) ──
   const eagohId = typeof payload.eagohId === "string" ? payload.eagohId.trim() : "";
   if (!eagohId) {
     return jsonResponse({ ok: false, error: "Select an EAGOH to promote." }, 400);
   }
 
-  // ── Validate selected dates ──
+  const location = typeof payload.location === "string" ? payload.location : "";
+  if (location !== "home" && location !== "marketplace") {
+    return jsonResponse({ ok: false, error: "Invalid banner location." }, 400);
+  }
+
   const rawDates = Array.isArray(payload.selectedDates) ? payload.selectedDates : [];
   const selectedDates: string[] = [];
   for (const d of rawDates) {
@@ -11429,203 +11401,83 @@ async function handleBannerPurchase(request: Request, env: Env): Promise<Respons
   if (selectedDates.length === 0) {
     return jsonResponse({ ok: false, error: "Select at least one promotion date." }, 400);
   }
-  if (selectedDates.length > MAX_BANNER_DATES_SERVER) {
-    return jsonResponse({ ok: false, error: `You can select up to ${MAX_BANNER_DATES_SERVER} promotion dates.` }, 400);
-  }
 
-  // Check for duplicates
-  const uniqueDates = [...new Set(selectedDates)];
-  if (uniqueDates.length !== selectedDates.length) {
-    return jsonResponse({ ok: false, error: "Duplicate dates detected." }, 400);
-  }
-
-  // Check no date is today or in the past (ET)
-  const earliest = getEarliestSelectableDateET();
-  for (const d of uniqueDates) {
-    if (d < earliest) {
-      return jsonResponse({ ok: false, error: "Past dates are not selectable." }, 400);
-    }
-  }
-
-  const sortedDates = uniqueDates.sort();
-  const dayCount = sortedDates.length;
-
-  // ── Validate premium effects ──
-  const coloredBorder = payload.coloredBorder === true;
-  const hotBadge = payload.hotBadge === true;
-
-  // ── Server-side cost calculation ──
-  const base = BANNER_COSTS_SERVER[location] * dayCount;
-  const borderCost = coloredBorder ? BANNER_PREMIUM_COSTS_SERVER.coloredBorder * dayCount : 0;
-  const hotCost = hotBadge ? BANNER_PREMIUM_COSTS_SERVER.hotBadge * dayCount : 0;
-  const edgeCost = base + borderCost + hotCost;
-
-  // ── Verify paid-tier eligibility (server-side) ──
-  const { data: profileRow, error: profileErr } = await serviceClient
-    .from("profiles")
-    .select("subscription_tier, edge_subscription, edge_purchased, admin_tier_override, admin_tier_expires_at")
-    .eq("id", userId)
-    .maybeSingle();
-
-  if (profileErr || !profileRow) {
-    return jsonResponse({ ok: false, error: "Profile not found." }, 404);
-  }
-
-  const profile = profileRow as {
-    subscription_tier: string;
-    edge_subscription: number;
-    edge_purchased: number;
-    admin_tier_override: string | null;
-    admin_tier_expires_at: string | null;
-  };
-
-  // Compute effective tier (admin override takes precedence)
-  let effectiveTier = profile.subscription_tier ?? "free";
-  const override = profile.admin_tier_override;
-  if (override) {
-    const expiresAt = profile.admin_tier_expires_at;
-    if (!expiresAt || new Date(expiresAt) > new Date()) {
-      effectiveTier = override;
-    }
-  }
-
-  if (effectiveTier === "free") {
-    return jsonResponse({ ok: false, error: "Upgrade to Pro or higher to promote your EAGOH with sponsored banners." }, 403);
-  }
-
-  // ── Verify EAGOH ownership ──
-  const { data: eagohRow, error: eagohErr } = await serviceClient
-    .from("eagohs")
-    .select("id, user_id")
-    .eq("id", eagohId)
-    .maybeSingle();
-
-  if (eagohErr || !eagohRow) {
-    return jsonResponse({ ok: false, error: "EAGOH not found." }, 404);
-  }
-  if ((eagohRow as { user_id: string }).user_id !== userId) {
-    return jsonResponse({ ok: false, error: "This EAGOH does not belong to your account." }, 403);
-  }
-
-  // ── Validate listing ID ──
   const listingId = typeof payload.listingId === "string" ? payload.listingId.trim() : null;
   if (!listingId) {
     return jsonResponse({ ok: false, error: "Enter a valid EAGOH Exchange listing link." }, 400);
   }
 
-  // ── Verify listing ownership + active status ──
-  const { data: listingRow, error: listingErr } = await serviceClient
-    .from("marketplace_listings")
-    .select("id, vendor_id, active")
-    .eq("id", listingId)
-    .maybeSingle();
+  const coloredBorder = payload.coloredBorder === true;
+  const hotBadge = payload.hotBadge === true;
 
-  if (listingErr || !listingRow) {
-    return jsonResponse({ ok: false, error: "Enter a valid EAGOH Exchange listing link." }, 400);
-  }
-  const listing = listingRow as { id: string; vendor_id: string; active: boolean };
-  if (listing.vendor_id !== userId) {
-    return jsonResponse({ ok: false, error: "This listing does not belong to your account." }, 403);
-  }
-  if (!listing.active) {
-    return jsonResponse({ ok: false, error: "This Exchange listing is not currently active." }, 400);
-  }
+  // ── Generate idempotency key if not provided ──
+  // Format: banner:<userId>:<eagohId>:<location>:<sortedDates>:<border>:<hot>
+  // This makes the key deterministic — the same purchase attempt from repeated
+  // taps produces the same key, so the RPC returns the original result.
+  const sortedDates = [...new Set(selectedDates)].sort();
+  const idempotencyKey = (typeof payload.idempotencyKey === "string" && payload.idempotencyKey.trim())
+    ? payload.idempotencyKey.trim()
+    : `banner:${userId}:${eagohId}:${location}:${sortedDates.join(",")}:${coloredBorder ? 1 : 0}:${hotBadge ? 1 : 0}`;
 
-  // ── Verify sufficient neuron balance ──
-  const totalBalance = (profile.edge_subscription ?? 0) + (profile.edge_purchased ?? 0);
-  if (totalBalance < edgeCost) {
-    return jsonResponse({ ok: false, error: `Insufficient Neurons. ${edgeCost} Neurons required.` }, 400);
-  }
+  // ── Call the atomic RPC ──
+  // The RPC does everything in one PostgreSQL transaction:
+  //   idempotency check → validate → lock profile → tier check → EAGOH ownership
+  //   → listing ownership/active/EAGOH match → balance check → insert banner
+  //   → insert purchase history → deduct neurons → log edge transaction
+  // If ANY step fails, the entire transaction rolls back.
+  const { data: rpcResult, error: rpcErr } = await serviceClient
+    .rpc("purchase_banner_atomic", {
+      p_user_id: userId,
+      p_eagoh_id: eagohId,
+      p_location: location,
+      p_booking_dates: sortedDates,
+      p_listing_id: listingId,
+      p_colored_border: coloredBorder,
+      p_hot_badge: hotBadge,
+      p_idempotency_key: idempotencyKey,
+    });
 
-  // ── Deduct neurons (subscription first, then purchased) ──
-  const fromSub = Math.min(profile.edge_subscription ?? 0, edgeCost);
-  const fromPurchased = edgeCost - fromSub;
-  const nextSub = (profile.edge_subscription ?? 0) - fromSub;
-  const nextPurchased = (profile.edge_purchased ?? 0) - fromPurchased;
-
-  const { error: deductErr } = await serviceClient
-    .from("profiles")
-    .update({
-      edge_subscription: nextSub,
-      edge_purchased: nextPurchased,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", userId);
-
-  if (deductErr) {
-    return jsonResponse({ ok: false, error: "Failed to deduct Neurons. Please try again." }, 500);
-  }
-
-  // ── Log the transaction ──
-  await serviceClient.from("edge_transactions").insert({
-    user_id: userId,
-    kind: "deduction",
-    reason: "sponsored_banner",
-    amount: edgeCost,
-    bucket: fromSub > 0 && fromPurchased > 0 ? "mixed" : fromPurchased > 0 ? "purchased" : "subscription",
-    from_subscription: fromSub,
-    from_purchased: fromPurchased,
-    balance_subscription_after: nextSub,
-    balance_purchased_after: nextPurchased,
-    note: `${location} banner ${dayCount} date(s) ${sortedDates.join(",")}`,
-  });
-
-  // ── Insert the banner ──
-  const startDateStr = sortedDates[0];
-  const endDateStr = sortedDates[sortedDates.length - 1];
-
-  const { data: banner, error: bannerErr } = await serviceClient
-    .from("sponsored_banners")
-    .insert({
-      purchaser_id: userId,
-      eagoh_id: eagohId,
-      location,
-      start_date: startDateStr,
-      end_date: endDateStr,
-      booking_dates: sortedDates,
-      listing_id: listingId,
-      colored_border: coloredBorder,
-      hot_badge: hotBadge,
-      edge_cost: edgeCost,
-      active: true,
-    })
-    .select()
-    .single();
-
-  if (bannerErr) {
-    console.warn("[banner/purchase] insert banner error", bannerErr.message);
-    // Neurons were already deducted — refund
-    await serviceClient
-      .from("profiles")
-      .update({
-        edge_subscription: profile.edge_subscription ?? 0,
-        edge_purchased: profile.edge_purchased ?? 0,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", userId);
-    return jsonResponse({ ok: false, error: "Failed to create banner. Neurons were refunded." }, 500);
+  if (rpcErr) {
+    console.warn("[banner/purchase] RPC error", {
+      userIdPrefix: userId.slice(0, 8),
+      error: rpcErr.message,
+      code: rpcErr.code,
+    });
+    return jsonResponse({
+      ok: false,
+      error: "Banner purchase failed. No neurons were charged.",
+    }, 500);
   }
 
-  // ── Insert purchase history ──
-  await serviceClient.from("banner_purchases").insert({
-    user_id: userId,
-    banner_id: (banner as { id: string }).id,
-    eagoh_id: eagohId,
-    location,
-    start_date: startDateStr,
-    days: dayCount,
-    booking_dates: sortedDates,
-    listing_id: listingId,
-    colored_border: coloredBorder,
-    hot_badge: hotBadge,
-    edge_cost: edgeCost,
-  });
+  const result = rpcResult as { ok?: boolean; error?: string; duplicate?: boolean;
+    banner_id?: string; edge_cost?: number; day_count?: number;
+    new_balance?: { subscription: number; purchased: number; total: number };
+    detail?: string; sqlstate?: string };
+
+  if (!result || result.ok !== true) {
+    const errorMsg = result?.error ?? "Banner purchase failed. No neurons were charged.";
+    console.warn("[banner/purchase] RPC returned error", {
+      userIdPrefix: userId.slice(0, 8),
+      error: errorMsg,
+      detail: result?.detail,
+      sqlstate: result?.sqlstate,
+    });
+    // Determine HTTP status from the error message
+    const status = errorMsg.includes("Upgrade to Pro") ? 403
+      : errorMsg.includes("Insufficient") ? 400
+      : errorMsg.includes("does not belong") || errorMsg.includes("not currently active") || errorMsg.includes("does not match") ? 403
+      : 400;
+    return jsonResponse({ ok: false, error: errorMsg }, status);
+  }
 
   return jsonResponse({
     ok: true,
-    edgeCost,
-    dayCount,
+    bannerId: result.banner_id,
+    edgeCost: result.edge_cost,
+    dayCount: result.day_count,
     selectedDates: sortedDates,
+    duplicate: result.duplicate === true,
+    newBalance: result.new_balance,
   });
 }
 

@@ -1,5 +1,4 @@
 import { supabase } from "@/lib/supabase";
-import { spendEdge } from "@/services/edge";
 import type { UserProfile, SubscriptionTier } from "@/services/profile";
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -216,23 +215,36 @@ export function parseListingUrl(url: string): string | null {
 }
 
 /**
- * Purchase a sponsored banner placement with multi-date selection.
+ * Purchase a sponsored banner placement via the secure worker endpoint.
  *
- * Each date in `selectedDates` represents one promotion day starting at
- * 6:00 AM America/New_York. Dates need not be consecutive.
+ * The worker calls the `purchase_banner_atomic` PostgreSQL RPC which does
+ * EVERYTHING in one transaction: validation, neuron deduction, banner insert,
+ * purchase history, and edge transaction logging. If any step fails, the
+ * entire transaction rolls back — zero neurons deducted, zero banners created.
  *
- * Deducts Edge from the user's wallet using subscription-first logic.
- * Inserts a `sponsored_banners` row and a `banner_purchases` history row.
+ * The client NEVER directly deducts neurons or inserts banner rows.
+ * The server computes the final price — the client never decides it.
  *
- * The effective tier is passed through to spendEdge so that dev test tiers
- * (Expo Go) and admin overrides are respected — not just the raw DB
- * subscription_tier column.
+ * Idempotency: a deterministic key prevents duplicate purchases from repeated
+ * taps or network retries. A duplicate key returns the original successful result.
  */
+
+const FUNCTIONS_BASE_URL = process.env.EXPO_PUBLIC_RORK_FUNCTIONS_URL ?? "";
+
+export type BannerPurchaseResult = {
+  ok: true;
+  bannerId: string;
+  edgeCost: number;
+  dayCount: number;
+  selectedDates: string[];
+  duplicate: boolean;
+  newBalance?: { subscription: number; purchased: number; total: number };
+} | { ok: false; error: string };
+
 export async function purchaseBanner(
   input: BannerPurchaseInput,
-  profile: UserProfile,
-): Promise<{ ok: true; banner: SponsoredBanner; purchase: BannerPurchase }
-  | { ok: false; error: string }> {
+  _profile: UserProfile,
+): Promise<BannerPurchaseResult> {
   const {
     userId,
     eagohId,
@@ -241,10 +253,9 @@ export async function purchaseBanner(
     listingId,
     coloredBorder,
     hotBadge,
-    effectiveTier,
   } = input;
 
-  // ── Validate selected dates ──
+  // ── Client-side pre-validation (fast feedback before network round-trip) ──
   if (!selectedDates || selectedDates.length === 0) {
     return { ok: false, error: "Select at least one promotion date." };
   }
@@ -252,128 +263,71 @@ export async function purchaseBanner(
     return { ok: false, error: `You can select up to ${MAX_BANNER_DAYS} promotion dates.` };
   }
 
-  // Check for duplicates
   const uniqueDates = [...new Set(selectedDates)];
   if (uniqueDates.length !== selectedDates.length) {
     return { ok: false, error: "Duplicate dates detected. Please remove duplicates." };
   }
 
-  // Sort dates chronologically
   const sortedDates = uniqueDates.sort();
-  const startDateStr = sortedDates[0];
-  const endDateStr = sortedDates[sortedDates.length - 1];
-  const dayCount = sortedDates.length;
 
-  // Validate each date format (YYYY-MM-DD)
   for (const d of sortedDates) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) {
       return { ok: false, error: `Invalid date format: ${d}` };
     }
-    const parsed = new Date(d + "T06:00:00-05:00");
-    if (isNaN(parsed.getTime())) {
-      return { ok: false, error: `Invalid date: ${d}` };
-    }
   }
 
-  // ── Validate listing ownership if listingId is provided ──
-  if (listingId) {
+  if (!listingId) {
+    return { ok: false, error: "Enter a valid EAGOH Exchange listing link." };
+  }
+
+  // ── Client-side listing pre-validation (fast feedback) ──
+  if (userId) {
     const listingResult = await validateListingOwnership(supabase, listingId, userId);
     if (!listingResult.ok) {
       return { ok: false, error: listingResult.error };
     }
   }
 
-  // Compute cost from date count (not a separate duration value)
-  const edgeCost = computeBannerCost(location, dayCount, coloredBorder, hotBadge);
+  if (!FUNCTIONS_BASE_URL) {
+    return { ok: false, error: "Backend not configured. Cannot process purchase." };
+  }
 
-  // Deduct Edge first (subscription first, purchased second)
-  // Pass effectiveTier so spendEdge uses the same normalized tier as the UI
+  // ── Get JWT for worker auth ──
+  const { data: sessionData } = await supabase.auth.getSession();
+  const token = sessionData.session?.access_token ?? null;
+  if (!token) {
+    return { ok: false, error: "Authentication required." };
+  }
+
+  // ── Generate deterministic idempotency key ──
+  // Same purchase params = same key → duplicate taps return original result
+  const idempotencyKey = `banner:${userId}:${eagohId}:${location}:${sortedDates.join(",")}:${coloredBorder ? 1 : 0}:${hotBadge ? 1 : 0}`;
+
+  // ── Call the worker endpoint ──
   try {
-    await spendEdge(
-      userId,
-      profile,
-      edgeCost,
-      "sponsored_banner",
-      `${location} banner ${dayCount} date(s) ${sortedDates.join(",")}`,
-      effectiveTier,
-    );
-  } catch (err: unknown) {
-    const message = (err as Error).message ?? "Neuron deduction failed";
-    if (message.toLowerCase().includes("insufficient")) {
-      return { ok: false, error: `Insufficient Neurons. ${edgeCost} Neurons required.` };
-    }
-    if (message.toLowerCase().includes("upgrade")) {
-      return { ok: false, error: "Upgrade to Pro or higher to promote your EAGOH with sponsored banners." };
-    }
-    return { ok: false, error: message };
+    const res = await fetch(`${FUNCTIONS_BASE_URL}/banner/purchase`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        eagohId,
+        location,
+        selectedDates: sortedDates,
+        listingId,
+        coloredBorder,
+        hotBadge,
+        idempotencyKey,
+      }),
+    });
+
+    const data = (await res.json()) as BannerPurchaseResult;
+    return data;
+  } catch (err) {
+    console.warn("[sponsoredBanners] purchaseBanner request failed", (err as Error).message);
+    return { ok: false, error: "Banner purchase failed. No neurons were charged." };
   }
-
-  // Insert banner with booking_dates array and listing_id
-  const { data: banner, error: bannerErr } = await supabase
-    .from("sponsored_banners")
-    .insert({
-      purchaser_id: userId,
-      eagoh_id: eagohId,
-      location,
-      start_date: startDateStr,
-      end_date: endDateStr,
-      booking_dates: sortedDates,
-      listing_id: listingId ?? null,
-      colored_border: coloredBorder,
-      hot_badge: hotBadge,
-      edge_cost: edgeCost,
-      active: true,
-    })
-    .select()
-    .single();
-
-  if (bannerErr) {
-    console.warn("[sponsoredBanners] insert banner error", bannerErr.message);
-    return { ok: false, error: "Failed to create banner. Neurons were deducted — contact support." };
-  }
-
-  // Insert purchase history
-  const { data: purchase, error: purchaseErr } = await supabase
-    .from("banner_purchases")
-    .insert({
-      user_id: userId,
-      banner_id: banner.id,
-      eagoh_id: eagohId,
-      location,
-      start_date: startDateStr,
-      days: dayCount,
-      booking_dates: sortedDates,
-      listing_id: listingId ?? null,
-      colored_border: coloredBorder,
-      hot_badge: hotBadge,
-      edge_cost: edgeCost,
-    })
-    .select()
-    .single();
-
-  if (purchaseErr) {
-    console.warn("[sponsoredBanners] insert purchase error", purchaseErr.message);
-  }
-
-  return {
-    ok: true,
-    banner: banner as SponsoredBanner,
-    purchase: (purchase ?? {
-      id: "",
-      user_id: userId,
-      banner_id: banner.id,
-      eagoh_id: eagohId,
-      location,
-      start_date: startDateStr,
-      days: dayCount,
-      booking_dates: sortedDates,
-      listing_id: listingId ?? null,
-      colored_border: coloredBorder,
-      hot_badge: hotBadge,
-      edge_cost: edgeCost,
-      created_at: new Date().toISOString(),
-    }) as BannerPurchase,
-  };
 }
 
 // ── Purchase history ───────────────────────────────────────────────────
