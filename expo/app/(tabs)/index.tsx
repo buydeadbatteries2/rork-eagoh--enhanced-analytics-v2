@@ -43,14 +43,13 @@ import { useEagohs } from "@/providers/EagohProvider";
 import { useProfile } from "@/providers/ProfileProvider";
 import { INTELLIGENCE_DOMAINS, getDomainColor } from "@/services/domains";
 import {
-  computeBannerCost,
   getActiveBanners,
-  purchaseBanner,
   recordBannerImpression,
   recordBannerTap,
   recordBannerTapHold,
   type EnrichedBanner,
 } from "@/services/sponsoredBanners";
+import BannerPurchaseModal from "@/app/_components/BannerPurchaseModal";
 import { canTransact } from "@/services/marketplace";
 import { FreeUserWelcomePopup } from "@/app/_components/FreeUserWelcomePopup";
 import type { EagohRecord } from "@/services/eagohs";
@@ -63,7 +62,7 @@ import { startupLog } from "@/utils/startupLogger";
 
 type Phase = "loading" | "onboarding" | "auth" | "app";
 type CardTone = "cyan" | "gold" | "violet" | "ember" | "success";
-type HomeSection = { id: string; kind: "hero" | "sponsored" | "trending" | "feed" | "analyst" | "quickcheck" | "recent" | "favorites" | "labs" | "factions" | "leaderboards" | "domains" };
+type HomeSection = { id: string; kind: "hero" | "promote" | "sponsored" | "trending" | "feed" | "analyst" | "quickcheck" | "recent" | "favorites" | "labs" | "factions" | "leaderboards" | "domains" };
 type CardProps = { title: string; subtitle: string; meta?: string; tone?: "cyan" | "gold" | "violet"; icon?: React.ReactNode };
 
 function getTimeAgo(date: Date): string {
@@ -86,6 +85,7 @@ const onboarding = [
 
 const homeSections: HomeSection[] = [
   { id: "hero", kind: "hero" },
+  { id: "promote", kind: "promote" },
   { id: "sponsored", kind: "sponsored" },
   { id: "domains", kind: "domains" },
   { id: "leaderboards", kind: "leaderboards" },
@@ -886,6 +886,12 @@ function HomeApp({ userId, onPromote }: { userId: string | null; onPromote: () =
   }, [h, router]);
   const renderSection = useCallback(({ item }: { item: HomeSection }) => {
     if (item.kind === "hero") return <HeroSection onEdgePress={handleEdgeStore} />;
+    if (item.kind === "promote") return (
+      <Pressable onPress={onPromote} style={styles.promoteBannerButton}>
+        <Megaphone color={palette.cyan} size={18} />
+        <Text style={styles.promoteBannerText}>Promote Your EAGOH · From 250 Neurons/day</Text>
+      </Pressable>
+    );
     if (item.kind === "sponsored") return <SponsoredSection userId={userId} />;
     if (item.kind === "domains") return <HomeDomainsSection />;
     if (item.kind === "leaderboards") return <View><SectionHeader eyebrow="RANKINGS" title="EAGOH Leaderboards" action="View all" /><LeaderboardsFeatureCard /></View>;
@@ -909,202 +915,10 @@ function HomeApp({ userId, onPromote }: { userId: string | null; onPromote: () =
             <FactionActivityFeed />
             <AnalystAccess />
             <FavoritesSection />
-            <Pressable onPress={onPromote} style={styles.promoteBannerButton}>
-              <Megaphone color={palette.cyan} size={18} />
-              <Text style={styles.promoteBannerText}>Promote Your EAGOH · From 250 Neurons/day</Text>
-            </Pressable>
           </View>
         }
       />
     </SafeAreaView>
-  );
-}
-
-function BannerPurchaseModal({
-  visible,
-  onClose,
-  onPurchased,
-  userId,
-}: {
-  visible: boolean;
-  onClose: () => void;
-  onPurchased: () => void;
-  userId: string | null;
-}): JSX.Element {
-  const h = useHaptics();
-  const { eagohs } = useEagohs();
-  const { profile, effectiveSubscriptionTier: tier } = useProfile();
-  const [selectedEagohId, setSelectedEagohId] = useState<string>("");
-  const [location, setLocation] = useState<"home" | "marketplace">("home");
-  const [startDate, setStartDate] = useState<string>(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    return d.toISOString().slice(0, 10);
-  });
-  const [days, setDays] = useState<number>(1);
-  const [coloredBorder, setColoredBorder] = useState<boolean>(false);
-  const [hotBadge, setHotBadge] = useState<boolean>(false);
-  const [purchasing, setPurchasing] = useState(false);
-
-  const myEagohs = (eagohs ?? []).filter((e: EagohRecord) => e.user_id === userId);
-  const totalCost = computeBannerCost(location, days, coloredBorder, hotBadge);
-
-  const handlePurchase = async () => {
-    if (!userId || !profile || !selectedEagohId) return;
-    setPurchasing(true);
-    try {
-      const result = await purchaseBanner(
-        { userId, eagohId: selectedEagohId, location, startDate, days, coloredBorder, hotBadge },
-        profile,
-      );
-      if (result.ok) {
-        h.success();
-        Alert.alert("Banner Purchased", `Your EAGOH will be promoted for ${days} day(s) starting ${startDate}.`);
-        onPurchased();
-        onClose();
-      } else {
-        Alert.alert("Purchase Failed", result.error);
-      }
-    } catch (err: unknown) {
-      Alert.alert("Error", (err as Error).message ?? "Failed to purchase banner.");
-    } finally {
-      setPurchasing(false);
-    }
-  };
-
-  const reset = () => {
-    setSelectedEagohId("");
-    setLocation("home");
-    setDays(1);
-    setColoredBorder(false);
-    setHotBadge(false);
-  };
-
-  return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={() => { reset(); onClose(); }}>
-      <View style={styles.modalOverlay}>
-        <View style={styles.modalSheet}>
-          <LinearGradient colors={[palette.graphite, palette.void]} style={StyleSheet.absoluteFill} />
-          <View style={styles.modalHandle} />
-          <View style={styles.modalHeaderRow}>
-            <Megaphone color={palette.cyan} size={20} />
-            <Text style={styles.modalTitle}>Promote Your EAGOH</Text>
-            <Pressable onPress={() => { reset(); onClose(); }} style={styles.modalClose}>
-              <X color={palette.muted} size={20} />
-            </Pressable>
-          </View>
-
-          {/* Select EAGOH */}
-          <Text style={styles.modalSectionLabel}>Select EAGOH</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRail}>
-            {myEagohs.map((e: EagohRecord) => (
-              <Pressable
-                key={e.id}
-                onPress={() => setSelectedEagohId(e.id)}
-                style={[styles.chip, selectedEagohId === e.id && styles.activeChip]}
-              >
-                <Text style={[styles.chipText, selectedEagohId === e.id && styles.activeChipText]}>{e.name}</Text>
-              </Pressable>
-            ))}
-            {myEagohs.length === 0 && <Text style={styles.emptyHint}>No EAGOHs. Forge one first.</Text>}
-          </ScrollView>
-
-          {/* Location */}
-          <Text style={styles.modalSectionLabel}>Banner Location</Text>
-          <View style={styles.locationRow}>
-            <Pressable
-              onPress={() => setLocation("home")}
-              style={[styles.locationChip, location === "home" && styles.locationChipActive]}
-            >
-              <Text style={[styles.locationChipText, location === "home" && styles.locationChipTextActive]}>Home Page</Text>
-              <Text style={[styles.locationPrice, location === "home" && styles.locationPriceActive]}>250 Neurons/day</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => setLocation("marketplace")}
-              style={[styles.locationChip, location === "marketplace" && styles.locationChipActive]}
-            >
-              <Text style={[styles.locationChipText, location === "marketplace" && styles.locationChipTextActive]}>Marketplace</Text>
-              <Text style={[styles.locationPrice, location === "marketplace" && styles.locationPriceActive]}>150 Neurons/day</Text>
-            </Pressable>
-          </View>
-
-          {/* Start Date */}
-          <Text style={styles.modalSectionLabel}>Start Date (6 AM ET)</Text>
-          <TextInput
-            value={startDate}
-            onChangeText={setStartDate}
-            placeholder="YYYY-MM-DD"
-            placeholderTextColor={palette.muted}
-            style={styles.dateInput}
-          />
-
-          {/* Duration */}
-          <Text style={styles.modalSectionLabel}>Duration (1-5 days)</Text>
-          <View style={styles.daysRow}>
-            {[1, 2, 3, 4, 5].map((d) => (
-              <Pressable
-                key={d}
-                onPress={() => setDays(d)}
-                style={[styles.dayChip, days === d && styles.dayChipActive]}
-              >
-                <Text style={[styles.dayChipText, days === d && styles.dayChipTextActive]}>{d}</Text>
-              </Pressable>
-            ))}
-          </View>
-
-          {/* Premium Effects */}
-          <Text style={styles.modalSectionLabel}>Premium Effects</Text>
-          <View style={styles.premiumRow}>
-            <Pressable
-              onPress={() => setColoredBorder(!coloredBorder)}
-              style={[styles.premiumChip, coloredBorder && styles.premiumChipActive]}
-            >
-              <Text style={[styles.premiumChipText, coloredBorder && styles.premiumChipTextActive]}>Colored Border</Text>
-              <Text style={[styles.premiumChipPrice, coloredBorder && styles.premiumChipPriceActive]}>+10 Neurons/day</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => setHotBadge(!hotBadge)}
-              style={[styles.premiumChip, hotBadge && styles.premiumChipActive]}
-            >
-              <Text style={[styles.premiumChipText, hotBadge && styles.premiumChipTextActive]}>Hot Badge</Text>
-              <Text style={[styles.premiumChipPrice, hotBadge && styles.premiumChipPriceActive]}>+15 Neurons/day</Text>
-            </Pressable>
-          </View>
-
-          {/* Total */}
-          <View style={styles.totalRow}>
-            <Text style={styles.totalLabel}>Total Cost</Text>
-            <View style={styles.totalValueRow}>
-              <Coins color={palette.gold} size={18} />
-              <Text style={styles.totalValue}>{totalCost} Neurons</Text>
-            </View>
-          </View>
-          <Text style={styles.totalBreakdown}>
-            {location === "home" ? "Home" : "Marketplace"} · {days} day(s){coloredBorder ? " · Border" : ""}{hotBadge ? " · Hot Badge" : ""}
-          </Text>
-
-          {/* Confirm */}
-          <Pressable
-            onPress={handlePurchase}
-            disabled={purchasing || !selectedEagohId}
-            style={({ pressed }) => [
-              styles.confirmButton,
-              (purchasing || !selectedEagohId) && styles.confirmButtonDisabled,
-              pressed && styles.pressed,
-            ]}
-          >
-            {purchasing ? (
-              <ActivityIndicator color={palette.void} size="small" />
-            ) : (
-              <>
-                <Calendar color={palette.void} size={17} />
-                <Text style={styles.confirmButtonText}>Purchase Banner</Text>
-              </>
-            )}
-          </Pressable>
-        </View>
-      </View>
-    </Modal>
   );
 }
 
@@ -1152,6 +966,7 @@ export default function HomeScreen(): JSX.Element {
         onClose={() => setPurchaseModal(false)}
         onPurchased={() => {}}
         userId={user?.id ?? null}
+        defaultLocation="home"
       />
       <FreeUserWelcomePopup />
     </View>

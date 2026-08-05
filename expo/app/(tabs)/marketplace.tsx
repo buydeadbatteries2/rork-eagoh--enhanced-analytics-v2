@@ -93,6 +93,7 @@ import {
   recordBannerTapHold,
   type EnrichedBanner,
 } from "@/services/sponsoredBanners";
+import BannerPurchaseModal from "@/app/_components/BannerPurchaseModal";
 import {
   getPublicEagohCredentials,
   type EagohCredentialsRow,
@@ -2251,7 +2252,7 @@ const MktSponsoredBanner = memo(function MktSponsoredBanner({ item, userId, repu
   );
 });
 
-const MktSponsoredCarousel = memo(function MktSponsoredCarousel({ userId }: { userId: string | null }): JSX.Element | null {
+const MktSponsoredCarousel = memo(function MktSponsoredCarousel({ userId, onPromote }: { userId: string | null; onPromote: () => void }): JSX.Element | null {
   const [banners, setBanners] = useState<EnrichedBanner[]>([]);
   const [loading, setLoading] = useState(true);
   const [bannerRepMap, setBannerRepMap] = useState<Map<string, ReputationRow>>(new Map());
@@ -2271,7 +2272,6 @@ const MktSponsoredCarousel = memo(function MktSponsoredCarousel({ userId }: { us
   }, []);
 
   if (loading) return null;
-  if (banners.length === 0) return null;
 
   return (
     <View style={{ marginTop: 16, gap: 10 }}>
@@ -2280,13 +2280,27 @@ const MktSponsoredCarousel = memo(function MktSponsoredCarousel({ userId }: { us
           <Megaphone color={palette.gold} size={15} />
           <Text style={styles.sectionTitle}>Sponsored EAGOHs</Text>
         </View>
-        <Text style={styles.sectionCount}>{banners.length}</Text>
+        <Pressable onPress={onPromote} style={({ pressed }) => [styles.promoteCtaChip, pressed && { opacity: 0.8 }]}>
+          <Megaphone color={palette.cyan} size={12} />
+          <Text style={styles.promoteCtaText}>Promote yours</Text>
+        </Pressable>
       </View>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingRight: 16 }} {...HORIZONTAL_LIST_PERFORMANCE_PROPS}>
-        {banners.map((b) => (
-          <MktSponsoredBanner key={b.id} item={b} userId={userId} reputation={bannerRepMap.get(b.eagoh_id)} />
-        ))}
-      </ScrollView>
+      {banners.length === 0 ? (
+        <View style={styles.emptyBannerCard}>
+          <Megaphone color={palette.muted} size={24} />
+          <Text style={styles.emptyBannerText}>No active Marketplace sponsors. Promote your EAGOH to be featured here.</Text>
+          <Pressable onPress={onPromote} style={({ pressed }) => [styles.promoteCtaBtn, pressed && { opacity: 0.85 }]}>
+            <Megaphone color={palette.void} size={13} />
+            <Text style={styles.promoteCtaBtnText}>Promote Your EAGOH · From 150 Neurons/day</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingRight: 16 }} {...HORIZONTAL_LIST_PERFORMANCE_PROPS}>
+          {banners.map((b) => (
+            <MktSponsoredBanner key={b.id} item={b} userId={userId} reputation={bannerRepMap.get(b.eagoh_id)} />
+          ))}
+        </ScrollView>
+      )}
     </View>
   );
 });
@@ -2349,6 +2363,7 @@ export default function MarketplaceScreen(): JSX.Element {
 
   const [showSourceInfo, setShowSourceInfo] = useState(false);
   const [publicProfileVendorId, setPublicProfileVendorId] = useState<string | null>(null);
+  const [bannerModalVisible, setBannerModalVisible] = useState(false);
 
   const isPaid = canTransact(effectiveSubscriptionTier);
 
@@ -2490,6 +2505,9 @@ export default function MarketplaceScreen(): JSX.Element {
       <View>
         <Hero />
         <VendorStatsCard />
+
+        {/* Promoted Signals / Sponsored EAGOHs — below Vendor Dashboard, above tabs */}
+        <MktSponsoredCarousel userId={user?.id ?? null} onPromote={() => setBannerModalVisible(true)} />
 
         {/* Active Syncs (above filters, compact) */}
         {isPaid && activeSyncs.length > 0 && (
@@ -2821,11 +2839,6 @@ export default function MarketplaceScreen(): JSX.Element {
     return null;
   };
 
-  const renderSponsoredCarousel = useCallback(() => {
-    if (tab !== "browse") return null;
-    return <MktSponsoredCarousel userId={user?.id ?? null} />;
-  }, [tab, user?.id]);
-
   // ── Free-tier lock ──────────────────────────────────────────────
   if (!isPaid) {
     return (
@@ -2860,7 +2873,7 @@ export default function MarketplaceScreen(): JSX.Element {
           data={[] as any[]}
           renderItem={null}
           ListHeaderComponent={renderHeader}
-          ListFooterComponent={() => (<View>{renderListings()}{renderSponsoredCarousel()}</View>)}
+          ListFooterComponent={() => (<View>{renderListings()}</View>)}
           keyExtractor={() => "dummy"}
           contentContainerStyle={styles.scroll}
           showsVerticalScrollIndicator={false}
@@ -2913,6 +2926,13 @@ export default function MarketplaceScreen(): JSX.Element {
         userId={publicProfileVendorId}
         currentUserId={user?.id ?? null}
         onClose={() => setPublicProfileVendorId(null)}
+      />
+      <BannerPurchaseModal
+        visible={bannerModalVisible}
+        onClose={() => setBannerModalVisible(false)}
+        onPurchased={() => {}}
+        userId={user?.id ?? null}
+        defaultLocation="marketplace"
       />
     </View>
   );
@@ -3009,6 +3029,43 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
     borderRadius: 5,
   },
+  // Sponsored EAGOHs — promote CTA + empty state
+  promoteCtaChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "rgba(108,230,255,0.28)",
+    backgroundColor: "rgba(108,230,255,0.08)",
+  },
+  promoteCtaText: { color: palette.cyan, fontSize: 11, fontWeight: "900" },
+  emptyBannerCard: {
+    minHeight: 88,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: palette.line,
+    borderStyle: "dashed",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    padding: 16,
+  },
+  emptyBannerText: { color: palette.muted, fontSize: 13, textAlign: "center", lineHeight: 18, fontWeight: "700" },
+  promoteCtaBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    minHeight: 40,
+    borderRadius: 5,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    backgroundColor: palette.cyan,
+    marginTop: 4,
+  },
+  promoteCtaBtnText: { color: palette.void, fontSize: 12, fontWeight: "900" },
 
   // Filters
   filterPanel: {
