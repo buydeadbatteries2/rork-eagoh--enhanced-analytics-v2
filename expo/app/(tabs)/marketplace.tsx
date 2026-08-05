@@ -2937,6 +2937,8 @@ export default function MarketplaceScreen(): JSX.Element {
         onPurchased={() => {
           queryClient.invalidateQueries({ queryKey: ["myBannerBookings"] });
           queryClient.invalidateQueries({ queryKey: ["myActiveBanners"] });
+          queryClient.invalidateQueries({ queryKey: ["edge", "transactions"] });
+          queryClient.invalidateQueries({ queryKey: ["profile"] });
         }}
         userId={user?.id ?? null}
         defaultLocation="marketplace"

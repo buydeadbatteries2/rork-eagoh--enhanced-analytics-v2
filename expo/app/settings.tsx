@@ -26,6 +26,7 @@ import {
   Lock,
   LogOut,
   Mail,
+  Activity,
   Megaphone,
   MessageCircle,
   RefreshCcw,
@@ -82,6 +83,7 @@ import { useRef } from "react";
 import EagohShareCard from "@/app/_components/EagohShareCard";
 import SocialLinksEditor from "@/app/_components/SocialLinksEditor";
 import BannerBookingsHistory from "@/app/_components/BannerBookingsHistory";
+import NeuronActivity from "@/app/_components/NeuronActivity";
 
 type P = typeof palette;
 
@@ -2507,6 +2509,19 @@ export default function SettingsScreen(): JSX.Element {
             onPress: navigateTo("/edge-store"),
           },
 
+        ],
+      },
+      {
+        id: "neuronActivity",
+        title: "Neuron Activity",
+        titleIcon: <Activity color={pal.cyan} size={15} />,
+        rows: [
+          {
+            kind: "custom" as const,
+            render: () => (
+              <NeuronActivity userId={user?.id ?? null} pal={pal} />
+            ),
+          },
         ],
       },
       {
