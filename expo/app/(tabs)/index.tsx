@@ -145,6 +145,7 @@ const MiniImage = React.memo(function MiniImage({ accent, label }: { accent: Car
 
 const SponsoredBanner = React.memo(function SponsoredBanner({ item, userId, reputation }: { item: EnrichedBanner; userId: string | null; reputation: ReputationRow | undefined }): JSX.Element {
   const h = useHaptics();
+  const router = useRouter();
   const [expanded, setExpanded] = useState<boolean>(false);
   const eagohRank: RankTier = (reputation?.rank as RankTier) ?? "Dormant";
   const repScore = reputation?.reputation_score ?? 0;
@@ -158,6 +159,10 @@ const SponsoredBanner = React.memo(function SponsoredBanner({ item, userId, repu
 
   const onPress = (): void => {
     if (userId) recordBannerTap(item.id, userId).catch(() => undefined);
+    // Open the exact Exchange listing if available
+    if (item.listing_id) {
+      router.push({ pathname: "/public-listing", params: { id: item.listing_id } } as never);
+    }
   };
 
   const onLongPress = (): void => {

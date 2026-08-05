@@ -2200,6 +2200,7 @@ const MyListingCard = memo(function MyListingCard({
 
 const MktSponsoredBanner = memo(function MktSponsoredBanner({ item, userId, reputation }: { item: EnrichedBanner; userId: string | null; reputation: ReputationRow | undefined }): JSX.Element {
   const h = useHaptics();
+  const router = useRouter();
   const eagohRank: RankTier = (reputation?.rank as RankTier) ?? "Dormant";
   const repScore = reputation?.reputation_score ?? 0;
   const accent = repScore > 0 ? rankColor(eagohRank) : (item.vendor_rank === "S-TIER" ? palette.gold : item.vendor_rank === "ELITE" ? palette.cyan : palette.violet);
@@ -2217,6 +2218,9 @@ const MktSponsoredBanner = memo(function MktSponsoredBanner({ item, userId, repu
       }}
       onPress={() => {
         if (userId) recordBannerTap(item.id, userId).catch(() => undefined);
+        if (item.listing_id) {
+          router.push({ pathname: "/public-listing", params: { id: item.listing_id } } as never);
+        }
       }}
       delayLongPress={280}
       style={({ pressed }) => [

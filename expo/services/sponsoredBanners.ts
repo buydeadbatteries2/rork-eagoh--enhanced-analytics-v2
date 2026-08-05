@@ -1,6 +1,6 @@
 import { supabase } from "@/lib/supabase";
 import { spendEdge } from "@/services/edge";
-import type { UserProfile } from "@/services/profile";
+import type { UserProfile, SubscriptionTier } from "@/services/profile";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -13,6 +13,8 @@ export type SponsoredBanner = {
   location: BannerLocation;
   start_date: string;
   end_date: string;
+  booking_dates: string[] | null;
+  listing_id: string | null;
   colored_border: boolean;
   hot_badge: boolean;
   edge_cost: number;
@@ -28,6 +30,8 @@ export type BannerPurchase = {
   location: BannerLocation;
   start_date: string;
   days: number;
+  booking_dates: string[] | null;
+  listing_id: string | null;
   colored_border: boolean;
   hot_badge: boolean;
   edge_cost: number;
@@ -53,6 +57,7 @@ export type EnrichedBanner = SponsoredBanner & {
   quality_score: number;
   sync_score: number;
   vendor_rank: string;
+  listing_id: string | null;
 };
 
 export type BannerPurchaseInput = {
@@ -61,8 +66,11 @@ export type BannerPurchaseInput = {
   location: BannerLocation;
   startDate: string;
   days: number;
+  selectedDates: string[];
+  listingId: string | null;
   coloredBorder: boolean;
   hotBadge: boolean;
+  effectiveTier?: SubscriptionTier;
 };
 
 // ── Cost constants ─────────────────────────────────────────────────────
@@ -81,6 +89,7 @@ export const MAX_BANNER_DAYS = 5;
 
 /**
  * Compute the total Edge cost for a banner purchase including premium effects.
+ * Uses the number of days (or selected dates count) as the multiplier.
  */
 export function computeBannerCost(
   location: BannerLocation,
@@ -92,6 +101,20 @@ export function computeBannerCost(
   const borderCost = coloredBorder ? PREMIUM_COSTS.coloredBorder * days : 0;
   const hotCost = hotBadge ? PREMIUM_COSTS.hotBadge * days : 0;
   return base + borderCost + hotCost;
+}
+
+/**
+ * Compute the total Edge cost for a multi-date banner purchase.
+ * Each selected date represents one promotion day.
+ */
+export function computeBannerCostForDates(
+  location: BannerLocation,
+  selectedDates: string[],
+  coloredBorder: boolean,
+  hotBadge: boolean,
+): number {
+  const dayCount = selectedDates.length;
+  return computeBannerCost(location, dayCount, coloredBorder, hotBadge);
 }
 
 // ── Active banners ─────────────────────────────────────────────────────
@@ -154,57 +177,138 @@ export async function getMyActiveBanners(userId: string): Promise<EnrichedBanner
 // ── Purchase flow ──────────────────────────────────────────────────────
 
 /**
- * Purchase a sponsored banner placement. Deducts Edge from the user's wallet
- * using subscription-first logic. Inserts a `sponsored_banners` row and a
- * `banner_purchases` history row in a transaction.
+ * Validate that a listing ID belongs to the user and is active.
+ * Returns the listing row or an error message.
+ */
+async function validateListingOwnership(
+  supabaseClient: typeof supabase,
+  listingId: string,
+  userId: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { data: listing, error } = await supabaseClient
+    .from("marketplace_listings")
+    .select("id, vendor_id, active")
+    .eq("id", listingId)
+    .maybeSingle();
+
+  if (error || !listing) {
+    return { ok: false, error: "Enter a valid EAGOH Exchange listing link." };
+  }
+  const row = listing as { id: string; vendor_id: string; active: boolean };
+  if (row.vendor_id !== userId) {
+    return { ok: false, error: "This listing does not belong to your account." };
+  }
+  if (!row.active) {
+    return { ok: false, error: "This Exchange listing is not currently active." };
+  }
+  return { ok: true };
+}
+
+/** Parse a listing URL and extract the listing ID. */
+export function parseListingUrl(url: string): string | null {
+  const trimmed = url.trim();
+  // Accept https://eagoh.app/listing/<uuid>
+  const match = trimmed.match(/^https:\/\/eagoh\.app\/listing\/([a-f0-9-]{36})$/i);
+  if (match) return match[1];
+  // Also accept raw UUID
+  if (/^[a-f0-9-]{36}$/i.test(trimmed)) return trimmed;
+  return null;
+}
+
+/**
+ * Purchase a sponsored banner placement with multi-date selection.
+ *
+ * Each date in `selectedDates` represents one promotion day starting at
+ * 6:00 AM America/New_York. Dates need not be consecutive.
+ *
+ * Deducts Edge from the user's wallet using subscription-first logic.
+ * Inserts a `sponsored_banners` row and a `banner_purchases` history row.
+ *
+ * The effective tier is passed through to spendEdge so that dev test tiers
+ * (Expo Go) and admin overrides are respected — not just the raw DB
+ * subscription_tier column.
  */
 export async function purchaseBanner(
   input: BannerPurchaseInput,
   profile: UserProfile,
 ): Promise<{ ok: true; banner: SponsoredBanner; purchase: BannerPurchase }
   | { ok: false; error: string }> {
-  const { userId, eagohId, location, startDate, days, coloredBorder, hotBadge } = input;
+  const {
+    userId,
+    eagohId,
+    location,
+    selectedDates,
+    listingId,
+    coloredBorder,
+    hotBadge,
+    effectiveTier,
+  } = input;
 
-  // Validate
-  if (days < 1 || days > MAX_BANNER_DAYS) {
-    return { ok: false, error: `Duration must be 1-${MAX_BANNER_DAYS} days.` };
+  // ── Validate selected dates ──
+  if (!selectedDates || selectedDates.length === 0) {
+    return { ok: false, error: "Select at least one promotion date." };
+  }
+  if (selectedDates.length > MAX_BANNER_DAYS) {
+    return { ok: false, error: `You can select up to ${MAX_BANNER_DAYS} promotion dates.` };
   }
 
-  // Parse start date. Banner goes live at 6:00 AM ET on the selected date.
-  // For storage: start_date is the selected date, end_date is start_date + days - 1.
-  const start = new Date(startDate + "T06:00:00-05:00"); // 6 AM Eastern
-  if (isNaN(start.getTime())) {
-    return { ok: false, error: "Invalid start date." };
+  // Check for duplicates
+  const uniqueDates = [...new Set(selectedDates)];
+  if (uniqueDates.length !== selectedDates.length) {
+    return { ok: false, error: "Duplicate dates detected. Please remove duplicates." };
   }
 
-  // start_date in DB is just the date part
-  const startDateStr = startDate; // already YYYY-MM-DD
-  const endDate = new Date(start);
-  endDate.setDate(endDate.getDate() + days - 1);
-  const endDateStr = endDate.toISOString().slice(0, 10);
+  // Sort dates chronologically
+  const sortedDates = uniqueDates.sort();
+  const startDateStr = sortedDates[0];
+  const endDateStr = sortedDates[sortedDates.length - 1];
+  const dayCount = sortedDates.length;
 
-  // Compute cost
-  const edgeCost = computeBannerCost(location, days, coloredBorder, hotBadge);
+  // Validate each date format (YYYY-MM-DD)
+  for (const d of sortedDates) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+      return { ok: false, error: `Invalid date format: ${d}` };
+    }
+    const parsed = new Date(d + "T06:00:00-05:00");
+    if (isNaN(parsed.getTime())) {
+      return { ok: false, error: `Invalid date: ${d}` };
+    }
+  }
+
+  // ── Validate listing ownership if listingId is provided ──
+  if (listingId) {
+    const listingResult = await validateListingOwnership(supabase, listingId, userId);
+    if (!listingResult.ok) {
+      return { ok: false, error: listingResult.error };
+    }
+  }
+
+  // Compute cost from date count (not a separate duration value)
+  const edgeCost = computeBannerCost(location, dayCount, coloredBorder, hotBadge);
 
   // Deduct Edge first (subscription first, purchased second)
-  let updatedProfile: UserProfile;
+  // Pass effectiveTier so spendEdge uses the same normalized tier as the UI
   try {
-    updatedProfile = await spendEdge(
+    await spendEdge(
       userId,
       profile,
       edgeCost,
       "sponsored_banner",
-      `${location} banner ${days} day(s) ${startDateStr}`,
+      `${location} banner ${dayCount} date(s) ${sortedDates.join(",")}`,
+      effectiveTier,
     );
   } catch (err: unknown) {
     const message = (err as Error).message ?? "Neuron deduction failed";
     if (message.toLowerCase().includes("insufficient")) {
       return { ok: false, error: `Insufficient Neurons. ${edgeCost} Neurons required.` };
     }
+    if (message.toLowerCase().includes("upgrade")) {
+      return { ok: false, error: "Upgrade to Pro or higher to promote your EAGOH with sponsored banners." };
+    }
     return { ok: false, error: message };
   }
 
-  // Insert banner
+  // Insert banner with booking_dates array and listing_id
   const { data: banner, error: bannerErr } = await supabase
     .from("sponsored_banners")
     .insert({
@@ -213,6 +317,8 @@ export async function purchaseBanner(
       location,
       start_date: startDateStr,
       end_date: endDateStr,
+      booking_dates: sortedDates,
+      listing_id: listingId ?? null,
       colored_border: coloredBorder,
       hot_badge: hotBadge,
       edge_cost: edgeCost,
@@ -223,7 +329,6 @@ export async function purchaseBanner(
 
   if (bannerErr) {
     console.warn("[sponsoredBanners] insert banner error", bannerErr.message);
-    // Edge was already deducted — this is an inconsistent state but rare.
     return { ok: false, error: "Failed to create banner. Neurons were deducted — contact support." };
   }
 
@@ -236,7 +341,9 @@ export async function purchaseBanner(
       eagoh_id: eagohId,
       location,
       start_date: startDateStr,
-      days,
+      days: dayCount,
+      booking_dates: sortedDates,
+      listing_id: listingId ?? null,
       colored_border: coloredBorder,
       hot_badge: hotBadge,
       edge_cost: edgeCost,
@@ -246,7 +353,6 @@ export async function purchaseBanner(
 
   if (purchaseErr) {
     console.warn("[sponsoredBanners] insert purchase error", purchaseErr.message);
-    // Banner exists but purchase history is missing — non-critical.
   }
 
   return {
@@ -259,7 +365,9 @@ export async function purchaseBanner(
       eagoh_id: eagohId,
       location,
       start_date: startDateStr,
-      days,
+      days: dayCount,
+      booking_dates: sortedDates,
+      listing_id: listingId ?? null,
       colored_border: coloredBorder,
       hot_badge: hotBadge,
       edge_cost: edgeCost,
@@ -496,6 +604,7 @@ async function enrichBanners(banners: any[]): Promise<EnrichedBanner[]> {
       quality_score: qualityScore,
       sync_score: syncScore,
       vendor_rank: vendorRank,
+      listing_id: b.listing_id ?? null,
     });
   }
 

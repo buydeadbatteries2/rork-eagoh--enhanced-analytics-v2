@@ -8,16 +8,17 @@
  * Features:
  *  - EAGOH selection from user's EAGOHs
  *  - Banner location selector (Home Page / Marketplace)
- *  - Calendar date picker (replaces manual text entry)
- *  - Eastern Time 6 AM cutoff rule
- *  - 5-day scheduling window
- *  - Duration selector (1-5 days)
+ *  - Multi-date calendar (1-5 individual future dates, nonconsecutive allowed)
+ *  - Current day disabled, past dates disabled
+ *  - Eastern Time 6 AM normalization (all promotions begin at 6 AM ET)
+ *  - Listing link field with dropdown of user's active Exchange listings
  *  - Premium effects (Colored Border, Hot Badge)
- *  - Total cost calculation
- *  - Purchase via existing purchaseBanner service
+ *  - Total cost calculated from selected date count
+ *  - Purchase via existing purchaseBanner service with effective tier
  *
- * The selected start date is normalized to 6:00 AM America/New_York
- * by the backend (sponsoredBanners.ts purchaseBanner function).
+ * The effective subscription tier is passed through to spendEdge so that
+ * dev test tiers (Expo Go) and admin overrides are respected — not just
+ * the raw DB subscription_tier column.
  */
 
 import { useHaptics } from "@/hooks/useHaptics";
@@ -26,9 +27,11 @@ import { useProfile } from "@/providers/ProfileProvider";
 import { palette } from "@/constants/colors";
 import {
   Calendar as CalendarIcon,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Coins,
+  Link2,
   Megaphone,
   X,
 } from "lucide-react-native";
@@ -37,20 +40,25 @@ import {
   ActivityIndicator,
   Alert,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import {
-  computeBannerCost,
+  computeBannerCostForDates,
+  parseListingUrl,
   purchaseBanner,
   type BannerLocation,
 } from "@/services/sponsoredBanners";
+import { getMyListings, type EnrichedListing } from "@/services/marketplace";
+import { buildPublicListingUrl } from "@/services/sharing";
 import type { EagohRecord } from "@/services/eagohs";
+import type { SubscriptionTier } from "@/services/profile";
+import { useQuery } from "@tanstack/react-query";
 
 // ── Eastern Time date utilities ───────────────────────────────────────────
 
@@ -88,26 +96,18 @@ function addDays(dateStr: string, days: number): string {
 }
 
 /**
- * Determine the earliest eligible promotion start date.
- *
- * All promotions begin at 6:00 AM Eastern Time. If today's 6 AM ET has
- * already passed, the earliest selectable date is tomorrow. If it hasn't
- * passed yet, today is still eligible.
+ * Get tomorrow's date in ET. The current calendar day is never selectable.
  */
-function getEarliestStartDate(): string {
-  const { dateStr, hour } = getETNow();
-  if (hour >= 6) {
-    return addDays(dateStr, 1);
-  }
-  return dateStr;
+function getEarliestSelectableDate(): string {
+  const { dateStr } = getETNow();
+  return addDays(dateStr, 1);
 }
 
 /**
- * Get the 5 eligible start dates: earliest through earliest + 4.
+ * Compare two "YYYY-MM-DD" strings. Returns negative if a < b, 0 if equal, positive if a > b.
  */
-function getEligibleDates(): string[] {
-  const earliest = getEarliestStartDate();
-  return Array.from({ length: 5 }, (_, i) => addDays(earliest, i));
+function compareDates(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /**
@@ -133,42 +133,38 @@ function formatWeekday(dateStr: string): string {
   return date.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" });
 }
 
-// ── Calendar Picker ───────────────────────────────────────────────────────
+// ── Calendar Picker (Multi-Date) ──────────────────────────────────────────
 
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
 ];
 const WEEKDAY_LABELS = ["S", "M", "T", "W", "T", "F", "S"];
+const MAX_DATES = 5;
 
-function CalendarPicker({
-  selectedDate,
-  onSelectDate,
-  eligibleDates,
+function MultiDateCalendarPicker({
+  selectedDates,
+  onToggleDate,
 }: {
-  selectedDate: string;
-  onSelectDate: (date: string) => void;
-  eligibleDates: string[];
+  selectedDates: string[];
+  onToggleDate: (date: string) => void;
 }): JSX.Element {
-  const eligibleSet = useMemo(() => new Set(eligibleDates), [eligibleDates]);
-
-  const earliestDate = eligibleDates[0] ?? getEarliestStartDate();
-  const latestDate = eligibleDates[eligibleDates.length - 1] ?? earliestDate;
-
-  const minYear = parseInt(earliestDate.slice(0, 4), 10);
-  const minMonth = parseInt(earliestDate.slice(5, 7), 10);
-  const maxYear = parseInt(latestDate.slice(0, 4), 10);
-  const maxMonth = parseInt(latestDate.slice(5, 7), 10);
+  const earliestSelectable = getEarliestSelectableDate();
+  const selectedSet = useMemo(() => new Set(selectedDates), [selectedDates]);
 
   const [viewYear, setViewYear] = useState<number>(() =>
-    parseInt(earliestDate.slice(0, 4), 10),
+    parseInt(earliestSelectable.slice(0, 4), 10),
   );
   const [viewMonth, setViewMonth] = useState<number>(() =>
-    parseInt(earliestDate.slice(5, 7), 10),
+    parseInt(earliestSelectable.slice(5, 7), 10),
   );
 
+  // Allow navigation to any month from the earliest selectable month onward
+  const minYear = parseInt(earliestSelectable.slice(0, 4), 10);
+  const minMonth = parseInt(earliestSelectable.slice(5, 7), 10);
+
   const canGoPrev = viewYear > minYear || (viewYear === minYear && viewMonth > minMonth);
-  const canGoNext = viewYear < maxYear || (viewYear === maxYear && viewMonth < maxMonth);
+  const canGoNext = true; // Allow navigating to any future month
 
   const goPrev = useCallback(() => {
     if (!canGoPrev) return;
@@ -201,9 +197,19 @@ function CalendarPicker({
     cells.push(`${viewYear}-${mm}-${dd}`);
   }
 
+  const handleToggle = useCallback(
+    (dateStr: string) => {
+      const isPast = compareDates(dateStr, earliestSelectable) < 0;
+      if (isPast) return; // past/current dates not selectable
+      const isAlreadySelected = selectedSet.has(dateStr);
+      if (!isAlreadySelected && selectedDates.length >= MAX_DATES) return; // limit reached
+      onToggleDate(dateStr);
+    },
+    [earliestSelectable, selectedSet, selectedDates.length, onToggleDate],
+  );
+
   return (
     <View style={calStyles.container}>
-      {/* Month header with navigation */}
       <View style={calStyles.header}>
         <Pressable
           onPress={goPrev}
@@ -232,38 +238,37 @@ function CalendarPicker({
         </Pressable>
       </View>
 
-      {/* Weekday labels */}
       <View style={calStyles.weekdayRow}>
         {WEEKDAY_LABELS.map((label, i) => (
           <Text key={i} style={calStyles.weekdayLabel}>{label}</Text>
         ))}
       </View>
 
-      {/* Date grid */}
       <View style={calStyles.grid}>
         {cells.map((dateStr, i) => {
           if (!dateStr) {
             return <View key={`empty-${i}`} style={calStyles.emptyCell} />;
           }
-          const isEligible = eligibleSet.has(dateStr);
-          const isSelected = dateStr === selectedDate;
+          const isPast = compareDates(dateStr, earliestSelectable) < 0;
+          const isSelected = selectedSet.has(dateStr);
+          const isDisabled = isPast;
 
           return (
             <Pressable
               key={dateStr}
-              onPress={() => isEligible && onSelectDate(dateStr)}
-              disabled={!isEligible}
+              onPress={() => handleToggle(dateStr)}
+              disabled={isDisabled}
               style={[
                 calStyles.dateCell,
                 isSelected && calStyles.dateCellSelected,
-                !isEligible && calStyles.dateCellDisabled,
+                isDisabled && calStyles.dateCellDisabled,
               ]}
             >
               <Text
                 style={[
                   calStyles.dateText,
                   isSelected && calStyles.dateTextSelected,
-                  !isEligible && calStyles.dateTextDisabled,
+                  isDisabled && calStyles.dateTextDisabled,
                 ]}
               >
                 {parseInt(dateStr.slice(8, 10), 10)}
@@ -273,14 +278,36 @@ function CalendarPicker({
         })}
       </View>
 
-      {/* Selected date display + eligible count */}
       <View style={calStyles.selectedRow}>
         <CalendarIcon color={palette.cyan} size={14} />
         <Text style={calStyles.selectedText}>
-          {formatWeekday(selectedDate)}, {formatDisplayDate(selectedDate)}
+          {selectedDates.length} of {MAX_DATES} dates selected
         </Text>
-        <Text style={calStyles.eligibleHint}>5 eligible dates</Text>
       </View>
+
+      {selectedDates.length >= MAX_DATES && (
+        <Text style={calStyles.limitHint}>
+          You can select up to {MAX_DATES} promotion dates.
+        </Text>
+      )}
+
+      {selectedDates.length > 0 && (
+        <View style={calStyles.dateListContainer}>
+          {selectedDates.map((d) => (
+            <View key={d} style={calStyles.dateChipRow}>
+              <Text style={calStyles.dateChipText}>
+                {formatWeekday(d)}, {formatDisplayDate(d)}
+              </Text>
+              <Pressable
+                onPress={() => onToggleDate(d)}
+                style={({ pressed }) => [calStyles.dateChipRemove, pressed && { opacity: 0.7 }]}
+              >
+                <X color={palette.muted} size={12} />
+              </Pressable>
+            </View>
+          ))}
+        </View>
+      )}
     </View>
   );
 }
@@ -375,10 +402,32 @@ const calStyles = StyleSheet.create({
     fontWeight: "800",
     flex: 1,
   },
-  eligibleHint: {
-    color: palette.muted,
+  limitHint: {
+    color: palette.gold,
     fontSize: 10,
     fontWeight: "700",
+    marginTop: 4,
+  },
+  dateListContainer: {
+    marginTop: 8,
+    gap: 4,
+  },
+  dateChipRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "rgba(108,230,255,0.06)",
+    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  dateChipText: {
+    color: palette.text,
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  dateChipRemove: {
+    padding: 4,
   },
 });
 
@@ -402,42 +451,179 @@ export default function BannerPurchaseModal({
 }: BannerPurchaseModalProps): JSX.Element {
   const h = useHaptics();
   const { eagohs } = useEagohs();
-  const { profile } = useProfile();
+  const { profile, effectiveSubscriptionTier } = useProfile();
   const [selectedEagohId, setSelectedEagohId] = useState<string>("");
   const [location, setLocation] = useState<BannerLocation>(defaultLocation);
-  const [eligibleDates, setEligibleDates] = useState<string[]>(() => getEligibleDates());
-  const [startDate, setStartDate] = useState<string>(() => getEarliestStartDate());
-  const [days, setDays] = useState<number>(1);
+  const [selectedDates, setSelectedDates] = useState<string[]>([]);
   const [coloredBorder, setColoredBorder] = useState<boolean>(false);
   const [hotBadge, setHotBadge] = useState<boolean>(false);
   const [purchasing, setPurchasing] = useState(false);
+  const [listingUrl, setListingUrl] = useState<string>("");
+  const [listingUrlError, setListingUrlError] = useState<string | null>(null);
+  const [showListingDropdown, setShowListingDropdown] = useState<boolean>(false);
+
+  // Fetch user's active Exchange listings for the dropdown
+  const { data: myListings } = useQuery<EnrichedListing[]>({
+    queryKey: ["myListings", userId],
+    queryFn: () => getMyListings(userId!),
+    enabled: !!userId && visible,
+    staleTime: 60 * 1000,
+  });
+
+  // Filter to active listings only
+  const activeListings = useMemo(
+    () => (myListings ?? []).filter((l) => l.active),
+    [myListings],
+  );
+
+  // Find active listings for the currently selected EAGOH
+  const eagohListings = useMemo(
+    () => activeListings.filter((l) => l.eagoh_id === selectedEagohId),
+    [activeListings, selectedEagohId],
+  );
 
   // Sync location + reset state when modal opens
   useEffect(() => {
     if (visible) {
       setLocation(defaultLocation);
-      const dates = getEligibleDates();
-      setEligibleDates(dates);
-      setStartDate(dates[0]);
+      setSelectedDates([]);
+      setSelectedEagohId("");
+      setListingUrl("");
+      setListingUrlError(null);
+      setShowListingDropdown(false);
     }
   }, [visible, defaultLocation]);
 
+  // Auto-populate listing URL when EAGOH is selected and exactly one active listing exists
+  useEffect(() => {
+    if (eagohListings.length === 1) {
+      setListingUrl(buildPublicListingUrl(eagohListings[0].id));
+      setListingUrlError(null);
+    } else if (eagohListings.length === 0 && selectedEagohId) {
+      // Don't clear if user manually typed a URL — only clear if switching EAGOH
+      setListingUrl((prev) => {
+        // Only clear if the current URL was auto-populated (matches one of our listing URLs)
+        const wasAutoPopulated = activeListings.some(
+          (l) => buildPublicListingUrl(l.id) === prev,
+        );
+        return wasAutoPopulated ? "" : prev;
+      });
+    }
+  }, [eagohListings, selectedEagohId, activeListings]);
+
   const myEagohs = (eagohs ?? []).filter((e: EagohRecord) => e.user_id === userId);
-  const totalCost = computeBannerCost(location, days, coloredBorder, hotBadge);
+  const totalCost = computeBannerCostForDates(location, selectedDates, coloredBorder, hotBadge);
+
+  // Validate listing URL
+  const validateListingUrl = useCallback(
+    async (url: string): Promise<string | null> => {
+      const trimmed = url.trim();
+      if (!trimmed) {
+        return "Enter a valid EAGOH Exchange listing link.";
+      }
+      const listingId = parseListingUrl(trimmed);
+      if (!listingId) {
+        return "Enter a valid EAGOH Exchange listing link.";
+      }
+      // Client-side pre-validation: check if listing belongs to user and is active
+      if (userId) {
+        try {
+          const { supabase } = await import("@/lib/supabase");
+          const { data: listing, error } = await supabase
+            .from("marketplace_listings")
+            .select("id, vendor_id, active")
+            .eq("id", listingId)
+            .maybeSingle();
+          if (error || !listing) {
+            return "Enter a valid EAGOH Exchange listing link.";
+          }
+          const row = listing as { id: string; vendor_id: string; active: boolean };
+          if (row.vendor_id !== userId) {
+            return "This listing does not belong to your account.";
+          }
+          if (!row.active) {
+            return "This Exchange listing is not currently active.";
+          }
+        } catch {
+          // If validation fails, let the server-side check catch it
+        }
+      }
+      return null;
+    },
+    [userId],
+  );
+
+  const handleListingUrlChange = useCallback(
+    (text: string) => {
+      setListingUrl(text);
+      setListingUrlError(null);
+    },
+    [],
+  );
+
+  const handleSelectListing = useCallback(
+    (listing: EnrichedListing) => {
+      setListingUrl(buildPublicListingUrl(listing.id));
+      setListingUrlError(null);
+      setShowListingDropdown(false);
+      h.selection();
+    },
+    [h],
+  );
+
+  const toggleDate = useCallback(
+    (date: string) => {
+      setSelectedDates((prev) => {
+        if (prev.includes(date)) {
+          return prev.filter((d) => d !== date);
+        }
+        if (prev.length >= MAX_DATES) return prev;
+        return [...prev, date].sort();
+      });
+    },
+    [],
+  );
 
   const handlePurchase = async () => {
     if (!userId || !profile || !selectedEagohId) return;
+    if (selectedDates.length === 0) {
+      Alert.alert("Select Dates", "Select at least one promotion date.");
+      return;
+    }
+
+    // Validate listing URL
+    const urlError = await validateListingUrl(listingUrl);
+    if (urlError) {
+      setListingUrlError(urlError);
+      Alert.alert("Listing Required", urlError);
+      return;
+    }
+
+    const listingId = parseListingUrl(listingUrl);
+
     setPurchasing(true);
     try {
       const result = await purchaseBanner(
-        { userId, eagohId: selectedEagohId, location, startDate, days, coloredBorder, hotBadge },
+        {
+          userId,
+          eagohId: selectedEagohId,
+          location,
+          startDate: selectedDates[0],
+          days: selectedDates.length,
+          selectedDates,
+          listingId,
+          coloredBorder,
+          hotBadge,
+          effectiveTier: effectiveSubscriptionTier as SubscriptionTier,
+        },
         profile,
       );
       if (result.ok) {
         h.success();
+        const dateList = selectedDates.map((d) => formatDisplayDate(d)).join(", ");
         Alert.alert(
           "Banner Purchased",
-          `Your EAGOH will be promoted for ${days} day(s) starting ${formatDisplayDate(startDate)}.`,
+          `Your EAGOH will be promoted on: ${dateList}.`,
         );
         onPurchased();
         onClose();
@@ -454,10 +640,15 @@ export default function BannerPurchaseModal({
   const reset = () => {
     setSelectedEagohId("");
     setLocation(defaultLocation);
-    setDays(1);
+    setSelectedDates([]);
     setColoredBorder(false);
     setHotBadge(false);
+    setListingUrl("");
+    setListingUrlError(null);
+    setShowListingDropdown(false);
   };
+
+  const canPurchase = selectedEagohId && selectedDates.length > 0 && listingUrl.trim() && !purchasing;
 
   return (
     <Modal
@@ -473,7 +664,6 @@ export default function BannerPurchaseModal({
             style={StyleSheet.absoluteFill}
           />
 
-          {/* Scrollable content — calendar + all controls must be reachable */}
           <ScrollView
             showsVerticalScrollIndicator={false}
             contentContainerStyle={modalStyles.scrollContent}
@@ -500,7 +690,7 @@ export default function BannerPurchaseModal({
               {myEagohs.map((e: EagohRecord) => (
                 <Pressable
                   key={e.id}
-                  onPress={() => setSelectedEagohId(e.id)}
+                  onPress={() => { setSelectedEagohId(e.id); h.selection(); }}
                   style={[modalStyles.chip, selectedEagohId === e.id && modalStyles.chipActive]}
                 >
                   <Text style={[modalStyles.chipText, selectedEagohId === e.id && modalStyles.chipTextActive]}>
@@ -540,29 +730,91 @@ export default function BannerPurchaseModal({
               </Pressable>
             </View>
 
-            {/* Start Date — Calendar Picker */}
-            <Text style={modalStyles.sectionLabel}>Start Date (6 AM ET)</Text>
-            <CalendarPicker
-              selectedDate={startDate}
-              onSelectDate={setStartDate}
-              eligibleDates={eligibleDates}
-            />
-
-            {/* Duration */}
-            <Text style={modalStyles.sectionLabel}>Duration (1-5 days)</Text>
-            <View style={modalStyles.daysRow}>
-              {[1, 2, 3, 4, 5].map((d) => (
-                <Pressable
-                  key={d}
-                  onPress={() => setDays(d)}
-                  style={[modalStyles.dayChip, days === d && modalStyles.dayChipActive]}
-                >
-                  <Text style={[modalStyles.dayChipText, days === d && modalStyles.dayChipTextActive]}>
-                    {d}
-                  </Text>
-                </Pressable>
-              ))}
+            {/* Listing Link */}
+            <Text style={modalStyles.sectionLabel}>Listing Link</Text>
+            <Text style={modalStyles.helperText}>
+              Paste the Exchange listing link you want this banner to open.
+            </Text>
+            <View style={modalStyles.listingInputRow}>
+              <Link2 color={palette.muted} size={16} style={modalStyles.listingInputIcon} />
+              <TextInput
+                style={[
+                  modalStyles.listingInput,
+                  listingUrlError && modalStyles.listingInputError,
+                ]}
+                placeholder="https://eagoh.app/listing/..."
+                placeholderTextColor={palette.muted}
+                value={listingUrl}
+                onChangeText={handleListingUrlChange}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="url"
+              />
             </View>
+
+            {/* Listing dropdown / select button */}
+            {activeListings.length > 0 && (
+              <Pressable
+                onPress={() => setShowListingDropdown((v) => !v)}
+                style={({ pressed }) => [
+                  modalStyles.selectListingBtn,
+                  pressed && { opacity: 0.8 },
+                ]}
+              >
+                <Text style={modalStyles.selectListingBtnText}>
+                  {showListingDropdown ? "Hide listings" : `Select from your listings (${activeListings.length})`}
+                </Text>
+                <ChevronDown
+                  color={palette.cyan}
+                  size={14}
+                  style={{ transform: [{ rotate: showListingDropdown ? "180deg" : "0deg" }] }}
+                />
+              </Pressable>
+            )}
+
+            {showListingDropdown && activeListings.length > 0 && (
+              <View style={modalStyles.listingDropdown}>
+                {activeListings.map((listing) => {
+                  const eagohName = listing.eagoh?.name ?? "Unknown";
+                  const url = buildPublicListingUrl(listing.id);
+                  const isSelected = listingUrl === url;
+                  return (
+                    <Pressable
+                      key={listing.id}
+                      onPress={() => handleSelectListing(listing)}
+                      style={[
+                        modalStyles.listingDropdownItem,
+                        isSelected && modalStyles.listingDropdownItemActive,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          modalStyles.listingDropdownText,
+                          isSelected && modalStyles.listingDropdownTextActive,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {eagohName}
+                      </Text>
+                      <Text style={modalStyles.listingDropdownUrl} numberOfLines={1}>
+                        {url.replace("https://eagoh.app", "")}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )}
+
+            {listingUrlError && (
+              <Text style={modalStyles.listingErrorText}>{listingUrlError}</Text>
+            )}
+
+            {/* Multi-Date Calendar */}
+            <Text style={modalStyles.sectionLabel}>Promotion Dates (6 AM ET)</Text>
+            <MultiDateCalendarPicker
+              selectedDates={selectedDates}
+              onToggleDate={toggleDate}
+            />
 
             {/* Premium Effects */}
             <Text style={modalStyles.sectionLabel}>Premium Effects</Text>
@@ -600,17 +852,17 @@ export default function BannerPurchaseModal({
               </View>
             </View>
             <Text style={modalStyles.totalBreakdown}>
-              {location === "home" ? "Home" : "Marketplace"} · {days} day(s)
+              {location === "home" ? "Home" : "Marketplace"} · {selectedDates.length} date(s)
               {coloredBorder ? " · Border" : ""}{hotBadge ? " · Hot Badge" : ""}
             </Text>
 
             {/* Purchase Button */}
             <Pressable
               onPress={handlePurchase}
-              disabled={purchasing || !selectedEagohId}
+              disabled={!canPurchase}
               style={({ pressed }) => [
                 modalStyles.confirmButton,
-                (purchasing || !selectedEagohId) && modalStyles.confirmButtonDisabled,
+                !canPurchase && modalStyles.confirmButtonDisabled,
                 pressed && { transform: [{ scale: 0.98 }], opacity: 0.88 },
               ]}
             >
@@ -681,6 +933,12 @@ const modalStyles = StyleSheet.create({
     textTransform: "uppercase",
     marginBottom: 2,
   },
+  helperText: {
+    color: palette.muted,
+    fontSize: 11,
+    fontWeight: "600",
+    marginBottom: 4,
+  },
   chipRail: {
     gap: 7,
     paddingRight: 12,
@@ -745,32 +1003,83 @@ const modalStyles = StyleSheet.create({
   locationPriceActive: {
     color: palette.cyan,
   },
-  daysRow: {
+  // Listing link field
+  listingInputRow: {
     flexDirection: "row",
-    gap: 10,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: palette.line,
+    borderRadius: 5,
+    backgroundColor: palette.panel,
+    paddingHorizontal: 10,
+    gap: 8,
   },
-  dayChip: {
-    width: 48,
-    height: 42,
+  listingInputIcon: {
+    marginTop: 0,
+  },
+  listingInput: {
+    flex: 1,
+    color: palette.text,
+    fontSize: 12,
+    fontWeight: "600",
+    paddingVertical: 10,
+    paddingHorizontal: 0,
+  },
+  listingInputError: {
+    borderColor: palette.ember,
+  },
+  selectListingBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "rgba(108,230,255,0.22)",
+    backgroundColor: "rgba(108,230,255,0.06)",
+  },
+  selectListingBtnText: {
+    color: palette.cyan,
+    fontSize: 11,
+    fontWeight: "800",
+  },
+  listingDropdown: {
     borderRadius: 5,
     borderWidth: 1,
     borderColor: palette.line,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: palette.panel,
+    backgroundColor: "rgba(7,17,31,0.85)",
+    padding: 4,
+    gap: 2,
   },
-  dayChipActive: {
-    backgroundColor: palette.cyan,
-    borderColor: palette.cyan,
+  listingDropdownItem: {
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 4,
   },
-  dayChipText: {
+  listingDropdownItemActive: {
+    backgroundColor: "rgba(108,230,255,0.12)",
+  },
+  listingDropdownText: {
+    color: palette.text,
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  listingDropdownTextActive: {
+    color: palette.cyan,
+  },
+  listingDropdownUrl: {
     color: palette.muted,
-    fontSize: 15,
-    fontWeight: "900",
+    fontSize: 10,
+    fontWeight: "600",
+    marginTop: 1,
   },
-  dayChipTextActive: {
-    color: palette.void,
+  listingErrorText: {
+    color: palette.ember,
+    fontSize: 11,
+    fontWeight: "700",
   },
+  // Premium effects
   premiumRow: {
     flexDirection: "row",
     gap: 10,
@@ -805,6 +1114,7 @@ const modalStyles = StyleSheet.create({
   premiumChipPriceActive: {
     color: palette.gold,
   },
+  // Total
   totalRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -837,6 +1147,7 @@ const modalStyles = StyleSheet.create({
     textAlign: "center",
     marginTop: -6,
   },
+  // Purchase button
   confirmButton: {
     minHeight: 52,
     borderRadius: 5,
