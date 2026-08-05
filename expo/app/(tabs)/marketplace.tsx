@@ -5,6 +5,9 @@ import { HORIZONTAL_LIST_PERFORMANCE_PROPS, LIST_PERFORMANCE_PROPS, OptimizedEag
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import { useHaptics } from "@/hooks/useHaptics";
+import { captureRef } from "react-native-view-shot";
+import * as Sharing from "expo-sharing";
+import PremiumShareCard, { type PremiumShareCardData } from "@/app/_components/PremiumShareCard";
 import {
   ArrowRightLeft,
   Award,
@@ -98,7 +101,7 @@ import { getBulkReputations, rankColor as repRankColor, RANK_TIERS, type RankTie
 import type { ReputationRow } from "@/services/reputation";
 import { supabase } from "@/lib/supabase";
 import { getLeaderboard } from "@/services/leaderboards";
-import { shareListing, copyListingLink } from "@/services/sharing";
+import { shareListing, copyListingLink, buildPublicListingUrl } from "@/services/sharing";
 import {
   fetchBulkVendorQualityMetrics,
   fetchBulkPublicReputations,
@@ -1950,6 +1953,90 @@ const MyListingCard = memo(function MyListingCard({
     .filter((p) => p > 0)
     .sort((a, b) => a - b)[0];
 
+  // ── Premium share card capture ──
+  const shareCardRef = useRef<View>(null);
+  const [shareCardData, setShareCardData] = useState<PremiumShareCardData | null>(null);
+  const [isSharing, setIsSharing] = useState(false);
+
+  const handlePremiumShare = useCallback(async (
+    listing: EnrichedListing,
+    eagohRec: EagohRecord | null,
+    rep: ReputationRow | undefined,
+  ): Promise<void> => {
+    if (isSharing) return;
+    setIsSharing(true);
+    try {
+      const minListingPrice = [listing.price_25_per_day, listing.price_50_per_day, listing.price_75_per_day, listing.price_100_per_day]
+        .filter((p) => p > 0)
+        .sort((a, b) => a - b)[0];
+      const domain = eagohRec?.domain ?? eagohRec?.sport ?? "General Intelligence";
+      const role = knowledgeAttrs.attrs.find((a) => a.label === "Role")?.value ?? null;
+      const dnaTags = knowledgeAttrs.archetypeTags.slice(0, 3);
+      const qualityScore = rep?.reputation_score ?? listing.avg_quality_score ?? 0;
+      const listingUrl = buildPublicListingUrl(listing.id);
+
+      const cardData: PremiumShareCardData = {
+        imageUri: resolveMarketplaceEagohImage(eagohRec),
+        name: eagohRec?.name ?? "Unnamed EAGOH",
+        creator: listing.vendor_username ?? "Unknown Creator",
+        domain: domainLabel(domain),
+        role,
+        dnaTags: dnaTags.length > 0 ? dnaTags : null,
+        qualityScore,
+        startingPrice: minListingPrice ?? null,
+        listingUrl,
+        isVerified: listing.is_vendor_verified,
+      };
+      setShareCardData(cardData);
+    } catch (err) {
+      console.warn("[marketplace] failed to prepare share card", err);
+      await shareListing(eagohRec?.name ?? "My EAGOH", listing.vendor_username, listing.id, listing.description);
+      setIsSharing(false);
+    }
+  }, [isSharing, knowledgeAttrs]);
+
+  const handleCardReady = useCallback(async () => {
+    if (!shareCardRef.current || !shareCardData) return;
+    try {
+      const targetWidth = 1080;
+      const uri = await captureRef(shareCardRef, {
+        result: "tmpfile",
+        format: "png",
+        quality: 1,
+        width: targetWidth,
+        height: Math.round(targetWidth / (1080 / 1350)),
+      });
+
+      const fileUri = uri.startsWith("file://") ? uri : `file://${uri}`;
+
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri, {
+          mimeType: "image/png",
+          dialogTitle: `Share ${shareCardData.name}`,
+          UTI: "public.image",
+        });
+      } else {
+        await shareListing(
+          shareCardData.name,
+          shareCardData.creator,
+          shareCardData.listingUrl.split("/").pop() ?? "",
+          null,
+        );
+      }
+    } catch (err) {
+      console.warn("[marketplace] share card capture failed", err);
+      await shareListing(
+        shareCardData.name,
+        shareCardData.creator,
+        shareCardData.listingUrl.split("/").pop() ?? "",
+        null,
+      );
+    } finally {
+      setShareCardData(null);
+      setIsSharing(false);
+    }
+  }, [shareCardData]);
+
   return (
     <View style={[styles.myListingCard, !item.active && styles.myListingCardInactive]}>
       <View style={styles.myListingRow}>
@@ -2050,43 +2137,60 @@ const MyListingCard = memo(function MyListingCard({
         </View>
       </View>
 
-      {/* Actions */}
+      {/* Actions — two rows of equal-sized buttons, all inside the card */}
       <View style={styles.myListingActions}>
-        <Pressable
-          onPress={() => onEdit(item)}
-          style={styles.myListingEditBtn}
-        >
-          <Pencil color={palette.cyan} size={13} />
-          <Text style={styles.myListingEditText}>Edit Pricing</Text>
-        </Pressable>
-        <Pressable
-          onPress={() => shareListing(
-            eagoh?.name ?? "My EAGOH",
-            item.vendor_username,
-            item.id,
-            item.description,
-          )}
-          style={styles.myListingShareBtn}
-        >
-          <Share2 color={palette.violet} size={13} />
-          <Text style={styles.myListingShareText}>Share</Text>
-        </Pressable>
-        <Pressable
-          onPress={() => copyListingLink(item.id)}
-          style={styles.myListingShareBtn}
-        >
-          <Link2 color={palette.violet} size={13} />
-          <Text style={styles.myListingShareText}>Copy Link</Text>
-        </Pressable>
-        <Pressable
-          onPress={() => onToggle(item.id, !item.active)}
-          style={[styles.myListingActionBtn, item.active ? styles.myListingActionBtnOff : styles.myListingActionBtnOn]}
-        >
-          <Text style={[styles.myListingActionText, item.active && styles.myListingActionTextOff]}>
-            {item.active ? "Deactivate" : "Activate"}
-          </Text>
-        </Pressable>
+        {/* Row 1: Edit Pricing · Share */}
+        <View style={styles.myListingActionRow}>
+          <Pressable
+            onPress={() => onEdit(item)}
+            style={[styles.myListingBtnBase, styles.myListingEditBtn]}
+          >
+            <Pencil color={palette.cyan} size={13} />
+            <Text style={styles.myListingEditText}>Edit Pricing</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => handlePremiumShare(item, eagoh, reputation)}
+            style={[styles.myListingBtnBase, styles.myListingShareBtn]}
+          >
+            <Share2 color={palette.violet} size={13} />
+            <Text style={styles.myListingShareText}>Share</Text>
+          </Pressable>
+        </View>
+        {/* Row 2: Copy Link · Activate/Deactivate */}
+        <View style={styles.myListingActionRow}>
+          <Pressable
+            onPress={() => copyListingLink(item.id)}
+            style={[styles.myListingBtnBase, styles.myListingShareBtn]}
+          >
+            <Link2 color={palette.violet} size={13} />
+            <Text style={styles.myListingShareText}>Copy Link</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => onToggle(item.id, !item.active)}
+            style={[styles.myListingBtnBase, item.active ? styles.myListingActionBtnOff : styles.myListingActionBtnOn]}
+          >
+            <Text style={[styles.myListingActionText, item.active && styles.myListingActionTextOff]}>
+              {item.active ? "Deactivate" : "Activate"}
+            </Text>
+          </Pressable>
+        </View>
       </View>
+
+      {/* Hidden premium share card — rendered off-screen for capture */}
+      {shareCardData && (
+        <View style={styles.shareCardCaptureContainer} pointerEvents="none">
+          <View
+            ref={shareCardRef}
+            collapsable={false}
+            style={styles.shareCardCapture}
+          >
+            <PremiumShareCard
+              data={shareCardData}
+              onReady={handleCardReady}
+            />
+          </View>
+        </View>
+      )}
     </View>
   );
 });
@@ -3174,36 +3278,49 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
   },
   myListingPriceText: { color: palette.muted, fontSize: 11, fontWeight: "800" },
-  myListingActions: { flexDirection: "row", gap: 8, marginTop: 10 },
-  myListingEditBtn: {
+  myListingActions: { flexDirection: "column", gap: 8, marginTop: 10 },
+  myListingActionRow: {
+    flexDirection: "row",
+    gap: 8,
+  },
+  myListingBtnBase: {
+    flex: 1,
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "center",
     gap: 5,
+    borderRadius: 5,
+    paddingVertical: 8,
+    minHeight: 36,
+  },
+  myListingEditBtn: {
     borderWidth: 1,
     borderColor: palette.cyan,
-    borderRadius: 5,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
     backgroundColor: palette.cyanSoft,
   },
   myListingEditText: { color: palette.cyan, fontSize: 12, fontWeight: "900" },
   myListingShareBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
     borderWidth: 1,
     borderColor: palette.violet,
-    borderRadius: 5,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
     backgroundColor: "rgba(169,77,255,0.08)",
   },
   myListingShareText: { color: palette.violet, fontSize: 12, fontWeight: "900" },
-  myListingActionBtn: { borderRadius: 5, paddingHorizontal: 14, paddingVertical: 7 },
   myListingActionBtnOff: { backgroundColor: palette.emberSoft, borderWidth: 1, borderColor: palette.ember },
   myListingActionBtnOn: { backgroundColor: palette.successSoft, borderWidth: 1, borderColor: palette.success },
   myListingActionText: { fontSize: 12, fontWeight: "900", color: palette.success },
   myListingActionTextOff: { color: palette.ember },
+
+  // Hidden share card capture container — rendered off-screen for image capture
+  shareCardCaptureContainer: {
+    position: "absolute",
+    top: -9999,
+    left: -9999,
+    opacity: 0,
+  },
+  shareCardCapture: {
+    borderRadius: 16,
+    overflow: "hidden",
+  },
 
   // Active Sync Card
   activeSyncCard: {
