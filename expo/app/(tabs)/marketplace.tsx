@@ -2934,7 +2934,10 @@ export default function MarketplaceScreen(): JSX.Element {
       <BannerPurchaseModal
         visible={bannerModalVisible}
         onClose={() => setBannerModalVisible(false)}
-        onPurchased={() => {}}
+        onPurchased={() => {
+          queryClient.invalidateQueries({ queryKey: ["myBannerBookings"] });
+          queryClient.invalidateQueries({ queryKey: ["myActiveBanners"] });
+        }}
         userId={user?.id ?? null}
         defaultLocation="marketplace"
       />

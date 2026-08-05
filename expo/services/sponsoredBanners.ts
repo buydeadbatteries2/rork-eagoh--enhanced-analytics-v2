@@ -330,6 +330,139 @@ export async function purchaseBanner(
   }
 }
 
+// ── Booking history types ──────────────────────────────────────────────
+
+export type BannerBookingStatus = "scheduled" | "active" | "completed" | "cancelled" | "failed";
+
+export type BannerBooking = {
+  id: string;
+  eagoh_id: string;
+  eagoh_name: string;
+  eagoh_image_url: string | null;
+  location: BannerLocation;
+  start_date: string;
+  end_date: string;
+  booking_dates: string[] | null;
+  listing_id: string | null;
+  colored_border: boolean;
+  hot_badge: boolean;
+  edge_cost: number;
+  active: boolean;
+  created_at: string;
+  idempotency_key: string | null;
+  status: BannerBookingStatus;
+};
+
+/**
+ * Compute booking status from banner row fields.
+ * - Scheduled: all booking dates are in the future (after today ET)
+ * - Active: at least one booking date is today or past AND at least one is future
+ * - Completed: all booking dates are in the past, banner still active
+ * - Cancelled: active = false
+ * - Failed: no banner row exists for a purchase record (orphaned deduction)
+ */
+export function computeBookingStatus(banner: {
+  booking_dates: string[] | null;
+  start_date: string;
+  end_date: string;
+  active: boolean;
+}): BannerBookingStatus {
+  if (!banner.active) return "cancelled";
+
+  const todayET = (() => {
+    const now = new Date();
+    const fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    const parts = fmt.formatToParts(now);
+    const y = parts.find((p) => p.type === "year")?.value ?? "2026";
+    const m = parts.find((p) => p.type === "month")?.value ?? "01";
+    const d = parts.find((p) => p.type === "day")?.value ?? "01";
+    return `${y}-${m}-${d}`;
+  })();
+
+  const dates = banner.booking_dates ?? [banner.start_date, banner.end_date];
+  const allPast = dates.every((d) => d < todayET);
+  const allFuture = dates.every((d) => d > todayET);
+  const hasTodayOrPast = dates.some((d) => d <= todayET);
+  const hasFuture = dates.some((d) => d > todayET);
+
+  if (allFuture) return "scheduled";
+  if (hasTodayOrPast && hasFuture) return "active";
+  if (allPast) return "completed";
+  return "active";
+}
+
+/**
+ * Fetch the authenticated user's banner bookings with EAGOH name and image.
+ * Returns enriched banner rows with computed status.
+ * Only returns bookings belonging to the authenticated user (RLS enforced).
+ */
+export async function getMyBannerBookings(userId: string): Promise<BannerBooking[]> {
+  const { data: banners, error } = await supabase
+    .from("sponsored_banners")
+    .select(`
+      id,
+      eagoh_id,
+      location,
+      start_date,
+      end_date,
+      booking_dates,
+      listing_id,
+      colored_border,
+      hot_badge,
+      edge_cost,
+      active,
+      created_at,
+      idempotency_key,
+      eagoh:eagohs!inner (
+        id,
+        name,
+        image_url
+      )
+    `)
+    .eq("purchaser_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(50);
+
+  if (error) {
+    console.warn("[sponsoredBanners] getMyBannerBookings error", error.message);
+    return [];
+  }
+
+  const rows = banners ?? [];
+  return rows.map((b: any) => {
+    const eagoh = b.eagoh ?? {};
+    const baseBanner = {
+      booking_dates: b.booking_dates as string[] | null,
+      start_date: b.start_date as string,
+      end_date: b.end_date as string,
+      active: b.active as boolean,
+    };
+    return {
+      id: b.id as string,
+      eagoh_id: b.eagoh_id as string,
+      eagoh_name: (eagoh.name as string) ?? "Unnamed",
+      eagoh_image_url: (eagoh.image_url as string | null) ?? null,
+      location: b.location as BannerLocation,
+      start_date: b.start_date as string,
+      end_date: b.end_date as string,
+      booking_dates: (b.booking_dates as string[] | null) ?? null,
+      listing_id: (b.listing_id as string | null) ?? null,
+      colored_border: b.colored_border as boolean,
+      hot_badge: b.hot_badge as boolean,
+      edge_cost: b.edge_cost as number,
+      active: b.active as boolean,
+      created_at: b.created_at as string,
+      idempotency_key: (b.idempotency_key as string | null) ?? null,
+      status: computeBookingStatus(baseBanner),
+    };
+  });
+}
+
 // ── Purchase history ───────────────────────────────────────────────────
 
 /** Fetch purchase history for a given user. */

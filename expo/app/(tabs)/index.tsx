@@ -32,7 +32,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ActivityIndicator, Alert, Animated, Dimensions, FlatList, Image, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { palette } from "@/constants/colors";
 import { DEFAULT_EAGOH_IMAGE, DEFAULT_EAGOH_NAME } from "@/constants/defaultEagoh";
 import { useAppTheme } from "@/providers/ThemeProvider";
@@ -936,6 +936,7 @@ export default function HomeScreen(): JSX.Element {
   const [phase, setPhase] = useState<Phase>("loading");
   const [bootDone, setBootDone] = useState<boolean>(false);
   const [purchaseModal, setPurchaseModal] = useState(false);
+  const queryClient = useQueryClient();
   const width = Dimensions.get("window").width;
   const compact = useMemo<boolean>(() => width < 380, [width]);
   startupLog("HomeScreen_mount", "success");
@@ -969,7 +970,10 @@ export default function HomeScreen(): JSX.Element {
       <BannerPurchaseModal
         visible={purchaseModal}
         onClose={() => setPurchaseModal(false)}
-        onPurchased={() => {}}
+        onPurchased={() => {
+          queryClient.invalidateQueries({ queryKey: ["myBannerBookings"] });
+          queryClient.invalidateQueries({ queryKey: ["myActiveBanners"] });
+        }}
         userId={user?.id ?? null}
         defaultLocation="home"
       />

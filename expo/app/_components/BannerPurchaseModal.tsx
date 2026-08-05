@@ -622,10 +622,10 @@ export default function BannerPurchaseModal({
         h.success();
         const dateList = selectedDates.map((d) => formatDisplayDate(d)).join(", ");
         Alert.alert(
-          result.duplicate ? "Already Purchased" : "Banner Purchased",
+          result.duplicate ? "Already Booked" : "Banner Booked Successfully",
           result.duplicate
-            ? `This banner was already purchased. Your EAGOH will be promoted on: ${dateList}.`
-            : `Your EAGOH will be promoted on: ${dateList}.`,
+            ? `This banner was already booked. Your EAGOH will be promoted on: ${dateList}.`
+            : `Banner booked successfully. Your EAGOH will be promoted on: ${dateList}.`,
         );
         onPurchased();
         onClose();

@@ -26,6 +26,7 @@ import {
   Lock,
   LogOut,
   Mail,
+  Megaphone,
   MessageCircle,
   RefreshCcw,
   Shield,
@@ -80,6 +81,7 @@ import * as Sharing from "expo-sharing";
 import { useRef } from "react";
 import EagohShareCard from "@/app/_components/EagohShareCard";
 import SocialLinksEditor from "@/app/_components/SocialLinksEditor";
+import BannerBookingsHistory from "@/app/_components/BannerBookingsHistory";
 
 type P = typeof palette;
 
@@ -1889,6 +1891,7 @@ export default function SettingsScreen(): JSX.Element {
   const [savingUsername, setSavingUsername] = useState<boolean>(false);
   const [uploadingAvatar, setUploadingAvatar] = useState<boolean>(false);
   const [uploadingBanner, setUploadingBanner] = useState<boolean>(false);
+  const [bannerBookingsRefreshKey, setBannerBookingsRefreshKey] = useState<number>(0);
 
   const usernameValue = profile?.username ?? "";
   const displayUsername = usernameDraft || usernameValue;
@@ -2507,6 +2510,19 @@ export default function SettingsScreen(): JSX.Element {
         ],
       },
       {
+        id: "bannerBookings",
+        title: "My Banner Bookings",
+        titleIcon: <Megaphone color={pal.cyan} size={15} />,
+        rows: [
+          {
+            kind: "custom" as const,
+            render: () => (
+              <BannerBookingsHistory userId={user?.id ?? null} pal={pal} refreshKey={bannerBookingsRefreshKey} />
+            ),
+          },
+        ],
+      },
+      {
         id: "privacy",
         title: "Privacy & Safety",
         titleIcon: <Shield color={pal.success} size={15} />,
@@ -2604,7 +2620,16 @@ export default function SettingsScreen(): JSX.Element {
     navigateTo,
     pal,
     unreadCount,
+    user?.id,
+    bannerBookingsRefreshKey,
   ]);
+
+  // ── Refresh banner bookings when settings gains focus ──────────────────
+  useEffect(() => {
+    if (user?.id) {
+      queryClient.invalidateQueries({ queryKey: ["myBannerBookings"] });
+    }
+  }, [user?.id, queryClient]);
 
   // ── Render ──────────────────────────────────────────────────────────────
 
