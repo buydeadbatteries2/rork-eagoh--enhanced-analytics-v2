@@ -13,6 +13,7 @@ import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import {
   ArrowLeft,
+  ArrowRightLeft,
   Coins,
   Crown,
   PackageOpen,
@@ -25,8 +26,8 @@ import {
 import React, { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Dimensions,
-  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -43,6 +44,12 @@ import { getBulkReputations, rankColor as repRankColor, type RankTier } from "@/
 import type { ReputationRow } from "@/services/reputation";
 import SocialVerifiedBadge from "@/app/_components/SocialVerifiedBadge";
 import { getSocialVerificationState } from "@/services/socialVerification";
+import PurchaseSyncModal from "@/app/_components/PurchaseSyncModal";
+import { getListingById, purchaseSync, type EnrichedListing, type SyncLevel } from "@/services/marketplace";
+import { useProfile } from "@/providers/ProfileProvider";
+import { useHaptics } from "@/hooks/useHaptics";
+import { useQueryClient } from "@tanstack/react-query";
+import PublicProfileModal from "@/components/PublicProfileModal";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -78,12 +85,19 @@ type PublicListingData = {
 export default function PublicListingScreen(): JSX.Element {
   const { listingId } = useLocalSearchParams<{ listingId: string }>();
   const router = useRouter();
-  const { isAuthenticated } = useAuth();
+  const { user, isAuthenticated } = useAuth();
+  const { profile } = useProfile();
+  const h = useHaptics();
+  const queryClient = useQueryClient();
 
   const [loading, setLoading] = useState<boolean>(true);
   const [listing, setListing] = useState<PublicListingData | null>(null);
   const [reputation, setReputation] = useState<ReputationRow | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [purchaseListing, setPurchaseListing] = useState<EnrichedListing | null>(null);
+  const [purchasing, setPurchasing] = useState<boolean>(false);
+  const [showSourceInfo, setShowSourceInfo] = useState<boolean>(false);
+  const [publicProfileVendorId, setPublicProfileVendorId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!listingId) {
@@ -191,13 +205,51 @@ export default function PublicListingScreen(): JSX.Element {
     }
   }, [router]);
 
-  const handleOpenInApp = useCallback((): void => {
-    if (isAuthenticated) {
-      router.replace("/(tabs)/marketplace");
-    } else {
+  const isOwner = !!(user?.id && listing?.vendor_id === user.id);
+  const listingActive = listing?.active ?? false;
+
+  const handlePurchase = useCallback(async (): Promise<void> => {
+    if (!isAuthenticated) {
       router.replace("/(auth)/login");
+      return;
     }
-  }, [isAuthenticated, router]);
+    if (!listingId) return;
+    try {
+      const enriched = await getListingById(listingId);
+      if (!enriched || !enriched.active) {
+        Alert.alert("Listing Unavailable", "This Exchange listing is no longer available.");
+        return;
+      }
+      setPurchaseListing(enriched);
+    } catch {
+      Alert.alert("Error", "Could not load listing details.");
+    }
+  }, [isAuthenticated, listingId, router]);
+
+  const handlePurchaseConfirm = useCallback(async (level: SyncLevel, days: number): Promise<void> => {
+    if (!user?.id || !profile || !purchaseListing) return;
+    if (purchaseListing.vendor_id === user.id) {
+      Alert.alert("Purchase Not Allowed", "You cannot purchase your own EAGOH listing.");
+      setPurchaseListing(null);
+      return;
+    }
+    setPurchasing(true);
+    try {
+      const result = await purchaseSync(user.id, profile, purchaseListing.id, level, days);
+      if (!result.ok) {
+        Alert.alert("Purchase Failed", result.error);
+      } else {
+        h.success();
+        Alert.alert("Sync Purchased", `You now have ${level} sync access for ${days} day(s).`);
+        setPurchaseListing(null);
+        queryClient.invalidateQueries({ queryKey: ["profile"] });
+      }
+    } catch (err: unknown) {
+      Alert.alert("Error", (err as Error).message ?? "Purchase failed.");
+    } finally {
+      setPurchasing(false);
+    }
+  }, [user?.id, profile, purchaseListing, h, queryClient]);
 
   // ── Loading state ──────────────────────────────────────────────────
 
@@ -408,23 +460,63 @@ export default function PublicListingScreen(): JSX.Element {
         </View>
 
         {/* CTA button */}
-        <Pressable
-          onPress={handleOpenInApp}
-          style={({ pressed }) => [styles.ctaBtn, pressed && { opacity: 0.85 }]}
-        >
-          <LinearGradient
-            colors={[palette.cyan, `${palette.cyan}cc`]}
-            style={StyleSheet.absoluteFill}
-          />
-          {isAuthenticated ? (
-            <Text style={styles.ctaText}>Open in EAGOH</Text>
-          ) : (
+        {!isAuthenticated ? (
+          <Pressable
+            onPress={() => router.replace("/(auth)/login")}
+            style={({ pressed }) => [styles.ctaBtn, pressed && { opacity: 0.85 }]}
+          >
+            <LinearGradient
+              colors={[palette.cyan, `${palette.cyan}cc`]}
+              style={StyleSheet.absoluteFill}
+            />
             <Text style={styles.ctaText}>Sign in to Access</Text>
-          )}
-        </Pressable>
+          </Pressable>
+        ) : isOwner ? (
+          <View style={[styles.ctaBtn, styles.ctaBtnDisabled]}>
+            <Text style={[styles.ctaText, { color: palette.muted }]}>Your Listing</Text>
+          </View>
+        ) : !listingActive ? (
+          <View style={[styles.ctaBtn, styles.ctaBtnDisabled]}>
+            <Text style={[styles.ctaText, { color: palette.muted, fontSize: 13 }]}>This Exchange listing is no longer available.</Text>
+          </View>
+        ) : (
+          <Pressable
+            onPress={handlePurchase}
+            style={({ pressed }) => [styles.ctaBtn, pressed && { opacity: 0.85 }]}
+          >
+            <LinearGradient
+              colors={[palette.cyan, `${palette.cyan}cc`]}
+              style={StyleSheet.absoluteFill}
+            />
+            <ArrowRightLeft color={palette.void} size={17} />
+            <Text style={styles.ctaText}>Purchase</Text>
+          </Pressable>
+        )}
 
         <View style={{ height: 40 }} />
       </ScrollView>
+
+      <PurchaseSyncModal
+        visible={!!purchaseListing}
+        listing={purchaseListing}
+        onClose={() => { setPurchaseListing(null); setShowSourceInfo(false); }}
+        onConfirm={handlePurchaseConfirm}
+        showSourceInfo={showSourceInfo}
+        onToggleSourceInfo={() => setShowSourceInfo((v) => !v)}
+        purchasing={purchasing}
+        reputation={reputation ?? undefined}
+        onViewVendorProfile={(vendorId) => {
+          setPurchaseListing(null);
+          setShowSourceInfo(false);
+          setPublicProfileVendorId(vendorId);
+        }}
+      />
+      <PublicProfileModal
+        visible={!!publicProfileVendorId}
+        userId={publicProfileVendorId}
+        currentUserId={user?.id ?? null}
+        onClose={() => setPublicProfileVendorId(null)}
+      />
     </SafeAreaView>
   );
 }
@@ -606,6 +698,15 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   ctaText: { color: palette.void, fontSize: 16, fontWeight: "900" as const },
+  ctaBtnDisabled: {
+    backgroundColor: "rgba(255,255,255,0.05)",
+    borderWidth: 1,
+    borderColor: palette.line,
+    flexDirection: "row" as const,
+    alignItems: "center" as const,
+    justifyContent: "center" as const,
+    gap: 8,
+  },
 
   // Center states
   centerState: { flex: 1, alignItems: "center" as const, justifyContent: "center" as const, padding: 40, gap: 14 },
