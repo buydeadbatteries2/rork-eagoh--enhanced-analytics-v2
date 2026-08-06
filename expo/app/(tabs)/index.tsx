@@ -201,7 +201,6 @@ const SponsoredBanner = React.memo(function SponsoredBanner({ item, userId, repu
               <Text style={[styles.sponsoredRankText, { color: accent }]}>{rankEmoji(eagohRank)} {eagohRank} · {repScore}</Text>
             </View>
           )}
-          <Text style={styles.score}>{item.quality_score}</Text>
         </View>
         <Text style={styles.sponsoredTitle}>{safeName}</Text>
         <Text style={styles.sponsoredAnalytics}>{domainLabel} · Sync Score: {item.sync_score}</Text>
