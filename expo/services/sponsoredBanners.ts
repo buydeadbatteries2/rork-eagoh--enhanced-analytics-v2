@@ -175,7 +175,7 @@ export async function getActiveBanners(location: BannerLocation): Promise<Enrich
     .select(`
       *,
       eagoh: eagohs!inner (
-        id, name, sport, image_url
+        id, name, sport, image_url, image_thumb_url
       )
     `)
     .eq("location", location)
@@ -202,7 +202,7 @@ export async function getMyActiveBanners(userId: string): Promise<EnrichedBanner
     .select(`
       *,
       eagoh: eagohs!inner (
-        id, name, sport, image_url
+        id, name, sport, image_url, image_thumb_url
       )
     `)
     .eq("purchaser_id", userId)
@@ -746,7 +746,10 @@ async function enrichBanners(banners: any[]): Promise<EnrichedBanner[]> {
         ...b,
         eagoh_name: (typeof eagoh.name === "string" ? eagoh.name : "Unnamed") || "Unnamed",
         eagoh_domain: (typeof eagoh.sport === "string" ? eagoh.sport : "unknown") || "unknown",
-        eagoh_image_url: (typeof eagoh.image_url === "string" ? eagoh.image_url : null) ?? null,
+        eagoh_image_url: resolveBannerEagohImage({
+          image_url: typeof eagoh.image_url === "string" ? eagoh.image_url : null,
+          image_thumb_url: typeof eagoh.image_thumb_url === "string" ? eagoh.image_thumb_url : null,
+        }),
         vendor_username: vendorUsername,
         quality_score: qualityScore,
         sync_score: syncScore,

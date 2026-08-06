@@ -256,6 +256,23 @@ create policy "eagohs_marketplace_select" on public.eagohs
     )
   );
 
+-- ═══════════════════════════════════════════════════════════════════════
+-- CRITICAL: Sponsored banner image visibility depends on this policy.
+-- Without it, the eagoh !inner join in sponsored_banners queries returns
+-- NULL for EAGOHs owned by other users that have no active marketplace
+-- listing, and their images will not display on Home/Exchange banner cards.
+-- This policy is read-only — it does NOT grant write access.
+-- ═══════════════════════════════════════════════════════════════════════
+drop policy if exists "eagohs_sponsored_banner_select" on public.eagohs;
+create policy "eagohs_sponsored_banner_select" on public.eagohs
+  for select using (
+    exists (
+      select 1 from public.sponsored_banners sb
+      where sb.eagoh_id = eagohs.id
+        and sb.active = true
+    )
+  );
+
 -- =============================================================================
 -- EAGOH CUSTOMIZATION (appearance map)
 -- =============================================================================
