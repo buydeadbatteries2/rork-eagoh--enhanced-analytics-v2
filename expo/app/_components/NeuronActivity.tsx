@@ -2,10 +2,12 @@
  * NeuronActivity — displays the authenticated user's Neuron transaction
  * history from the `edge_transactions` table.
  *
- * Shows each transaction with a user-friendly title, amount with +/- sign,
- * date and time, neuron bucket, reason, and remaining balance after the
- * transaction. Includes filter tabs: All, Purchases, Spending, Rewards,
- * Refunds, Subscription.
+ * Settings preview: shows only the 5 most recent transactions in a compact
+ * layout with a "View All Neuron Activity" button.
+ *
+ * Full history: tapping the button opens a full-screen modal with all
+ * transactions (newest first), filter tabs (All, Purchases, Spending,
+ * Rewards, Refunds, Subscription), and complete transaction details.
  *
  * Data source: edge_transactions table (RLS-enforced, user_id = auth user).
  * Uses the shared React Query cache key from EdgeProvider so any mutation
@@ -15,6 +17,7 @@
 import React, { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -25,11 +28,13 @@ import {
   ArrowDownCircle,
   ArrowUpCircle,
   Award,
+  ChevronRight,
   Crown,
   Gift,
   RotateCcw,
   ShoppingBag,
   Sparkles,
+  X,
   Zap,
 } from "lucide-react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -38,6 +43,8 @@ import { useHaptics } from "@/hooks/useHaptics";
 import { listTransactions, type EdgeTransaction } from "@/services/edge";
 
 type P = typeof palette;
+
+const PREVIEW_COUNT = 5;
 
 // ── Reason → user-friendly display mapping ───────────────────────────────
 
@@ -212,9 +219,11 @@ const filterStyles = StyleSheet.create({
 function TransactionRow({
   tx,
   pal,
+  compact = false,
 }: {
   tx: EdgeTransaction;
   pal: P;
+  compact?: boolean;
 }): JSX.Element {
   const title = getTransactionTitle(tx);
   const credit = isAddition(tx);
@@ -252,27 +261,27 @@ function TransactionRow({
       : pal.ember;
 
   return (
-    <View style={txStyles.container}>
-      <View style={txStyles.iconWrap(iconColor)}>
-        <Icon color={iconColor} size={16} />
+    <View style={compact ? txStylesCompact.container : txStyles.container}>
+      <View style={compact ? txStylesCompact.iconWrap(iconColor) : txStyles.iconWrap(iconColor)}>
+        <Icon color={iconColor} size={compact ? 14 : 16} />
       </View>
 
-      <View style={txStyles.content}>
-        <View style={txStyles.topRow}>
-          <Text style={txStyles.title} numberOfLines={1}>
+      <View style={compact ? txStylesCompact.content : txStyles.content}>
+        <View style={compact ? txStylesCompact.topRow : txStyles.topRow}>
+          <Text style={compact ? txStylesCompact.title : txStyles.title} numberOfLines={1}>
             {title}
           </Text>
-          <Text style={txStyles.amount(amountColor)}>
+          <Text style={compact ? txStylesCompact.amount(amountColor) : txStyles.amount(amountColor)}>
             {credit ? "+" : "−"}
             {tx.amount}
           </Text>
         </View>
 
-        <View style={txStyles.metaRow}>
-          <Text style={txStyles.bucketText}>{bucketLabel}</Text>
-          <Text style={txStyles.dot}>·</Text>
-          <Text style={txStyles.timeText}>{formatTimeAgo(tx.created_at)}</Text>
-          {tx.note && !refund && (
+        <View style={compact ? txStylesCompact.metaRow : txStyles.metaRow}>
+          <Text style={compact ? txStylesCompact.bucketText : txStyles.bucketText}>{bucketLabel}</Text>
+          <Text style={compact ? txStylesCompact.dot : txStyles.dot}>·</Text>
+          <Text style={compact ? txStylesCompact.timeText : txStyles.timeText}>{formatTimeAgo(tx.created_at)}</Text>
+          {!compact && tx.note && !refund && (
             <>
               <Text style={txStyles.dot}>·</Text>
               <Text style={txStyles.noteText} numberOfLines={1}>
@@ -282,10 +291,12 @@ function TransactionRow({
           )}
         </View>
 
-        <View style={txStyles.balanceRow}>
-          <Text style={txStyles.balanceLabel}>Balance after</Text>
-          <Text style={txStyles.balanceValue}>{remainingBalance} Neurons</Text>
-        </View>
+        {!compact && (
+          <View style={txStyles.balanceRow}>
+            <Text style={txStyles.balanceLabel}>Balance after</Text>
+            <Text style={txStyles.balanceValue}>{remainingBalance} Neurons</Text>
+          </View>
+        )}
       </View>
     </View>
   );
@@ -382,115 +393,74 @@ const txStyles = StyleSheet.create({
   },
 });
 
-// ── Main Component ───────────────────────────────────────────────────────
+const txStylesCompact = StyleSheet.create({
+  container: {
+    flexDirection: "row" as const,
+    alignItems: "center" as const,
+    gap: 8,
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    borderRadius: 5,
+    backgroundColor: "rgba(10,20,40,0.55)",
+    borderWidth: 1,
+    borderColor: "rgba(120,180,255,0.12)",
+  },
+  iconWrap: (color: string) => ({
+    width: 26,
+    height: 26,
+    borderRadius: 4,
+    alignItems: "center" as const,
+    justifyContent: "center" as const,
+    backgroundColor: color === palette.success ? palette.successSoft : palette.emberSoft,
+    borderWidth: 1,
+    borderColor: color === palette.success ? "rgba(0,255,178,0.22)" : "rgba(255,77,109,0.22)",
+  }),
+  content: {
+    flex: 1,
+    gap: 2,
+  },
+  topRow: {
+    flexDirection: "row" as const,
+    alignItems: "center" as const,
+    justifyContent: "space-between",
+    gap: 6,
+  },
+  title: {
+    color: palette.text,
+    fontSize: 12,
+    fontWeight: "800" as const,
+    flex: 1,
+  },
+  amount: (color: string) => ({
+    color,
+    fontSize: 13,
+    fontWeight: "900" as const,
+    fontVariant: ["tabular-nums" as never],
+  }),
+  metaRow: {
+    flexDirection: "row" as const,
+    alignItems: "center" as const,
+    gap: 3,
+    flexWrap: "wrap" as const,
+  },
+  bucketText: {
+    color: palette.cyan,
+    fontSize: 9,
+    fontWeight: "700" as const,
+    letterSpacing: 0.2,
+  },
+  dot: {
+    color: palette.muted,
+    fontSize: 9,
+  },
+  timeText: {
+    color: palette.muted,
+    fontSize: 9,
+    fontWeight: "600" as const,
+  },
+});
 
-function NeuronActivityImpl({
-  userId,
-  pal,
-}: {
-  userId: string | null;
-  pal: P;
-}): JSX.Element {
-  const h = useHaptics();
-  const queryClient = useQueryClient();
-  const [activeFilter, setActiveFilter] = useState<ActivityFilter>("all");
-
-  // Share the same cache key as EdgeProvider so mutations auto-refresh
-  const txKey = useMemo(
-    () => ["edge", "transactions", userId ?? "anon"] as const,
-    [userId],
-  );
-
-  const { data: transactions, isLoading } = useQuery<EdgeTransaction[]>({
-    queryKey: txKey,
-    enabled: !!userId,
-    queryFn: () => (userId ? listTransactions(userId, 75) : Promise.resolve([])),
-    staleTime: 15 * 1000,
-  });
-
-  const allTxs = useMemo(() => transactions ?? [], [transactions]);
-  const filtered = useMemo(
-    () => applyFilter(allTxs, activeFilter),
-    [allTxs, activeFilter],
-  );
-
-  const handleFilterPress = useCallback(
-    (filter: ActivityFilter) => {
-      h.selection();
-      setActiveFilter(filter);
-    },
-    [h],
-  );
-
-  // Refresh on mount
-  useEffect(() => {
-    if (userId) {
-      queryClient.invalidateQueries({ queryKey: ["edge", "transactions", userId] });
-    }
-  }, [userId, queryClient]);
-
-  if (isLoading) {
-    return (
-      <View style={{ paddingVertical: 20, alignItems: "center" }}>
-        <ActivityIndicator color={pal.cyan} size="small" />
-      </View>
-    );
-  }
-
-  if (allTxs.length === 0) {
-    return (
-      <View style={emptyStyles.container}>
-        <Zap color={pal.muted} size={22} />
-        <Text style={emptyStyles.text}>No Neuron activity yet</Text>
-        <Text style={emptyStyles.subtext}>
-          Your transaction history will appear here as you use Neurons.
-        </Text>
-      </View>
-    );
-  }
-
-  return (
-    <View style={{ gap: 6 }}>
-      {/* Filter tabs */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={{ gap: 6, paddingBottom: 6 }}
-      >
-        {FILTERS.map((f) => (
-          <FilterTab
-            key={f.id}
-            label={f.label}
-            active={activeFilter === f.id}
-            onPress={() => handleFilterPress(f.id)}
-            pal={pal}
-          />
-        ))}
-      </ScrollView>
-
-      {/* Transaction count */}
-      <Text style={countStyles.text}>
-        {filtered.length} transaction{filtered.length !== 1 ? "s" : ""}
-        {activeFilter !== "all" ? ` in ${FILTERS.find((f) => f.id === activeFilter)?.label}` : ""}
-      </Text>
-
-      {/* Transaction list */}
-      {filtered.length === 0 ? (
-        <View style={emptyStyles.container}>
-          <Text style={emptyStyles.subtext}>
-            No transactions in this category.
-          </Text>
-        </View>
-      ) : (
-        <View style={{ gap: 4 }}>
-          {filtered.map((tx) => (
-            <TransactionRow key={tx.id} tx={tx} pal={pal} />
-          ))}
-        </View>
-      )}
-    </View>
-  );
-}
+// ── Empty state styles ───────────────────────────────────────────────────
 
 const emptyStyles = StyleSheet.create({
   container: {
@@ -521,6 +491,251 @@ const countStyles = StyleSheet.create({
     letterSpacing: 0.5,
     textTransform: "uppercase" as const,
     paddingBottom: 2,
+  },
+});
+
+// ── Full-screen Modal ────────────────────────────────────────────────────
+
+function NeuronActivityModal({
+  visible,
+  onClose,
+  allTxs,
+  pal,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  allTxs: EdgeTransaction[];
+  pal: P;
+}): JSX.Element {
+  const h = useHaptics();
+  const [activeFilter, setActiveFilter] = useState<ActivityFilter>("all");
+
+  // Reset filter when modal opens
+  useEffect(() => {
+    if (visible) setActiveFilter("all");
+  }, [visible]);
+
+  const filtered = useMemo(
+    () => applyFilter(allTxs, activeFilter),
+    [allTxs, activeFilter],
+  );
+
+  const handleFilterPress = useCallback(
+    (filter: ActivityFilter) => {
+      h.selection();
+      setActiveFilter(filter);
+    },
+    [h],
+  );
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <View style={modalStyles.container}>
+        {/* Header */}
+        <View style={modalStyles.header}>
+          <Text style={modalStyles.headerTitle}>Neuron Activity</Text>
+          <Pressable
+            onPress={() => { h.selection(); onClose(); }}
+            style={({ pressed }) => [modalStyles.closeBtn, pressed && { opacity: 0.7 }]}
+            accessibilityLabel="Close Neuron Activity"
+            accessibilityRole="button"
+          >
+            <X color={palette.text} size={20} />
+          </Pressable>
+        </View>
+
+        {/* Filter tabs */}
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ gap: 6, paddingHorizontal: 16, paddingBottom: 8 }}
+        >
+          {FILTERS.map((f) => (
+            <FilterTab
+              key={f.id}
+              label={f.label}
+              active={activeFilter === f.id}
+              onPress={() => handleFilterPress(f.id)}
+              pal={pal}
+            />
+          ))}
+        </ScrollView>
+
+        {/* Transaction count */}
+        <Text style={[countStyles.text, { paddingHorizontal: 16, paddingBottom: 6 }]}>
+          {filtered.length} transaction{filtered.length !== 1 ? "s" : ""}
+          {activeFilter !== "all" ? ` in ${FILTERS.find((f) => f.id === activeFilter)?.label}` : ""}
+        </Text>
+
+        {/* Full transaction list */}
+        <ScrollView
+          style={{ flex: 1 }}
+          contentContainerStyle={{ gap: 4, paddingHorizontal: 16, paddingBottom: 24 }}
+          showsVerticalScrollIndicator
+        >
+          {filtered.length === 0 ? (
+            <View style={emptyStyles.container}>
+              <Text style={emptyStyles.subtext}>
+                No transactions in this category.
+              </Text>
+            </View>
+          ) : (
+            filtered.map((tx) => (
+              <TransactionRow key={tx.id} tx={tx} pal={pal} />
+            ))
+          )}
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+const modalStyles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: "#050D18",
+    paddingTop: 56,
+  },
+  header: {
+    flexDirection: "row" as const,
+    alignItems: "center" as const,
+    justifyContent: "space-between",
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+  },
+  headerTitle: {
+    color: palette.text,
+    fontSize: 18,
+    fontWeight: "900" as const,
+    letterSpacing: 0.3,
+  },
+  closeBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    alignItems: "center" as const,
+    justifyContent: "center" as const,
+    backgroundColor: "rgba(120,180,255,0.12)",
+  },
+});
+
+// ── Main Component (Settings Preview) ────────────────────────────────────
+
+function NeuronActivityImpl({
+  userId,
+  pal,
+}: {
+  userId: string | null;
+  pal: P;
+}): JSX.Element {
+  const h = useHaptics();
+  const queryClient = useQueryClient();
+  const [modalVisible, setModalVisible] = useState(false);
+
+  // Share the same cache key as EdgeProvider so mutations auto-refresh
+  const txKey = useMemo(
+    () => ["edge", "transactions", userId ?? "anon"] as const,
+    [userId],
+  );
+
+  const { data: transactions, isLoading } = useQuery<EdgeTransaction[]>({
+    queryKey: txKey,
+    enabled: !!userId,
+    queryFn: () => (userId ? listTransactions(userId, 75) : Promise.resolve([])),
+    staleTime: 15 * 1000,
+  });
+
+  const allTxs = useMemo(() => transactions ?? [], [transactions]);
+
+  // Only 5 most recent for the Settings preview
+  const previewTxs = useMemo(
+    () => allTxs.slice(0, PREVIEW_COUNT),
+    [allTxs],
+  );
+
+  // Refresh on mount
+  useEffect(() => {
+    if (userId) {
+      queryClient.invalidateQueries({ queryKey: ["edge", "transactions", userId] });
+    }
+  }, [userId, queryClient]);
+
+  const handleViewAll = useCallback(() => {
+    h.selection();
+    setModalVisible(true);
+  }, [h]);
+
+  if (isLoading) {
+    return (
+      <View style={{ paddingVertical: 20, alignItems: "center" }}>
+        <ActivityIndicator color={pal.cyan} size="small" />
+      </View>
+    );
+  }
+
+  if (allTxs.length === 0) {
+    return (
+      <View style={emptyStyles.container}>
+        <Zap color={pal.muted} size={22} />
+        <Text style={emptyStyles.text}>No Neuron activity yet</Text>
+        <Text style={emptyStyles.subtext}>
+          Your transaction history will appear here as you use Neurons.
+        </Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={{ gap: 4 }}>
+      {/* Compact preview rows (max 5, newest first) */}
+      {previewTxs.map((tx) => (
+        <TransactionRow key={tx.id} tx={tx} pal={pal} compact />
+      ))}
+
+      {/* View All button */}
+      <Pressable
+        onPress={handleViewAll}
+        style={({ pressed }) => [
+          viewAllStyles.button,
+          pressed && { opacity: 0.7 },
+        ]}
+        accessibilityLabel="View All Neuron Activity"
+        accessibilityRole="button"
+      >
+        <Text style={viewAllStyles.text}>View All Neuron Activity</Text>
+        <ChevronRight color={pal.cyan} size={16} />
+      </Pressable>
+
+      {/* Full-screen modal with complete history + filters */}
+      <NeuronActivityModal
+        visible={modalVisible}
+        onClose={() => setModalVisible(false)}
+        allTxs={allTxs}
+        pal={pal}
+      />
+    </View>
+  );
+}
+
+const viewAllStyles = StyleSheet.create({
+  button: {
+    flexDirection: "row" as const,
+    alignItems: "center" as const,
+    justifyContent: "center" as const,
+    gap: 6,
+    paddingVertical: 11,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    backgroundColor: "rgba(0,200,255,0.10)",
+    borderWidth: 1,
+    borderColor: "rgba(0,200,255,0.25)",
+    marginTop: 4,
+  },
+  text: {
+    color: palette.cyan,
+    fontSize: 12,
+    fontWeight: "900" as const,
+    letterSpacing: 0.3,
   },
 });
 
