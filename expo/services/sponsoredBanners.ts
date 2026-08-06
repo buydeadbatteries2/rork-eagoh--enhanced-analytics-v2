@@ -653,47 +653,69 @@ async function enrichBanners(banners: any[]): Promise<EnrichedBanner[]> {
   const enriched: EnrichedBanner[] = [];
 
   for (const b of banners) {
-    const eagoh = b.eagoh ?? {};
-    // Get vendor stats for rank/score
-    let vendorRank = "UNRANKED";
-    let syncScore = 0;
-    let qualityScore = 0;
-    let vendorUsername: string | null = null;
+    try {
+      if (!b || !b.id || !b.eagoh_id) {
+        console.warn("[sponsoredBanners] skipping invalid banner row (missing id or eagoh_id)");
+        continue;
+      }
 
-    // Try vendor stats
-    const { data: stats } = await supabase
-      .from("marketplace_vendor_stats")
-      .select("rank, sync_success_score, avg_quality_score")
-      .eq("vendor_id", b.purchaser_id)
-      .maybeSingle();
+      const eagoh = b.eagoh ?? {};
+      // Get vendor stats for rank/score
+      let vendorRank = "UNRANKED";
+      let syncScore = 0;
+      let qualityScore = 0;
+      let vendorUsername: string | null = null;
 
-    if (stats) {
-      vendorRank = stats.rank ?? "UNRANKED";
-      syncScore = stats.sync_success_score ?? 0;
-      qualityScore = stats.avg_quality_score ?? 0;
+      // Try vendor stats (best-effort — RLS or missing table must not crash the page)
+      try {
+        const { data: stats } = await supabase
+          .from("marketplace_vendor_stats")
+          .select("rank, sync_success_score, avg_quality_score")
+          .eq("vendor_id", b.purchaser_id)
+          .maybeSingle();
+
+        if (stats) {
+          vendorRank = stats.rank ?? "UNRANKED";
+          syncScore = stats.sync_success_score ?? 0;
+          qualityScore = stats.avg_quality_score ?? 0;
+        }
+      } catch (statsErr) {
+        console.warn("[sponsoredBanners] vendor stats fetch failed (non-fatal)", statsErr instanceof Error ? statsErr.message : "unknown");
+      }
+
+      // Try username (best-effort)
+      try {
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("username")
+          .eq("id", b.purchaser_id)
+          .maybeSingle();
+
+        vendorUsername = profile?.username ?? null;
+      } catch (profileErr) {
+        console.warn("[sponsoredBanners] profile fetch failed (non-fatal)", profileErr instanceof Error ? profileErr.message : "unknown");
+      }
+
+      enriched.push({
+        ...b,
+        eagoh_name: (typeof eagoh.name === "string" ? eagoh.name : "Unnamed") || "Unnamed",
+        eagoh_domain: (typeof eagoh.sport === "string" ? eagoh.sport : "unknown") || "unknown",
+        eagoh_image_url: (typeof eagoh.image_url === "string" ? eagoh.image_url : null) ?? null,
+        vendor_username: vendorUsername,
+        quality_score: qualityScore,
+        sync_score: syncScore,
+        vendor_rank: vendorRank,
+        listing_id: b.listing_id ?? null,
+      });
+    } catch (bannerErr) {
+      console.warn("[sponsoredBanners] skipping banner due to enrichment error (non-fatal)", bannerId(b), bannerErr instanceof Error ? bannerErr.message : "unknown");
+      continue;
     }
-
-    // Try username
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("username")
-      .eq("id", b.purchaser_id)
-      .maybeSingle();
-
-    vendorUsername = profile?.username ?? null;
-
-    enriched.push({
-      ...b,
-      eagoh_name: eagoh.name ?? "Unnamed",
-      eagoh_domain: eagoh.sport ?? "unknown",
-      eagoh_image_url: eagoh.image_url ?? null,
-      vendor_username: vendorUsername,
-      quality_score: qualityScore,
-      sync_score: syncScore,
-      vendor_rank: vendorRank,
-      listing_id: b.listing_id ?? null,
-    });
   }
 
   return enriched;
+}
+
+function bannerId(b: any): string {
+  return (b?.id ?? "unknown").slice(0, 8);
 }

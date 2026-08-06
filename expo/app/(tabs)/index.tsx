@@ -150,7 +150,9 @@ const SponsoredBanner = React.memo(function SponsoredBanner({ item, userId, repu
   const eagohRank: RankTier = (reputation?.rank as RankTier) ?? "Dormant";
   const repScore = reputation?.reputation_score ?? 0;
   const accent = repScore > 0 ? repRankColor(eagohRank) : (item.vendor_rank === "S-TIER" ? palette.gold : item.vendor_rank === "ELITE" ? palette.cyan : palette.violet);
-  const domainLabel: string = item.eagoh_domain.charAt(0).toUpperCase() + item.eagoh_domain.slice(1).replace(/_/g, " ");
+  const safeDomain: string = typeof item.eagoh_domain === "string" && item.eagoh_domain.length > 0 ? item.eagoh_domain : "unknown";
+  const safeName: string = typeof item.eagoh_name === "string" && item.eagoh_name.length > 0 ? item.eagoh_name : "Unnamed";
+  const domainLabel: string = safeDomain.charAt(0).toUpperCase() + safeDomain.slice(1).replace(/_/g, " ");
 
   // Record impression on mount
   useEffect(() => {
@@ -184,7 +186,7 @@ const SponsoredBanner = React.memo(function SponsoredBanner({ item, userId, repu
         item.hot_badge && styles.sponsoredCardHot,
       ]}
     >
-      <MiniImage accent={item.vendor_rank === "S-TIER" ? "gold" : item.vendor_rank === "ELITE" ? "cyan" : "violet"} label={item.eagoh_name.slice(0, 8).toUpperCase()} />
+      <MiniImage accent={item.vendor_rank === "S-TIER" ? "gold" : item.vendor_rank === "ELITE" ? "cyan" : "violet"} label={safeName.slice(0, 8).toUpperCase()} />
       {item.hot_badge && (
         <View style={styles.hotBadge}>
           <Text style={styles.hotBadgeText}>HOT</Text>
@@ -201,7 +203,7 @@ const SponsoredBanner = React.memo(function SponsoredBanner({ item, userId, repu
           )}
           <Text style={styles.score}>{item.quality_score}</Text>
         </View>
-        <Text style={styles.sponsoredTitle}>{item.eagoh_name}</Text>
+        <Text style={styles.sponsoredTitle}>{safeName}</Text>
         <Text style={styles.sponsoredAnalytics}>{domainLabel} · Sync Score: {item.sync_score}</Text>
         <Text numberOfLines={expanded ? 3 : 1} style={styles.sponsoredDetail}>
           {expanded

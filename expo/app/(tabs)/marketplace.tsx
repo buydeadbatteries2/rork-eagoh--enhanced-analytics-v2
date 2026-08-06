@@ -2204,7 +2204,9 @@ const MktSponsoredBanner = memo(function MktSponsoredBanner({ item, userId, repu
   const eagohRank: RankTier = (reputation?.rank as RankTier) ?? "Dormant";
   const repScore = reputation?.reputation_score ?? 0;
   const accent = repScore > 0 ? rankColor(eagohRank) : (item.vendor_rank === "S-TIER" ? palette.gold : item.vendor_rank === "ELITE" ? palette.cyan : palette.violet);
-  const domainLabel: string = item.eagoh_domain.charAt(0).toUpperCase() + item.eagoh_domain.slice(1).replace(/_/g, " ");
+  const safeDomain: string = typeof item.eagoh_domain === "string" && item.eagoh_domain.length > 0 ? item.eagoh_domain : "unknown";
+  const safeName: string = typeof item.eagoh_name === "string" && item.eagoh_name.length > 0 ? item.eagoh_name : "Unnamed";
+  const domainLabel: string = safeDomain.charAt(0).toUpperCase() + safeDomain.slice(1).replace(/_/g, " ");
 
   useEffect(() => {
     if (userId) recordBannerImpression(item.id, userId).catch(() => undefined);
@@ -2236,10 +2238,10 @@ const MktSponsoredBanner = memo(function MktSponsoredBanner({ item, userId, repu
         </View>
       )}
       <View style={styles.mktBannerImage}>
-        <OptimizedEagohImage tone={item.vendor_rank === "S-TIER" ? "gold" : item.vendor_rank === "ELITE" ? "cyan" : "violet"} label={item.eagoh_name.slice(0, 8).toUpperCase()} size="banner" imageUrl={item.eagoh_image_url} />
+        <OptimizedEagohImage tone={item.vendor_rank === "S-TIER" ? "gold" : item.vendor_rank === "ELITE" ? "cyan" : "violet"} label={safeName.slice(0, 8).toUpperCase()} size="banner" imageUrl={item.eagoh_image_url} />
       </View>
       <View style={styles.mktBannerInfo}>
-        <Text style={styles.mktBannerName} numberOfLines={1}>{item.eagoh_name}</Text>
+        <Text style={styles.mktBannerName} numberOfLines={1}>{safeName}</Text>
         <Text style={styles.mktBannerDomain}>{domainLabel}</Text>
         {repScore > 0 && (
           <View style={[styles.mktBannerRankRow, { borderColor: `${accent}33`, backgroundColor: `${accent}10` }]}>
@@ -2384,11 +2386,14 @@ export default function MarketplaceScreen(): JSX.Element {
 
   // Stale-request protection: only the latest filter change may update state.
   const loadRequestId = useRef(0);
+  // Track prior data presence via ref to avoid re-creating loadData on every listings update.
+  const hasPriorDataRef = useRef(false);
+  hasPriorDataRef.current = listings.length > 0;
 
   const loadData = useCallback(async () => {
     if (!user?.id) { setInitialLoading(false); return; }
     const reqId = ++loadRequestId.current;
-    const hasPriorData = listings.length > 0;
+    const hasPriorData = hasPriorDataRef.current;
     // Only show full-screen initial loader when there is no prior data
     if (!hasPriorData) {
       setInitialLoading(true);
@@ -2445,7 +2450,7 @@ export default function MarketplaceScreen(): JSX.Element {
         setFiltering(false);
       }
     }
-  }, [user?.id, isPaid, filters, listings.length, queryClient]);
+  }, [user?.id, isPaid, filters, queryClient]);
 
   useEffect(() => {
     loadData();

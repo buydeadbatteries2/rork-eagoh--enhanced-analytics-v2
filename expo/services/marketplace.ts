@@ -615,7 +615,12 @@ export async function listActiveListings(
   const { data, error } = await query;
   if (error) throw error;
 
-  const rows: (MarketplaceListingRow & { eagoh: EagohRecord | null })[] = (data ?? []) as any;
+  const rawRows: (MarketplaceListingRow & { eagoh: EagohRecord | null })[] = (data ?? []) as any;
+  if (rawRows.length === 0) return [];
+
+  // Filter out listings whose EAGOH has been deleted or is inaccessible due to RLS.
+  // These would render as "Unnamed" cards with no image — skip them entirely.
+  const rows = rawRows.filter((r) => r.eagoh && r.eagoh.id);
   if (rows.length === 0) return [];
 
   const enriched = await bulkEnrichListings(rows);
@@ -756,7 +761,11 @@ export async function getMyListings(vendorId: string): Promise<EnrichedListing[]
     .order("created_at", { ascending: false });
 
   if (error) throw error;
-  const rows: (MarketplaceListingRow & { eagoh: EagohRecord | null })[] = (data ?? []) as any;
+  const rawRows: (MarketplaceListingRow & { eagoh: EagohRecord | null })[] = (data ?? []) as any;
+  if (rawRows.length === 0) return [];
+
+  // Filter out listings whose EAGOH has been deleted or is inaccessible.
+  const rows = rawRows.filter((r) => r.eagoh && r.eagoh.id);
   if (rows.length === 0) return [];
 
   return bulkEnrichListings(rows);
