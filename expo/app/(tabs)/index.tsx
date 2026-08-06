@@ -163,7 +163,7 @@ const SponsoredBanner = React.memo(function SponsoredBanner({ item, userId, repu
     if (userId) recordBannerTap(item.id, userId).catch(() => undefined);
     // Open the exact Exchange listing if available
     if (item.listing_id) {
-      router.push({ pathname: "/public-listing", params: { id: item.listing_id } } as never);
+      router.push({ pathname: "/public-listing", params: { listingId: item.listing_id } } as never);
     }
   };
 

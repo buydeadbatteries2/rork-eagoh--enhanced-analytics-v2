@@ -2221,7 +2221,7 @@ const MktSponsoredBanner = memo(function MktSponsoredBanner({ item, userId, repu
       onPress={() => {
         if (userId) recordBannerTap(item.id, userId).catch(() => undefined);
         if (item.listing_id) {
-          router.push({ pathname: "/public-listing", params: { id: item.listing_id } } as never);
+          router.push({ pathname: "/public-listing", params: { listingId: item.listing_id } } as never);
         }
       }}
       delayLongPress={280}
