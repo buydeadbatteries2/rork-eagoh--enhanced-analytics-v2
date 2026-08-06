@@ -1,6 +1,51 @@
 import { supabase } from "@/lib/supabase";
 import type { UserProfile, SubscriptionTier } from "@/services/profile";
 
+// ── Image Resolution ───────────────────────────────────────────────────
+
+/**
+ * Resolves the best displayable EAGOH image URL from banner-joined eagoh data.
+ *
+ * EAGOH images are stored as `image_url` / `image_thumb_url` on the eagohs row.
+ * These are typically remote HTTPS URLs (Rork toolkit CDN) or data URIs.
+ * Local device URIs (file://, content://, blob:) are NOT usable by other users.
+ *
+ * This mirrors `resolveMarketplaceEagohImage` in marketplace.ts so that
+ * sponsored banner cards and Exchange listing cards use the exact same
+ * image resolution logic.
+ */
+export function resolveBannerEagohImage(
+  eagoh: { image_url?: string | null; image_thumb_url?: string | null } | null | undefined,
+): string | null {
+  if (!eagoh) return null;
+
+  const raw = eagoh.image_thumb_url ?? eagoh.image_url;
+  if (!raw || typeof raw !== "string") return null;
+
+  // Accept remote HTTPS URLs and data URIs (base64 images)
+  if (raw.startsWith("https://") || raw.startsWith("data:")) {
+    return raw;
+  }
+
+  // Reject local device URIs — these only work on the device that created them
+  if (
+    raw.startsWith("file://") ||
+    raw.startsWith("content://") ||
+    raw.startsWith("blob:")
+  ) {
+    if (__DEV__) {
+      console.warn("[sponsoredBanners] ignoring local-only EAGOH image URI", raw.slice(0, 60));
+    }
+    return null;
+  }
+
+  // Unknown scheme — return as-is but log a warning
+  if (__DEV__) {
+    console.warn("[sponsoredBanners] unknown EAGOH image URI scheme", raw.slice(0, 60));
+  }
+  return raw;
+}
+
 // ── Types ──────────────────────────────────────────────────────────────
 
 export type BannerLocation = "home" | "marketplace";
@@ -421,7 +466,8 @@ export async function getMyBannerBookings(userId: string): Promise<BannerBooking
       eagoh:eagohs!inner (
         id,
         name,
-        image_url
+        image_url,
+        image_thumb_url
       )
     `)
     .eq("purchaser_id", userId)
@@ -446,7 +492,7 @@ export async function getMyBannerBookings(userId: string): Promise<BannerBooking
       id: b.id as string,
       eagoh_id: b.eagoh_id as string,
       eagoh_name: (eagoh.name as string) ?? "Unnamed",
-      eagoh_image_url: (eagoh.image_url as string | null) ?? null,
+      eagoh_image_url: resolveBannerEagohImage({ image_url: eagoh.image_url as string | null, image_thumb_url: eagoh.image_thumb_url as string | null }),
       location: b.location as BannerLocation,
       start_date: b.start_date as string,
       end_date: b.end_date as string,

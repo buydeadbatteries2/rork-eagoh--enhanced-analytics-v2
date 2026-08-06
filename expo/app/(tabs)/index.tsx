@@ -139,8 +139,8 @@ function SectionHeader({ eyebrow, title, action }: { eyebrow: string; title: str
   );
 }
 
-const MiniImage = React.memo(function MiniImage({ accent, label }: { accent: CardTone; label: string }): JSX.Element {
-  return <OptimizedEagohImage tone={accent} label={label} size="compact" />;
+const MiniImage = React.memo(function MiniImage({ accent, label, imageUrl }: { accent: CardTone; label: string; imageUrl?: string | null }): JSX.Element {
+  return <OptimizedEagohImage tone={accent} label={label} size="compact" imageUrl={imageUrl} />;
 });
 
 const SponsoredBanner = React.memo(function SponsoredBanner({ item, userId, reputation }: { item: EnrichedBanner; userId: string | null; reputation: ReputationRow | undefined }): JSX.Element {
@@ -186,7 +186,7 @@ const SponsoredBanner = React.memo(function SponsoredBanner({ item, userId, repu
         item.hot_badge && styles.sponsoredCardHot,
       ]}
     >
-      <MiniImage accent={item.vendor_rank === "S-TIER" ? "gold" : item.vendor_rank === "ELITE" ? "cyan" : "violet"} label={safeName.slice(0, 8).toUpperCase()} />
+      <MiniImage accent={item.vendor_rank === "S-TIER" ? "gold" : item.vendor_rank === "ELITE" ? "cyan" : "violet"} label={safeName.slice(0, 8).toUpperCase()} imageUrl={item.eagoh_image_url} />
       {item.hot_badge && (
         <View style={styles.hotBadge}>
           <Text style={styles.hotBadgeText}>HOT</Text>
@@ -266,23 +266,20 @@ const HeroSection = React.memo(function HeroSection({ onEdgePress }: { onEdgePre
 });
 
 const SponsoredSection = React.memo(function SponsoredSection({ userId }: { userId: string | null }): JSX.Element {
-  const [banners, setBanners] = useState<EnrichedBanner[]>([]);
+  const { data: banners, isLoading: loading } = useQuery<EnrichedBanner[]>({
+    queryKey: ["activeBanners", "home"],
+    queryFn: () => getActiveBanners("home"),
+    staleTime: 60_000,
+  });
   const [bannerRepMap, setBannerRepMap] = useState<Map<string, ReputationRow>>(new Map());
-  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    setLoading(true);
-    getActiveBanners("home")
-      .then((b) => {
-        setBanners(b);
-        setLoading(false);
-        const eagohIds = [...new Set(b.map((bb) => bb.eagoh_id))];
-        if (eagohIds.length > 0) {
-          getBulkReputations(eagohIds).then(setBannerRepMap).catch(() => undefined);
-        }
-      })
-      .catch(() => setLoading(false));
-  }, []);
+    const b = banners ?? [];
+    const eagohIds = [...new Set(b.map((bb) => bb.eagoh_id))];
+    if (eagohIds.length > 0) {
+      getBulkReputations(eagohIds).then(setBannerRepMap).catch(() => undefined);
+    }
+  }, [banners]);
 
   const renderItem = useCallback(
     ({ item }: { item: EnrichedBanner }) => <SponsoredBanner item={item} userId={userId} reputation={bannerRepMap.get(item.eagoh_id)} />,
@@ -298,7 +295,7 @@ const SponsoredSection = React.memo(function SponsoredSection({ userId }: { user
     );
   }
 
-  if (banners.length === 0) {
+  if ((banners ?? []).length === 0) {
     return (
       <View>
         <SectionHeader eyebrow="PROMOTED SIGNALS" title="Sponsored EAGOHs" action="Promote yours" />
@@ -973,6 +970,7 @@ export default function HomeScreen(): JSX.Element {
         visible={purchaseModal}
         onClose={() => setPurchaseModal(false)}
         onPurchased={() => {
+          queryClient.invalidateQueries({ queryKey: ["activeBanners"] });
           queryClient.invalidateQueries({ queryKey: ["myBannerBookings"] });
           queryClient.invalidateQueries({ queryKey: ["myActiveBanners"] });
           queryClient.invalidateQueries({ queryKey: ["edge", "transactions"] });

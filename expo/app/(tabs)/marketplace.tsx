@@ -2259,23 +2259,20 @@ const MktSponsoredBanner = memo(function MktSponsoredBanner({ item, userId, repu
 });
 
 const MktSponsoredCarousel = memo(function MktSponsoredCarousel({ userId, onPromote }: { userId: string | null; onPromote: () => void }): JSX.Element | null {
-  const [banners, setBanners] = useState<EnrichedBanner[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: banners, isLoading: loading } = useQuery<EnrichedBanner[]>({
+    queryKey: ["activeBanners", "marketplace"],
+    queryFn: () => getActiveBanners("marketplace"),
+    staleTime: 60_000,
+  });
   const [bannerRepMap, setBannerRepMap] = useState<Map<string, ReputationRow>>(new Map());
 
   useEffect(() => {
-    setLoading(true);
-    getActiveBanners("marketplace")
-      .then((b) => {
-        setBanners(b);
-        setLoading(false);
-        const eagohIds = [...new Set(b.map((bb) => bb.eagoh_id))];
-        if (eagohIds.length > 0) {
-          getBulkReputations(eagohIds).then(setBannerRepMap).catch(() => undefined);
-        }
-      })
-      .catch(() => setLoading(false));
-  }, []);
+    const b = banners ?? [];
+    const eagohIds = [...new Set(b.map((bb) => bb.eagoh_id))];
+    if (eagohIds.length > 0) {
+      getBulkReputations(eagohIds).then(setBannerRepMap).catch(() => undefined);
+    }
+  }, [banners]);
 
   if (loading) return null;
 
@@ -2291,7 +2288,7 @@ const MktSponsoredCarousel = memo(function MktSponsoredCarousel({ userId, onProm
           <Text style={styles.promoteCtaText}>Promote yours</Text>
         </Pressable>
       </View>
-      {banners.length === 0 ? (
+      {(banners ?? []).length === 0 ? (
         <View style={styles.emptyBannerCard}>
           <Megaphone color={palette.muted} size={24} />
           <Text style={styles.emptyBannerText}>No active Marketplace sponsors. Promote your EAGOH to be featured here.</Text>
@@ -2302,7 +2299,7 @@ const MktSponsoredCarousel = memo(function MktSponsoredCarousel({ userId, onProm
         </View>
       ) : (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingRight: 16 }} {...HORIZONTAL_LIST_PERFORMANCE_PROPS}>
-          {banners.map((b) => (
+          {(banners ?? []).map((b) => (
             <MktSponsoredBanner key={b.id} item={b} userId={userId} reputation={bannerRepMap.get(b.eagoh_id)} />
           ))}
         </ScrollView>
@@ -2940,6 +2937,7 @@ export default function MarketplaceScreen(): JSX.Element {
         visible={bannerModalVisible}
         onClose={() => setBannerModalVisible(false)}
         onPurchased={() => {
+          queryClient.invalidateQueries({ queryKey: ["activeBanners"] });
           queryClient.invalidateQueries({ queryKey: ["myBannerBookings"] });
           queryClient.invalidateQueries({ queryKey: ["myActiveBanners"] });
           queryClient.invalidateQueries({ queryKey: ["edge", "transactions"] });
