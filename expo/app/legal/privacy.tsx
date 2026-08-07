@@ -7,15 +7,19 @@ import { SafeAreaView } from "react-native-safe-area-context";
 const SECTIONS: { title: string; body: string }[] = [
   {
     title: "Information We Collect",
-    body: "We collect information you provide when creating an account, using EAGOH features, and interacting with the platform. This includes account credentials, profile details, EAGOH configurations, observation entries, marketplace activity, and faction participation data.",
+    body: "We collect information you provide when creating an account, using EAGOH features, and interacting with the platform. This includes account credentials, profile details, EAGOH configurations, Open Intelligence observations, Exchange marketplace activity, Arena matchups, Faction participation data, sponsored banner bookings, and Neuron transaction history.",
   },
   {
     title: "Account Information",
-    body: "When you register, we collect your email address and username. Your password is handled securely by Supabase Auth and is never stored in plaintext. We may also collect optional profile preferences such as theme selection and haptic feedback settings.",
+    body: "When you register, we collect your email address and username. Your password is handled securely by Supabase Auth and is never stored in plaintext. We may also collect optional profile preferences such as theme selection, haptic feedback settings, and notification preferences.",
+  },
+  {
+    title: "Public Profile Information",
+    body: "EAGOH maintains public profile pages that display your username, avatar, banner image, public title, knowledge credentials, credibility tags, marketplace reputation, EAGOH count, top EAGOHs, and active intelligence domains. You control which information appears on your public profile through your profile settings. Your email address, private user ID, subscription tier, and account preferences are never displayed on your public profile.",
   },
   {
     title: "User Content",
-    body: "Content you create on EAGOH, including EAGOH identities, observation entries, marketplace listings, faction messages, and generated images, is stored on our servers. You control what you share publicly through marketplace listings and faction activity. Private data such as your email and account settings are never shared publicly.",
+    body: "Content you create on EAGOH, including EAGOH identities, Open Intelligence observations, Exchange listings, Faction messages, source credentials, and generated images, is stored on our servers. You control what you share publicly through Exchange listings, Faction activity, and your public profile. Private data such as your email, account settings, and Neuron transaction history are never shared publicly.",
   },
   {
     title: "Device Information",
@@ -23,23 +27,31 @@ const SECTIONS: { title: string; body: string }[] = [
   },
   {
     title: "AI Processing Disclosure",
-    body: "When you use EAGOH features that involve artificial intelligence (such as chat analysis, image generation, and observation scoring), your content is transmitted to third-party AI providers including OpenAI for processing. These providers process your data solely for the purpose of generating AI responses and do not use your data for their own model training in accordance with their respective data processing agreements.",
+    body: "When you use EAGOH features that involve artificial intelligence (such as chat analysis, image generation, observation quality scoring, Arena comparisons, and EAGOH intelligence responses), your content is transmitted to third-party AI providers including OpenAI for processing. These providers process your data solely for the purpose of generating AI responses and do not use your data for their own model training in accordance with their respective data processing agreements.",
   },
   {
     title: "Third-Party Providers",
-    body: "EAGOH relies on the following third-party services:\n\n• Supabase — provides database hosting, authentication, and file storage for your account data, EAGOH content, and generated images.\n\n• OpenAI — processes text prompts for AI chat analysis, observation quality scoring, and EAGOH intelligence responses.\n\n• RevenueCat — manages subscription purchases and payment processing (coming soon). RevenueCat does not receive your EAGOH content or observation data.\n\nEach provider adheres to its own privacy and security standards. We do not sell personal information to any third party.",
+    body: "EAGOH relies on the following third-party services:\n\n• Supabase — provides database hosting, authentication, and file storage for your account data, EAGOH content, and generated images.\n\n• OpenAI — processes text prompts for AI chat analysis, observation quality scoring, Arena comparisons, and EAGOH intelligence responses.\n\n• RevenueCat — manages subscription purchases, Neuron Pack purchases, and payment processing through Apple App Store in-app purchase. RevenueCat does not receive your EAGOH content, observation data, or Faction activity.\n\n• Apple App Store — processes all in-app purchases. Payment information is handled by Apple and is not accessible to EAGOH.\n\nEach provider adheres to its own privacy and security standards. We do not sell personal information to any third party.",
+  },
+  {
+    title: "Neuron Transaction Data",
+    body: "EAGOH records all Neuron transactions, including subscription allocations, purchases, spending, rewards, refunds, and rollovers. This data is used to display your Neuron activity history, compute balances, and maintain platform integrity. Transaction data is private and visible only to you and authorized EAGOH administrators. Transaction records may be retained for accounting and dispute resolution purposes even after account deletion.",
+  },
+  {
+    title: "Social Share Verification",
+    body: "If you participate in the Social Share Verification program, you may submit screenshots of shared EAGOH content for verification. These screenshots are reviewed for authenticity and may be retained for fraud prevention purposes. Submitted screenshots are not shared publicly and are visible only to authorized reviewers.",
   },
   {
     title: "Data Retention",
-    body: "We retain your account data and content for as long as your account remains active. If you delete your account, we will remove your personal data within 30 days, except where retention is required by law. Anonymized or aggregated data may be retained for analytical purposes.",
+    body: "We retain your account data and content for as long as your account remains active. If you delete your account, we will remove your personal data within 30 days, except where retention is required by law. Anonymized or aggregated data may be retained for analytical purposes. Neuron transaction records may be retained for accounting and dispute resolution purposes as described in the Neuron Transaction Data section.",
   },
   {
     title: "Security",
-    body: "We implement industry-standard security measures to protect your data, including encryption in transit (TLS), database-level row-level security (RLS) via Supabase, and authenticated API access. However, no method of electronic storage is 100% secure, and we cannot guarantee absolute security.",
+    body: "We implement industry-standard security measures to protect your data, including encryption in transit (TLS), database-level row-level security (RLS) via Supabase, authenticated API access, and server-side atomic transactions for Neuron deductions. All Neuron spending, banner purchases, and Exchange transactions are processed through secure server-side worker endpoints — the client never directly modifies balances or inserts transaction records. However, no method of electronic storage is 100% secure, and we cannot guarantee absolute security.",
   },
   {
     title: "Your Rights",
-    body: "You have the right to: (a) access your personal data stored in EAGOH; (b) request correction of inaccurate data; (c) request deletion of your account and associated data; (d) export your data (coming soon); (e) withdraw consent where processing is consent-based. To exercise these rights, contact us at eagohsupport@ndstriistudios.com.",
+    body: "You have the right to: (a) access your personal data stored in EAGOH; (b) request correction of inaccurate data; (c) request deletion of your account and associated data through the app settings; (d) withdraw consent where processing is consent-based. Account deletion permanently removes your EAGOHs, observations, Exchange listings, Faction memberships, retained intelligence, and profile data. To exercise these rights, contact us at eagohsupport@ndstriistudios.com.",
   },
   {
     title: "Children's Privacy",
@@ -48,6 +60,10 @@ const SECTIONS: { title: string; body: string }[] = [
   {
     title: "International Users",
     body: "EAGOH is operated from the United States. If you access EAGOH from outside the United States, your data will be transferred to and processed in the United States. By using EAGOH, you consent to such transfer and processing in accordance with this Privacy Policy.",
+  },
+  {
+    title: "Changes to This Privacy Policy",
+    body: "We may update this Privacy Policy from time to time. Material changes will be communicated through the app or via email. Continued use of EAGOH after changes take effect constitutes acceptance of the revised Privacy Policy.",
   },
   {
     title: "Contact",
@@ -75,7 +91,7 @@ export default function PrivacyScreen(): JSX.Element {
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        <Text style={styles.lastUpdated}>Last updated: June 2025</Text>
+        <Text style={styles.lastUpdated}>Last updated: August 2026</Text>
         <View style={styles.pledge}>
           <Text style={styles.pledgeTitle}>We do not sell personal information.</Text>
           <Text style={styles.pledgeBody}>

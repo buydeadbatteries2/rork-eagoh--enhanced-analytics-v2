@@ -11,7 +11,7 @@ const SECTIONS: { title: string; body: string }[] = [
   },
   {
     title: "Description of Service",
-    body: "EAGOH (Enhanced Analytics & Game Oracle Hub) is an AI-powered intelligence platform that allows users to create personalized AI oracle identities (\"EAGOHs\"), submit observations, participate in mock intelligence marketplaces, join analyst factions, and explore predictive analytics. EAGOH provides informational and entertainment content only. EAGOH is not a gambling platform, financial advisor, medical professional, or legal counsel.",
+    body: "EAGOH (Enhanced Analytics & Game Oracle Hub) is an AI-powered intelligence platform that allows users to create personalized AI oracle identities (\"EAGOHs\"), submit Open Intelligence observations, participate in a mock intelligence marketplace (\"Exchange\"), join analyst Factions, compete in Arena matchups, earn leaderboard rankings, purchase sponsored banner promotions, and explore predictive analytics. EAGOH provides informational and entertainment content only. EAGOH is not a gambling platform, financial advisor, medical professional, or legal counsel.",
   },
   {
     title: "User Accounts",
@@ -19,19 +19,47 @@ const SECTIONS: { title: string; body: string }[] = [
   },
   {
     title: "Subscriptions and Neurons",
-    body: "EAGOH offers subscription tiers (Free, Pro, Oracle Elite, Syndicate) that allocate monthly Neurons for platform activities. Neurons are virtual platform currency with no real-world cash value. They cannot be redeemed for money, transferred outside the platform, or exchanged for any financial instrument. Subscription Neurons may be subject to rollover caps. Purchased Neurons, when available through RevenueCat, are non-refundable except as required by applicable law.",
+    body: "EAGOH offers subscription tiers (Free, Pro, Oracle Elite, Syndicate) that allocate monthly Neurons for platform activities. Subscriptions are processed through RevenueCat via Apple App Store in-app purchase. Neurons are virtual platform currency with no real-world cash value. They cannot be redeemed for money, transferred outside the platform, or exchanged for any financial instrument. Subscription Neurons are subject to monthly rollover caps: unused subscription Neurons roll over only if you retained at least 10% of the prior month's allocation, up to a maximum of 10% of the prior allocation. Free tier Neurons do not roll over. Purchased Neuron Packs are available through RevenueCat and do not expire. Purchased Neurons are non-refundable except as required by applicable law. If a subscription is canceled, the current billing cycle's allocation remains available until the cycle ends; subsequent monthly allocations will not be granted.",
+  },
+  {
+    title: "Open Intelligence",
+    body: "Open Intelligence is a community knowledge system where users submit domain-locked observation entries with optional tags, confidence levels, and supporting context. Observations are scored for quality using AI-based evaluation. Submitted observations become part of the EAGOH knowledge ecosystem and may be visible to other users through Learning Feeds and marketplace listings. You retain ownership of your observations and grant EAGOH a license to display and process them within the platform as described in the User Content section.",
+  },
+  {
+    title: "Exchange Marketplace",
+    body: "The EAGOH Exchange enables mock intelligence sync transactions between users using Neurons. Vendors create listings for their EAGOHs at chosen price points (25%, 50%, 75%, 100% sync levels) and durations (1–5 days). Buyers pay Neurons to temporarily access a vendor EAGOH's intelligence. EAGOH does not guarantee the accuracy, reliability, or value of any Exchange listing. Users participate at their own discretion. A vendor cannot purchase their own listing.",
+  },
+  {
+    title: "Retained Exchange Intelligence",
+    body: "Each completed Exchange purchase may permanently add a limited selection (approximately 2%) of the purchased EAGOH's Open Intelligence to your private Retained Exchange Intelligence library. You may retain no more than 25% of any individual vendor EAGOH's eligible Open Intelligence. Once that limit is reached, future purchases will still provide temporary purchased access but will not add more retained entries. Retained entries are read-only, vendor-attributed, private, and cannot be resold, shared with Factions, or listed on the Exchange.",
+  },
+  {
+    title: "Arena Mode",
+    body: "Arena Mode allows users to pit their EAGOH against another EAGOH in domain-specific head-to-head analysis matchups (e.g., player vs. player, team vs. team, strategy vs. strategy). Arena matchups consume Neurons and generate AI-computed comparison results. Arena results are for entertainment and informational purposes only and do not constitute predictions of real-world outcomes. Refunds for Arena analysis may be issued at EAGOH's discretion in cases of technical failure.",
+  },
+  {
+    title: "Sponsored Banners",
+    body: "Users may purchase sponsored banner promotions to feature their EAGOH or Exchange listing in prominent carousel positions on the Home and Exchange screens. Banner bookings are purchased with Neurons for specific dates and display locations. Banner purchases are processed through a single atomic server-side transaction: Neurons are deducted and the banner booking is created simultaneously, or neither occurs. If a banner purchase fails, no Neurons are charged. Banner bookings are non-refundable once successfully created, except in cases of platform error. Banner availability is subject to date conflicts — if a requested date is already booked for the same location, the purchase will be rejected.",
+  },
+  {
+    title: "Leaderboards",
+    body: "EAGOH maintains leaderboards that rank users and EAGOHs across multiple categories including overall rankings, domain-specific rankings, rising contributors, and top marketplace vendors. Leaderboard positions are computed from platform activity metrics and do not constitute endorsements of accuracy or reliability. EAGOH reserves the right to adjust ranking algorithms and may remove entries that result from system manipulation or prohibited conduct.",
+  },
+  {
+    title: "Factions",
+    body: "Factions are voluntary analyst alliances for collaborative intelligence. Users may create or join Factions, participate in faction activity feeds, share intelligence, and compete in faction rankings. Faction leaders may manage membership and settings. EAGOH does not guarantee the accuracy, reliability, or value of any Faction intelligence or activity. Users participate at their own discretion.",
+  },
+  {
+    title: "Social Share Verification",
+    body: "EAGOH may offer a Social Share Verification system where users can earn Neuron rewards by sharing EAGOH content to external social platforms and verifying the share through screenshot submission. Verification is subject to review and approval. EAGOH reserves the right to deny rewards for shares that do not meet verification criteria, are determined to be fraudulent, or violate platform policies. Reward amounts are subject to change.",
   },
   {
     title: "User Content",
-    body: "You retain ownership of content you create on EAGOH, including observation entries, EAGOH identities, and marketplace listings. By posting content, you grant EAGOH a worldwide, non-exclusive, royalty-free license to display and distribute your content within the platform. You represent that you have all necessary rights to any content you upload. You may not upload copyrighted logos, trademarks, or unauthorized likenesses of individuals without explicit permission.",
-  },
-  {
-    title: "Marketplace and Factions",
-    body: "The EAGOH Marketplace enables mock intelligence sync transactions between users using Neurons. Factions are voluntary analyst alliances for collaborative intelligence. EAGOH does not guarantee the accuracy, reliability, or value of any marketplace listing or faction intelligence. Users participate at their own discretion.",
+    body: "You retain ownership of content you create on EAGOH, including observation entries, EAGOH identities, Exchange listings, Faction messages, and source credentials. By posting content, you grant EAGOH a worldwide, non-exclusive, royalty-free license to display and distribute your content within the platform. You represent that you have all necessary rights to any content you upload. You may not upload copyrighted logos, trademarks, or unauthorized likenesses of individuals without explicit permission. Public content, including your username, public profile, EAGOH identities, Exchange listings, and shared observations, may be visible to other EAGOH users. Private data such as your email, account settings, and transaction history are never shared publicly.",
   },
   {
     title: "AI Generated Content",
-    body: "EAGOH uses artificial intelligence, including OpenAI and other third-party models, to generate responses, analyze observations, and create visual assets. AI-generated content may be inaccurate, incomplete, or inconsistent. You should independently verify any important information before relying on it. EAGOH makes no warranties regarding AI output accuracy.",
+    body: "EAGOH uses artificial intelligence, including OpenAI and other third-party models, to generate responses, analyze observations, score quality, create EAGOH visual assets, run Arena comparisons, and produce intelligence analysis. AI-generated content may be inaccurate, incomplete, or inconsistent. You should independently verify any important information before relying on it. EAGOH makes no warranties regarding AI output accuracy.",
   },
   {
     title: "Intellectual Property",
@@ -39,11 +67,11 @@ const SECTIONS: { title: string; body: string }[] = [
   },
   {
     title: "Prohibited Conduct",
-    body: "You agree not to: (a) use EAGOH for any illegal purpose; (b) attempt to manipulate or exploit platform systems; (c) harass, abuse, or harm other users; (d) upload malicious code or content; (e) impersonate others or misrepresent affiliations; (f) attempt unauthorized access to platform systems; (g) use automated tools to scrape or extract data without permission.",
+    body: "You agree not to: (a) use EAGOH for any illegal purpose; (b) attempt to manipulate or exploit platform systems, including leaderboard rankings, Arena outcomes, or Exchange pricing; (c) harass, abuse, or harm other users; (d) upload malicious code or content; (e) impersonate others or misrepresent affiliations; (f) attempt unauthorized access to platform systems; (g) use automated tools to scrape or extract data without permission; (h) submit fraudulent social share verification screenshots; (i) create multiple accounts to exploit Neuron allocations or reward systems; (j) resell, transfer, or barter Neurons or account access outside the platform.",
   },
   {
     title: "Disclaimer",
-    body: "EAGOH is provided \"AS IS\" without warranties of any kind, express or implied. EAGOH does not guarantee predictions, outcomes, rankings, or analysis accuracy. The platform is for informational and entertainment purposes only and should not be used as the sole basis for any decision.",
+    body: "EAGOH is provided \"AS IS\" without warranties of any kind, express or implied. EAGOH does not guarantee predictions, outcomes, rankings, Arena results, or analysis accuracy. The platform is for informational and entertainment purposes only and should not be used as the sole basis for any decision.",
   },
   {
     title: "Limitation of Liability",
@@ -51,7 +79,7 @@ const SECTIONS: { title: string; body: string }[] = [
   },
   {
     title: "Account Termination",
-    body: "You may delete your account at any time through the app settings. EAGOH reserves the right to suspend or terminate accounts for violations of these Terms, with or without notice. Upon termination, your right to access EAGOH ceases immediately. Data retention policies apply as described in our Privacy Policy.",
+    body: "You may delete your account at any time through the app settings. Account deletion permanently removes your EAGOHs, observations, Exchange listings, Faction memberships, retained intelligence, and profile data. EAGOH reserves the right to suspend or terminate accounts for violations of these Terms, with or without notice. Upon termination, your right to access EAGOH ceases immediately. Data retention policies apply as described in our Privacy Policy.",
   },
   {
     title: "Changes to These Terms",
@@ -83,7 +111,7 @@ export default function TermsScreen(): JSX.Element {
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        <Text style={styles.lastUpdated}>Last updated: June 2025</Text>
+        <Text style={styles.lastUpdated}>Last updated: August 2026</Text>
         {SECTIONS.map((section) => (
           <View key={section.title} style={styles.section}>
             <Text style={styles.sectionTitle}>{section.title}</Text>
