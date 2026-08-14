@@ -782,6 +782,23 @@ export type CreateListingInput = {
 };
 
 export async function createListing(input: CreateListingInput): Promise<MarketplaceListingRow> {
+  // ── Idempotency: if an active listing already exists for this
+  // vendor + EAGOH, return it instead of creating a duplicate.
+  // This handles retries, double-taps, and race conditions that slip
+  // past the client-side re-entry guard.
+  const { data: existing } = await supabase
+    .from("marketplace_listings")
+    .select("*")
+    .eq("vendor_id", input.vendorId)
+    .eq("eagoh_id", input.eagohId)
+    .eq("active", true)
+    .maybeSingle();
+
+  if (existing) {
+    // Return the existing listing — do NOT create a second one
+    return existing as MarketplaceListingRow;
+  }
+
   const row: Omit<MarketplaceListingRow, "id" | "created_at" | "updated_at"> = {
     vendor_id: input.vendorId,
     eagoh_id: input.eagohId,

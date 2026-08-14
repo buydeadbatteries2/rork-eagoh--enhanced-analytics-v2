@@ -709,6 +709,12 @@ function CreateListingModal({
   const [price100, setPrice100] = useState<string>("");
   const [description, setDescription] = useState("");
 
+  // Re-entry guard: prevents double-tap from firing createListing twice.
+  // The ref provides synchronous protection before state updates flush.
+  const submittingRef = useRef(false);
+  // Local submitting state drives the button disabled + spinner UI.
+  const [submitting, setSubmitting] = useState(false);
+
   const reset = () => {
     setSelectedEagohId("");
     setPrice25("");
@@ -718,9 +724,26 @@ function CreateListingModal({
     setDescription("");
   };
 
+  // Reset submitting state when modal closes
+  useEffect(() => {
+    if (!visible) {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
+  }, [visible]);
+
   const handleCreate = async () => {
+    // Synchronous re-entry guard — stops a second tap before state updates
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    setSubmitting(true);
+
     Keyboard.dismiss();
-    if (!user?.id || !selectedEagohId) return;
+    if (!user?.id || !selectedEagohId) {
+      submittingRef.current = false;
+      setSubmitting(false);
+      return;
+    }
     try {
       await createListing({
         vendorId: user.id,
@@ -737,6 +760,9 @@ function CreateListingModal({
       onClose();
     } catch (err: unknown) {
       Alert.alert("Error", (err as Error).message ?? "Failed to create listing.");
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
     }
   };
 
@@ -829,15 +855,15 @@ function CreateListingModal({
 
               <Pressable
                 onPress={handleCreate}
-                disabled={creating || !selectedEagohId}
+                disabled={creating || submitting || !selectedEagohId}
                 style={({ pressed }) => [
                   styles.confirmButton,
-                  (creating || !selectedEagohId) && styles.confirmButtonDisabled,
+                  (creating || submitting || !selectedEagohId) && styles.confirmButtonDisabled,
                   pressed && styles.pressed,
                   { marginTop: 16 },
                 ]}
               >
-                {creating ? (
+                {creating || submitting ? (
                   <ActivityIndicator color={palette.void} size="small" />
                 ) : (
                   <>
