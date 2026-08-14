@@ -11043,6 +11043,16 @@ export default {
       return handleBannerPurchase(request, env);
     }
 
+    // Vendor sale notification: called by the client after a successful
+    // Exchange sync purchase to create an in-app notification for the
+    // vendor. Best-effort — never fails the purchase. The worker verifies
+    // the purchase exists and the caller is the buyer before creating the
+    // notification. Uses service_role to insert the notification (RLS
+    // blocks client inserts on intelligence_notifications).
+    if (url.pathname === "/exchange/sale-notify" && request.method === "POST") {
+      return handleExchangeSaleNotify(request, env);
+    }
+
     return jsonResponse({ ok: false, error: "Not found" }, 404);
   },
 };
@@ -11482,3 +11492,103 @@ async function handleBannerPurchase(request: Request, env: Env): Promise<Respons
 }
 
 // trigger rebuild
+
+// ── Vendor Sale Notification ──────────────────────────────────────────────
+// Creates an in-app notification for the vendor after a successful Exchange
+// sync purchase. Called by the client (buyer) after purchaseSync succeeds.
+// Best-effort: the purchase already succeeded; notification failure is
+// non-fatal. Uses service_role to insert into intelligence_notifications.
+
+async function handleExchangeSaleNotify(request: Request, env: Env): Promise<Response> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
+    return jsonResponse({ ok: false, error: "Backend not configured." }, 503);
+  }
+
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const jwt = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  if (!jwt) return jsonResponse({ ok: false, error: "Authentication required." }, 401);
+
+  const supabase = createAuthedClient(env, jwt);
+  const userId = await verifyAuth(supabase, jwt);
+  if (!userId) return jsonResponse({ ok: false, error: "Invalid auth." }, 401);
+
+  const serviceClient = getServiceRoleClient(env);
+  if (!serviceClient) return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
+
+  let payload: { purchaseId?: string };
+  try {
+    payload = (await request.json()) as { purchaseId?: string };
+  } catch {
+    return jsonResponse({ ok: false, error: "Invalid request." }, 400);
+  }
+
+  const purchaseId = typeof payload.purchaseId === "string" ? payload.purchaseId.trim() : "";
+  if (!purchaseId) return jsonResponse({ ok: false, error: "Purchase ID required." }, 400);
+
+  // Verify the purchase exists and the caller is the buyer (not the vendor)
+  const { data: purchase, error: purchaseErr } = await serviceClient
+    .from("marketplace_sync_purchases")
+    .select("id, buyer_id, vendor_id, eagoh_id, sync_level, days, edge_cost, buyer_display_name, purchase_status")
+    .eq("id", purchaseId)
+    .maybeSingle();
+
+  if (purchaseErr || !purchase) {
+    return jsonResponse({ ok: false, error: "Purchase not found." }, 404);
+  }
+
+  const purchaseRow = purchase as {
+    id: string; buyer_id: string; vendor_id: string; eagoh_id: string;
+    sync_level: string; days: number; edge_cost: number;
+    buyer_display_name: string | null; purchase_status: string | null;
+  };
+
+  // Only the buyer can trigger the vendor notification
+  if (purchaseRow.buyer_id !== userId) {
+    return jsonResponse({ ok: false, error: "Only the buyer can trigger this notification." }, 403);
+  }
+
+  // Skip if the purchase was reversed (refunded, disputed, etc.)
+  const reversedStatuses = ["refunded", "payment_reversed", "charged_back", "disputed", "invalidated", "admin_revoked"];
+  if (purchaseRow.purchase_status && reversedStatuses.includes(purchaseRow.purchase_status)) {
+    return jsonResponse({ ok: true, skipped: true, reason: "purchase_reversed" });
+  }
+
+  // Fetch the EAGOH name for the notification message
+  const { data: eagoh } = await serviceClient
+    .from("eagohs")
+    .select("name")
+    .eq("id", purchaseRow.eagoh_id)
+    .maybeSingle();
+  const eagohName = (eagoh as { name: string } | null)?.name ?? "Unknown EAGOH";
+  const buyerName = purchaseRow.buyer_display_name ?? "A user";
+
+  // Idempotency: check if a notification already exists for this purchase
+  const { data: existingNotif } = await serviceClient
+    .from("intelligence_notifications")
+    .select("id")
+    .eq("user_id", purchaseRow.vendor_id)
+    .eq("purchase_id", purchaseRow.id)
+    .eq("notification_type", "exchange_sale")
+    .maybeSingle();
+
+  if (existingNotif) {
+    return jsonResponse({ ok: true, skipped: true, reason: "already_notified" });
+  }
+
+  // Create the vendor notification
+  try {
+    await serviceClient.from("intelligence_notifications").insert({
+      user_id: purchaseRow.vendor_id,
+      purchase_id: purchaseRow.id,
+      notification_type: "exchange_sale",
+      title: "New Exchange Sale",
+      message: `${buyerName} purchased ${purchaseRow.sync_level} access to ${eagohName} for ${purchaseRow.days} day(s). You earned ${purchaseRow.edge_cost} EC.`,
+      is_read: false,
+    });
+  } catch (e) {
+    console.warn("[exchange/sale-notify] notification insert failed:", e instanceof Error ? e.message : "unknown");
+    // Non-fatal — the purchase already succeeded
+  }
+
+  return jsonResponse({ ok: true });
+}

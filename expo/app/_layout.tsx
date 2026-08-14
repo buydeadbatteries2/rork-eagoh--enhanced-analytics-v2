@@ -151,6 +151,10 @@ function AuthGate(): JSX.Element {
           name="notifications"
           options={{ presentation: "modal", headerShown: false }}
         />
+        <Stack.Screen
+          name="vendor-orders"
+          options={{ presentation: "modal", headerShown: false }}
+        />
       </Stack>
     </GestureHandlerRootView>
   );

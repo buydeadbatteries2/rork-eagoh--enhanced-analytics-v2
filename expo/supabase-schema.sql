@@ -916,7 +916,9 @@ create table if not exists public.marketplace_sync_purchases (
   started_at timestamptz default now(),
   expires_at timestamptz not null,
   active boolean not null default true,
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  buyer_display_name text,
+  buyer_avatar_url text
 );
 
 -- ── LEGACY COLUMN MIGRATION: ensure all columns exist on older live tables ──
@@ -931,7 +933,9 @@ alter table public.marketplace_sync_purchases
   add column if not exists started_at timestamptz,
   add column if not exists expires_at timestamptz,
   add column if not exists active boolean,
-  add column if not exists created_at timestamptz;
+  add column if not exists created_at timestamptz,
+  add column if not exists buyer_display_name text,
+  add column if not exists buyer_avatar_url text;
 
 create index if not exists msp_buyer_idx on public.marketplace_sync_purchases(buyer_id, created_at desc);
 create index if not exists msp_vendor_idx on public.marketplace_sync_purchases(vendor_id, created_at desc);
@@ -3050,6 +3054,7 @@ create table if not exists public.intelligence_notifications (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
   entry_id uuid references public.open_intelligence(id) on delete set null,
+  purchase_id uuid references public.marketplace_sync_purchases(id) on delete set null,
   notification_type text not null check (notification_type in (
     'community_supported',
     'externally_supported',
@@ -3058,7 +3063,11 @@ create table if not exists public.intelligence_notifications (
     'dispute_dismissed',
     'outdated',
     'exchange_sharing_disabled',
-    'faction_sharing_removed'
+    'faction_sharing_removed',
+    'faction_join_requested',
+    'faction_join_approved',
+    'faction_join_denied',
+    'exchange_sale'
   )),
   title text not null,
   message text not null,
@@ -3070,6 +3079,7 @@ create table if not exists public.intelligence_notifications (
 alter table public.intelligence_notifications
   add column if not exists user_id uuid,
   add column if not exists entry_id uuid,
+  add column if not exists purchase_id uuid,
   add column if not exists notification_type text,
   add column if not exists title text,
   add column if not exists message text,

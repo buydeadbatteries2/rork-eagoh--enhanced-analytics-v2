@@ -36,6 +36,8 @@ import {
   UserCheck,
   AlertTriangle,
   Megaphone,
+  ShoppingBag,
+  ChevronRight,
   TrendingUp,
   X,
 } from "lucide-react-native";
@@ -298,6 +300,7 @@ function Hero(): JSX.Element {
 const VendorStatsCard = memo(function VendorStatsCard(): JSX.Element | null {
   const { user } = useAuth();
   const { profile, effectiveSubscriptionTier: tier } = useProfile();
+  const router = useRouter();
   const [stats, setStats] = useState<any>(null);
   const [loading, setLoading] = useState(false);
 
@@ -338,6 +341,17 @@ const VendorStatsCard = memo(function VendorStatsCard(): JSX.Element | null {
           <Text style={styles.vendorStatLabel}>Sync Score</Text>
         </View>
       </View>
+      <Pressable
+        onPress={() => router.push("/vendor-orders")}
+        style={({ pressed }) => [
+          styles.salesOrdersBtn,
+          pressed && styles.pressed,
+        ]}
+      >
+        <ShoppingBag color={palette.gold} size={14} />
+        <Text style={styles.salesOrdersBtnText}>Sales & Orders</Text>
+        <ChevronRight color={palette.muted} size={14} />
+      </Pressable>
     </View>
   );
 });
@@ -2013,6 +2027,9 @@ export default function MarketplaceScreen(): JSX.Element {
         Alert.alert("Sync Purchased", `You now have ${level} sync access for ${days} day(s).`);
         setPurchaseModal(null);
         loadData();
+        // ── Refresh vendor orders + earnings so the vendor sees the new sale ──
+        queryClient.invalidateQueries({ queryKey: ["vendorOrders"] });
+        queryClient.invalidateQueries({ queryKey: ["vendorEarningsSummary"] });
       }
     } catch (err: unknown) {
       Alert.alert("Error", (err as Error).message ?? "Purchase failed.");
@@ -2590,6 +2607,19 @@ const styles = StyleSheet.create({
   vendorStatItem: { flex: 1, alignItems: "center", gap: 3 },
   vendorStatValue: { color: palette.text, fontSize: 20, fontWeight: "900" },
   vendorStatLabel: { color: palette.muted, fontSize: 10, fontWeight: "800", textAlign: "center" },
+  salesOrdersBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    marginTop: 12,
+    paddingVertical: 9,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "rgba(255,181,71,0.30)",
+    backgroundColor: "rgba(255,181,71,0.08)",
+  },
+  salesOrdersBtnText: { color: palette.gold, fontSize: 12, fontWeight: "900", flex: 1 },
 
   // Active Syncs section
   activeSyncsSection: { gap: 8 },

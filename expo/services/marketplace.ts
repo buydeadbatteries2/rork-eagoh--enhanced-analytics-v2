@@ -60,6 +60,30 @@ async function triggerDeactivation(purchaseId: string, reason: string): Promise<
   }
 }
 
+/**
+ * Trigger a vendor sale notification after a successful Exchange purchase.
+ * Best-effort — never fails the purchase. The worker verifies the purchase
+ * exists and the caller is the buyer before creating the notification.
+ */
+async function triggerVendorSaleNotification(purchaseId: string): Promise<void> {
+  try {
+    const { data } = await supabase.auth.getSession();
+    const jwt = data.session?.access_token;
+    if (!jwt || !FUNCTIONS_BASE_URL) return;
+
+    await fetch(`${FUNCTIONS_BASE_URL}/exchange/sale-notify`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`,
+      },
+      body: JSON.stringify({ purchaseId }),
+    });
+  } catch (err) {
+    console.warn("[marketplace] vendor sale notification trigger failed (non-fatal)", err instanceof Error ? err.message : "unknown");
+  }
+}
+
 /** Looks up a domain specialization value from an EAGOH's dna array. */
 function getDomainDnaValue(dna: string[] | undefined | null, columnName: string): string | null {
   if (!dna || dna.length === 0) return null;
@@ -181,6 +205,9 @@ export type SyncPurchaseRow = {
   expires_at: string;
   active: boolean;
   created_at: string;
+  buyer_display_name: string | null;
+  buyer_avatar_url: string | null;
+  purchase_status: string | null;
 };
 
 export type VendorStatsRow = {
@@ -988,7 +1015,8 @@ export async function purchaseSync(
   const expiresAt = new Date(startedAt);
   expiresAt.setDate(expiresAt.getDate() + days);
 
-  // Create purchase record
+  // Create purchase record — denormalize buyer display name + avatar so
+  // the vendor can see who bought without N+1 profile joins.
   const purchaseRow: Omit<SyncPurchaseRow, "id" | "created_at"> = {
     listing_id: listingId,
     buyer_id: buyerId,
@@ -1000,6 +1028,9 @@ export async function purchaseSync(
     started_at: startedAt.toISOString(),
     expires_at: expiresAt.toISOString(),
     active: true,
+    buyer_display_name: buyerProfile.username ?? null,
+    buyer_avatar_url: buyerProfile.avatar_url ?? null,
+    purchase_status: "completed",
   };
 
   const { data: purchase, error: pErr } = await supabase
@@ -1020,6 +1051,10 @@ export async function purchaseSync(
   // The worker re-verifies the purchase server-side before creating retained rows.
   const completedPurchase = purchase as SyncPurchaseRow;
   void triggerRetention(completedPurchase.id);
+
+  // ── Trigger vendor sale notification (best-effort, non-fatal) ──
+  // Creates an in-app notification for the vendor so they know a sale happened.
+  void triggerVendorSaleNotification(completedPurchase.id);
 
   return { ok: true, purchase: completedPurchase };
 }

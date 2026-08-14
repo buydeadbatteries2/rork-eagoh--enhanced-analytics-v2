@@ -32,6 +32,7 @@ import {
   Clock,
   MessageSquare,
   ShieldAlert,
+  ShoppingBag,
   Star,
   UserPlus,
   UserCheck,
@@ -78,6 +79,8 @@ function notificationIcon(type: string): JSX.Element {
       return <UserCheck color={palette.success} size={size} />;
     case "faction_join_denied":
       return <XCircle color={palette.ember} size={size} />;
+    case "exchange_sale":
+      return <ShoppingBag color={palette.gold} size={size} />;
     default:
       return <Bell color={palette.cyan} size={size} />;
   }
@@ -107,6 +110,8 @@ function notificationColor(type: string): string {
       return palette.success;
     case "faction_join_denied":
       return palette.ember;
+    case "exchange_sale":
+      return palette.gold;
     default:
       return palette.cyan;
   }
