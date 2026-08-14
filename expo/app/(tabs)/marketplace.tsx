@@ -1456,13 +1456,16 @@ const MyListingCard = memo(function MyListingCard({
   onEdit,
   onRecalc,
   reputation,
+  togglingId,
 }: {
   item: EnrichedListing;
   onToggle: (id: string, active: boolean) => void;
   onEdit: (listing: EnrichedListing) => void;
   onRecalc: () => void;
   reputation: ReputationRow | undefined;
+  togglingId: string | null;
 }): JSX.Element {
+  const isToggling = togglingId === item.id;
   const eagoh = item.eagoh;
   const eagohRank: RankTier = (reputation?.rank as RankTier) ?? "Dormant";
   const rkColor = rankColor(eagohRank);
@@ -1687,11 +1690,16 @@ const MyListingCard = memo(function MyListingCard({
           </Pressable>
           <Pressable
             onPress={() => onToggle(item.id, !item.active)}
-            style={[styles.myListingBtnBase, item.active ? styles.myListingActionBtnOff : styles.myListingActionBtnOn]}
+            disabled={isToggling}
+            style={[styles.myListingBtnBase, item.active ? styles.myListingActionBtnOff : styles.myListingActionBtnOn, isToggling && { opacity: 0.6 }]}
           >
-            <Text style={[styles.myListingActionText, item.active && styles.myListingActionTextOff]}>
-              {item.active ? "Deactivate" : "Activate"}
-            </Text>
+            {isToggling ? (
+              <ActivityIndicator size="small" color={item.active ? palette.ember : palette.success} />
+            ) : (
+              <Text style={[styles.myListingActionText, item.active && styles.myListingActionTextOff]}>
+                {item.active ? "Deactivate" : "Activate"}
+              </Text>
+            )}
           </Pressable>
         </View>
       </View>
@@ -1887,6 +1895,12 @@ export default function MarketplaceScreen(): JSX.Element {
   const [publicProfileVendorId, setPublicProfileVendorId] = useState<string | null>(null);
   const [bannerModalVisible, setBannerModalVisible] = useState(false);
 
+  // ── Listing toggle state ────────────────────────────────────────────
+  // Tracks which listing is currently being activated/deactivated.
+  // `togglingId` drives the button's loading spinner + disabled state and
+  // prevents duplicate requests from rapid taps. `null` = no toggle in flight.
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+
   const isPaid = canTransact(effectiveSubscriptionTier);
 
   // ── React Query: cached marketplace listings ──────────────────────────
@@ -2008,14 +2022,43 @@ export default function MarketplaceScreen(): JSX.Element {
   }, [user?.id, profile, purchaseModal, loadData]);
 
   const handleToggleListing = useCallback(async (id: string, active: boolean) => {
+    // ── Re-entry guard: prevent duplicate requests from rapid taps ──
+    if (togglingId === id) return;
+    setTogglingId(id);
+
+    // ── Optimistic update: flip the listing's active state immediately ──
+    // so the card reflects the change instantly without waiting for a reload.
+    const prevListings = myListings;
+    setMyListings((items) =>
+      items.map((l) => (l.id === id ? { ...l, active } : l)),
+    );
+    // Also update the main `listings` array if the listing appears there
+    const prevAllListings = listings;
+    setListings((items) =>
+      items.map((l) => (l.id === id ? { ...l, active } : l)),
+    );
+
     try {
       await toggleListingActive(id, active);
       h.selection();
-      loadData();
+
+      // ── Background refresh: refetch ONLY My Listings, not the entire page ──
+      // Avoids the expensive 5-query loadData() that re-fetches all listings,
+      // syncs, purchases, reputations, and vendor metrics.
+      if (user?.id) {
+        getMyListings(user.id)
+          .then((fresh) => setMyListings(fresh))
+          .catch(() => undefined);
+      }
     } catch {
-      Alert.alert("Error", "Failed to update listing.");
+      // ── Rollback: restore the previous state on failure ──
+      setMyListings(prevListings);
+      setListings(prevAllListings);
+      Alert.alert("Error", "Failed to update listing. Please try again.");
+    } finally {
+      setTogglingId(null);
     }
-  }, [loadData, h]);
+  }, [togglingId, myListings, listings, user?.id, h]);
 
   // Stable callbacks for ListingCard — prevent re-creation on every render
   const handlePurchasePress = useCallback((l: EnrichedListing) => {
@@ -2259,6 +2302,7 @@ export default function MarketplaceScreen(): JSX.Element {
               onEdit={(l) => setEditModal(l)}
               onRecalc={loadData}
               reputation={repMap.get(item.eagoh_id)}
+              togglingId={togglingId}
             />
           ))}
         </View>
