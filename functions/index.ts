@@ -11491,7 +11491,7 @@ async function handleBannerPurchase(request: Request, env: Env): Promise<Respons
   });
 }
 
-// trigger rebuild
+// trigger rebuild — force deploy for atomic sync purchase endpoint
 
 // ── Vendor Sale Notification ──────────────────────────────────────────────
 // Creates an in-app notification for the vendor after a successful Exchange
@@ -11591,4 +11591,127 @@ async function handleExchangeSaleNotify(request: Request, env: Env): Promise<Res
   }
 
   return jsonResponse({ ok: true });
+}
+
+// trigger rebuild — force deploy for atomic sync purchase endpoint
+
+// ── Atomic Exchange Sync Purchase ─────────────────────────────────────────
+// Calls the purchase_marketplace_sync_atomic PostgreSQL RPC which does
+// EVERYTHING in one transaction: validate listing, lock buyer balance,
+// deduct buyer neurons, credit vendor neurons, insert purchase record, log
+// edge transactions, update vendor stats. If any step fails, the entire
+// transaction rolls back — zero neurons charged, zero vendor credits, zero
+// purchase rows.
+//
+// The client never directly deducts neurons, credits the vendor, or inserts
+// a purchase row. Idempotency: a client-supplied key prevents duplicate
+// purchases from retries/double-taps.
+
+async function handleExchangePurchase(request: Request, env: Env): Promise<Response> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
+    return jsonResponse({ ok: false, error: "Backend not configured." }, 503);
+  }
+
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const jwt = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  if (!jwt) return jsonResponse({ ok: false, error: "Authentication required." }, 401);
+
+  const supabase = createAuthedClient(env, jwt);
+  const userId = await verifyAuth(supabase, jwt);
+  if (!userId) return jsonResponse({ ok: false, error: "Invalid auth." }, 401);
+
+  const serviceClient = getServiceRoleClient(env);
+  if (!serviceClient) return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
+
+  let payload: {
+    listingId?: unknown;
+    syncLevel?: unknown;
+    days?: unknown;
+    idempotencyKey?: unknown;
+  };
+  try {
+    payload = (await request.json()) as typeof payload;
+  } catch {
+    return jsonResponse({ ok: false, error: "Invalid request." }, 400);
+  }
+
+  const listingId = typeof payload.listingId === "string" ? payload.listingId.trim() : "";
+  if (!listingId) return jsonResponse({ ok: false, error: "Listing ID required." }, 400);
+
+  const syncLevel = typeof payload.syncLevel === "string" ? payload.syncLevel.trim() : "";
+  if (!["25%", "50%", "75%", "100%"].includes(syncLevel)) {
+    return jsonResponse({ ok: false, error: "Invalid sync level." }, 400);
+  }
+
+  const days = typeof payload.days === "number" ? payload.days : 0;
+  if (days < 1 || days > 5) {
+    return jsonResponse({ ok: false, error: "Duration must be between 1 and 5 days." }, 400);
+  }
+
+  // ── Generate idempotency key if not provided ──
+  // Format: sync:<userId>:<listingId>:<syncLevel>:<days>
+  // Deterministic — the same purchase attempt from retries produces the same
+  // key, so the RPC returns the original result. The unique index only applies
+  // to active purchases, so a new purchase after expiration is allowed.
+  const idempotencyKey = (typeof payload.idempotencyKey === "string" && payload.idempotencyKey.trim())
+    ? payload.idempotencyKey.trim()
+    : `sync:${userId}:${listingId}:${syncLevel}:${days}`;
+
+  // ── Call the atomic RPC ──
+  // The RPC does everything in one PostgreSQL transaction:
+  //   idempotency check → validate → lock listing → lock buyer → deduct →
+  //   credit vendor → insert purchase → log transactions → update stats
+  // If ANY step fails, the entire transaction rolls back.
+  const { data: rpcResult, error: rpcErr } = await serviceClient
+    .rpc("purchase_marketplace_sync_atomic", {
+      p_buyer_id: userId,
+      p_listing_id: listingId,
+      p_sync_level: syncLevel,
+      p_days: days,
+      p_idempotency_key: idempotencyKey,
+    });
+
+  if (rpcErr) {
+    console.warn("[exchange/purchase] RPC error", {
+      userIdPrefix: userId.slice(0, 8),
+      error: rpcErr.message,
+      code: rpcErr.code,
+    });
+    return jsonResponse({
+      ok: false,
+      error: "Purchase failed. No neurons were charged.",
+    }, 500);
+  }
+
+  const result = rpcResult as {
+    ok?: boolean;
+    error?: string;
+    duplicate?: boolean;
+    purchase?: Record<string, unknown>;
+    new_balance?: { subscription: number; purchased: number; total: number };
+    detail?: string;
+    sqlstate?: string;
+  };
+
+  if (!result || result.ok !== true) {
+    const errorMsg = result?.error ?? "Purchase failed. No neurons were charged.";
+    console.warn("[exchange/purchase] RPC returned error", {
+      userIdPrefix: userId.slice(0, 8),
+      error: errorMsg,
+      detail: result?.detail,
+      sqlstate: result?.sqlstate,
+    });
+    const status = errorMsg.includes("Insufficient") ? 400
+      : errorMsg.includes("SELF_PURCHASE") ? 403
+      : errorMsg.includes("not found") || errorMsg.includes("no longer active") ? 404
+      : 400;
+    return jsonResponse({ ok: false, error: errorMsg }, status);
+  }
+
+  return jsonResponse({
+    ok: true,
+    duplicate: result.duplicate === true,
+    purchase: result.purchase,
+    newBalance: result.new_balance,
+  });
 }

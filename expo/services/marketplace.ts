@@ -1,5 +1,4 @@
 import { supabase } from "@/lib/supabase";
-import { spendEdge, addSubscriptionEdge } from "@/services/edge";
 import type { UserProfile, SubscriptionTier } from "@/services/profile";
 import type { EagohRecord } from "@/services/eagohs";
 import { getTeamById } from "@/data/teams";
@@ -905,14 +904,29 @@ export type PurchaseResult =
 /**
  * Purchase a sync from a listing.
  *
- * Flow:
- *   1. Validate listing exists and is active
- *   2. Validate buyer is not the vendor
- *   3. Compute total cost
- *   4. Deduct Edge from buyer
- *   5. Transfer Edge to vendor
- *   6. Create purchase record with expiration
- *   7. Update vendor stats
+ * This function makes ONE request to the secure worker endpoint
+ * /exchange/purchase, which calls the purchase_marketplace_sync_atomic
+ * PostgreSQL RPC. The RPC performs ALL financial operations inside a
+ * single database transaction:
+ *   - validate listing (active, not self-purchase)
+ *   - calculate price server-side
+ *   - lock buyer balance row (FOR UPDATE)
+ *   - deduct buyer neurons (subscription first, purchased second)
+ *   - credit vendor neurons
+ *   - insert marketplace_sync_purchases record
+ *   - insert edge_transactions ledger rows (buyer deduction + vendor credit)
+ *   - update marketplace_vendor_stats
+ *
+ * If ANY step fails, the ENTIRE transaction rolls back — zero neurons
+ * charged, zero vendor credits, zero purchase rows.
+ *
+ * The client NEVER directly deducts neurons, credits the vendor, or inserts
+ * a purchase row. Idempotency: a deterministic key prevents duplicate
+ * purchases from retries/double-taps.
+ *
+ * After the atomic transaction succeeds, best-effort post-purchase
+ * operations (retention trigger, vendor sale notification) fire
+ * non-fatally — their failure does NOT affect the completed transaction.
  */
 export async function purchaseSync(
   buyerId: string,
@@ -925,138 +939,64 @@ export async function purchaseSync(
     return { ok: false, error: "Duration must be between 1 and 5 days." };
   }
 
-  // Fetch listing
-  const { data: listing, error: lErr } = await supabase
-    .from("marketplace_listings")
-    .select("*")
-    .eq("id", listingId)
-    .single();
-  if (lErr || !listing) return { ok: false, error: "Listing not found." };
-  const listingRow = listing as MarketplaceListingRow;
-
-  if (!listingRow.active) return { ok: false, error: "This listing is no longer active." };
-  // ── Server-side self-purchase guard ──
-  // This is the authoritative check — the client button is disabled for own
-  // listings, but we MUST reject here too to prevent bypassed requests, stale
-  // cached listings, direct API calls, deep links, and modified client requests.
-  if (listingRow.vendor_id === buyerId) {
-    console.warn("[marketplace] self-purchase blocked — buyer=vendor", { userIdPrefix: buyerId.slice(0, 8) });
-    return { ok: false, error: "SELF_PURCHASE_NOT_ALLOWED: You cannot purchase your own EAGOH listing." };
-  }
-
-  const totalCost = computeTotalCost(listingRow, syncLevel, days);
-  if (totalCost <= 0) return { ok: false, error: "This sync level has no price set." };
-
-  // Check buyer Edge
+  // ── Client-side balance pre-check (UX optimization; server-side check is authoritative) ──
   const buyerTotal = (buyerProfile.edge_subscription ?? 0) + (buyerProfile.edge_purchased ?? 0);
-  if (buyerTotal < totalCost) {
-    return { ok: false, error: `Insufficient Neurons. Need ${totalCost} Neurons (have ${buyerTotal}).` };
+  if (buyerTotal <= 0) {
+    return { ok: false, error: "Insufficient Neurons. You need Neurons to make a purchase." };
   }
 
-  // Deduct Edge from buyer
-  let afterBuyer: UserProfile;
-  try {
-    afterBuyer = await spendEdge(
-      buyerId,
-      buyerProfile,
-      totalCost,
-      "marketplace",
-      `Sync purchase: ${syncLevel} for ${days} day(s)`,
-    );
-  } catch (err: unknown) {
-    const errMsg = err instanceof Error ? err.message : String(err);
-    console.error("[marketplace] Neuron deduction failed for sync purchase", { buyerId: buyerId.slice(0, 8), totalCost, error: errMsg });
-    if (errMsg.toLowerCase().includes("insufficient")) {
-      return { ok: false, error: `Insufficient Neurons. Need ${totalCost} Neurons for this sync purchase.` };
-    }
-    if (errMsg.toLowerCase().includes("upgrade")) {
-      return { ok: false, error: errMsg };
-    }
-    return { ok: false, error: `Neuron deduction failed: ${errMsg}. Please try again.` };
+  // ── Get JWT for worker authentication ──
+  const { data } = await supabase.auth.getSession();
+  const jwt = data.session?.access_token;
+  if (!jwt || !FUNCTIONS_BASE_URL) {
+    return { ok: false, error: "Authentication required." };
   }
 
-  // Transfer Edge to vendor — single atomic update (no double-credit)
+  // ── Deterministic idempotency key ──
+  // Same key for the same purchase parameters prevents duplicate charges
+  // from retries/double-taps. The unique index only applies to active
+  // purchases, so a new purchase after expiration is allowed.
+  const idempotencyKey = `sync:${buyerId}:${listingId}:${syncLevel}:${days}`;
+
   try {
-    // Read the vendor's current subscription balance, then add the sync cost.
-    // This replaces the previous code which called addSubscriptionEdge (which
-    // internally read + updated + logged) and THEN did a second raw update on
-    // top — crediting the vendor twice for the same purchase.
-    const { data: vendorProfile } = await supabase
-      .from("profiles")
-      .select("edge_subscription, edge_purchased")
-      .eq("id", listingRow.vendor_id)
-      .single();
-    const vendorSub = (vendorProfile as { edge_subscription: number } | null)?.edge_subscription ?? 0;
-    const vendorPurch = (vendorProfile as { edge_purchased: number } | null)?.edge_purchased ?? 0;
-    const vendorNewSub = vendorSub + totalCost;
-    await supabase
-      .from("profiles")
-      .update({ edge_subscription: vendorNewSub, updated_at: new Date().toISOString() })
-      .eq("id", listingRow.vendor_id);
-    // Log the vendor's credit transaction
-    await supabase.from("edge_transactions").insert({
-      user_id: listingRow.vendor_id,
-      kind: "addition",
-      reason: "marketplace",
-      amount: totalCost,
-      bucket: "subscription",
-      from_subscription: 0,
-      from_purchased: 0,
-      balance_subscription_after: vendorNewSub,
-      balance_purchased_after: vendorPurch,
-      note: `Sync purchase from buyer (${syncLevel} for ${days} day(s))`,
+    const res = await fetch(`${FUNCTIONS_BASE_URL}/exchange/purchase`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`,
+      },
+      body: JSON.stringify({ listingId, syncLevel, days, idempotencyKey }),
     });
-  } catch (err: unknown) {
-    console.warn("[marketplace] vendor credit transfer failed; buyer was charged.", err);
+
+    const result = await res.json() as {
+      ok: boolean;
+      error?: string;
+      duplicate?: boolean;
+      purchase?: SyncPurchaseRow;
+      newBalance?: { subscription: number; purchased: number; total: number };
+    };
+
+    if (!result.ok) {
+      return { ok: false, error: result.error ?? "Purchase failed. No neurons were charged." };
+    }
+
+    const completedPurchase = result.purchase as SyncPurchaseRow;
+
+    // ── Best-effort post-purchase operations (non-fatal) ──
+    // These happen AFTER the atomic transaction has committed.
+    // Their failure does NOT affect the completed financial transaction.
+
+    // 1. Trigger retained exchange intelligence (also handled by DB trigger)
+    void triggerRetention(completedPurchase.id);
+
+    // 2. Trigger vendor sale notification
+    void triggerVendorSaleNotification(completedPurchase.id);
+
+    return { ok: true, purchase: completedPurchase };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : "Network error";
+    return { ok: false, error: `Purchase failed. No neurons were charged. (${errMsg})` };
   }
-
-  // Compute expiration
-  const startedAt = new Date();
-  const expiresAt = new Date(startedAt);
-  expiresAt.setDate(expiresAt.getDate() + days);
-
-  // Create purchase record — denormalize buyer display name + avatar so
-  // the vendor can see who bought without N+1 profile joins.
-  const purchaseRow: Omit<SyncPurchaseRow, "id" | "created_at"> = {
-    listing_id: listingId,
-    buyer_id: buyerId,
-    vendor_id: listingRow.vendor_id,
-    eagoh_id: listingRow.eagoh_id,
-    sync_level: syncLevel,
-    days,
-    edge_cost: totalCost,
-    started_at: startedAt.toISOString(),
-    expires_at: expiresAt.toISOString(),
-    active: true,
-    buyer_display_name: buyerProfile.username ?? null,
-    buyer_avatar_url: buyerProfile.avatar_url ?? null,
-    purchase_status: "completed",
-  };
-
-  const { data: purchase, error: pErr } = await supabase
-    .from("marketplace_sync_purchases")
-    .insert(purchaseRow)
-    .select("*")
-    .single();
-  if (pErr) {
-    // Refund? For now just log
-    console.warn("[marketplace] purchase record insert failed", pErr.message);
-    return { ok: false, error: "Failed to record purchase. Neurons were deducted. Contact support." };
-  }
-
-  // Update vendor stats
-  await recalculateVendorStats(listingRow.vendor_id);
-
-  // ── Trigger retained exchange intelligence creation (best-effort, non-fatal) ──
-  // The worker re-verifies the purchase server-side before creating retained rows.
-  const completedPurchase = purchase as SyncPurchaseRow;
-  void triggerRetention(completedPurchase.id);
-
-  // ── Trigger vendor sale notification (best-effort, non-fatal) ──
-  // Creates an in-app notification for the vendor so they know a sale happened.
-  void triggerVendorSaleNotification(completedPurchase.id);
-
-  return { ok: true, purchase: completedPurchase };
 }
 
 /**
