@@ -626,17 +626,101 @@ export async function listActiveListings(
   limit: number = 50,
   offset: number = 0,
 ): Promise<EnrichedListing[]> {
+  // ── Rank filter: look up vendor IDs with the selected rank ──
+  // This must happen before the listing query because we need the vendor IDs
+  // to filter the listing query. If no vendors match, return empty immediately.
+  let rankVendorIds: string[] | null = null;
+  if (filters.rank) {
+    const { data: rankVendors, error: rankErr } = await supabase
+      .from("marketplace_vendor_stats")
+      .select("vendor_id")
+      .eq("rank", filters.rank);
+    if (rankErr) {
+      console.warn("[marketplace] rank vendor lookup error", rankErr.message);
+      return [];
+    }
+    rankVendorIds = (rankVendors ?? []).map((r: { vendor_id: string }) => r.vendor_id);
+    if (rankVendorIds.length === 0) return [];
+  }
+
+  // ── Build the listing query with safe server-side filters ──
+  // Use !inner to force an INNER JOIN on eagohs — listings with a missing
+  // or RLS-inaccessible EAGOH are already removed locally, so this is safe.
   let query = supabase
     .from("marketplace_listings")
-    .select("*, eagoh:eagoh_id(*)")
-    .eq("active", true)
+    .select("*, eagoh:eagoh_id!inner(*)")
+    .eq("active", true);
+
+  // 1. Sport — exact match on related EAGOH sport
+  if (filters.sport) {
+    query = query.eq("eagoh.sport", filters.sport);
+  }
+
+  // 2. Domain — preserve nullish-fallback: match domain = selected,
+  //    OR domain IS NULL and sport = selected (fallback to sport).
+  //    Do not match a listing whose non-null domain differs merely
+  //    because its sport matches.
+  if (filters.domain) {
+    query = query.or(
+      `domain.eq.${filters.domain},and(domain.is.null,sport.eq.${filters.domain})`,
+      { referencedTable: "eagoh" },
+    );
+  }
+
+  // 3. Generalist — team_focus_mode = "none" or null (missing is treated as "none")
+  if (filters.generalist) {
+    query = query.or(
+      "team_focus_mode.eq.none,team_focus_mode.is.null",
+      { referencedTable: "eagoh" },
+    );
+  }
+
+  // 4 & 5. DNA filters — collect all canonical DNA entries and apply
+  //    a single array-contains filter before the limit
+  const dnaEntries: string[] = [];
+  if (filters.dna) dnaEntries.push(filters.dna);
+  if (filters.musicGenre) dnaEntries.push(`dom:music_genre:${filters.musicGenre}`);
+  if (filters.musicRole) dnaEntries.push(`dom:music_role:${filters.musicRole}`);
+  if (filters.filmTvCategory) dnaEntries.push(`dom:film_tv_category:${filters.filmTvCategory}`);
+  if (filters.filmTvGenre) dnaEntries.push(`dom:film_tv_genre:${filters.filmTvGenre}`);
+  if (filters.filmTvRole) dnaEntries.push(`dom:film_tv_role:${filters.filmTvRole}`);
+  if (filters.fashionStyleCategory) dnaEntries.push(`dom:fashion_style_category:${filters.fashionStyleCategory}`);
+  if (filters.fashionRole) dnaEntries.push(`dom:fashion_role:${filters.fashionRole}`);
+  if (filters.educationSubject) dnaEntries.push(`dom:education_subject:${filters.educationSubject}`);
+  if (filters.educationRole) dnaEntries.push(`dom:education_role:${filters.educationRole}`);
+  if (filters.gamingGenre) dnaEntries.push(`dom:gaming_genre:${filters.gamingGenre}`);
+  if (filters.gamingRole) dnaEntries.push(`dom:gaming_role:${filters.gamingRole}`);
+  if (filters.businessIndustry) dnaEntries.push(`dom:business_industry:${filters.businessIndustry}`);
+  if (filters.businessRole) dnaEntries.push(`dom:business_role:${filters.businessRole}`);
+  if (filters.financeFocus) dnaEntries.push(`dom:finance_focus:${filters.financeFocus}`);
+  if (filters.financeRole) dnaEntries.push(`dom:finance_role:${filters.financeRole}`);
+  if (filters.technologyArea) dnaEntries.push(`dom:technology_area:${filters.technologyArea}`);
+  if (filters.technologyRole) dnaEntries.push(`dom:technology_role:${filters.technologyRole}`);
+  if (filters.healthFitnessArea) dnaEntries.push(`dom:health_fitness_area:${filters.healthFitnessArea}`);
+  if (filters.healthFitnessRole) dnaEntries.push(`dom:health_fitness_role:${filters.healthFitnessRole}`);
+  if (dnaEntries.length > 0) {
+    query = query.contains("eagoh.dna", dnaEntries);
+  }
+
+  // 6. Sync level — filter on the appropriate price column > 0
+  if (filters.syncLevel) {
+    switch (filters.syncLevel) {
+      case "25%": query = query.gt("price_25_per_day", 0); break;
+      case "50%": query = query.gt("price_50_per_day", 0); break;
+      case "75%": query = query.gt("price_75_per_day", 0); break;
+      case "100%": query = query.gt("price_100_per_day", 0); break;
+    }
+  }
+
+  // 7. Rank — filter by vendor IDs with the selected rank (already looked up above)
+  if (rankVendorIds) {
+    query = query.in("vendor_id", rankVendorIds);
+  }
+
+  // Apply ordering and pagination after all filters
+  query = query
     .order("created_at", { ascending: false })
     .range(offset, offset + limit - 1);
-
-  if (filters.search) {
-    // Search by EAGOH name (via the JSON join). We'll filter client-side
-    // after fetch to avoid complex OR queries with joins.
-  }
 
   const { data, error } = await query;
   if (error) throw error;
@@ -645,12 +729,27 @@ export async function listActiveListings(
   if (rawRows.length === 0) return [];
 
   // Filter out listings whose EAGOH has been deleted or is inaccessible due to RLS.
-  // These would render as "Unnamed" cards with no image — skip them entirely.
+  // With !inner this should already be handled by the database, but we keep
+  // this as defense-in-depth.
   const rows = rawRows.filter((r) => r.eagoh && r.eagoh.id);
   if (rows.length === 0) return [];
 
   const enriched = await bulkEnrichListings(rows);
   let result = enriched;
+
+  // ── Residual client-side filters ──
+  // These filters depend on enrichment data or cross-table matching that
+  // cannot be safely represented by the installed Supabase query builder
+  // without dedicated database search infrastructure (full-text search,
+  // computed columns, or materialized views). They are intentionally kept
+  // client-side in this no-schema phase.
+  //
+  // Note: Free-text search only searches within the fetched result window
+  // (newest `limit` active listings). Full server-side cross-table search
+  // requires dedicated database search infrastructure and is intentionally
+  // outside this no-schema phase.
+  //
+  // Already-pushed filters are kept below as defense-in-depth.
 
   if (filters.domain) {
     result = result.filter((l) => (l.eagoh?.domain ?? l.eagoh?.sport) === filters.domain);

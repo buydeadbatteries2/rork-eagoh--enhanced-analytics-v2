@@ -2003,13 +2003,34 @@ export default function MarketplaceScreen(): JSX.Element {
     enabled: !!user?.id,
   });
 
+  // ── React Query: cached filter metadata ───────────────────────────────
+  // Separated from listing-result loading so that typing a search or changing
+  // a filter does NOT re-fetch filter metadata. Stale for 5 minutes, cached
+  // for 30 minutes. A metadata failure does not prevent listings from rendering.
+  const filterMetaQuery = useQuery<{ domains: string[]; sports: string[]; ranks: string[] }>({
+    queryKey: ["marketplace-filter-meta"],
+    queryFn: () => getActiveFilters(),
+    staleTime: 5 * 60_000,
+    gcTime: 30 * 60_000,
+    enabled: !!user?.id,
+  });
+
+  // Sync React Query metadata into existing state so FilterPanel receives updates.
+  useEffect(() => {
+    if (filterMetaQuery.data) {
+      setFilterMeta(filterMetaQuery.data);
+    }
+  }, [filterMetaQuery.data]);
+
   // Stale-request protection: only the latest filter change may update state.
   const loadRequestId = useRef(0);
   // Track prior data presence via ref to avoid re-creating loadBrowseData on every listings update.
   const hasPriorDataRef = useRef(false);
   hasPriorDataRef.current = listings.length > 0;
 
-  // ── Browse-only load (listings + filters + secondary metadata) ──
+  // ── Browse-only load (listings only) ──
+  // Filter metadata is loaded separately via the filterMetaQuery React Query.
+  // This function fetches listing results only — no getActiveFilters() call.
   const loadBrowseData = useCallback(async () => {
     if (!user?.id) { setInitialLoading(false); return; }
     const reqId = ++loadRequestId.current;
@@ -2021,17 +2042,13 @@ export default function MarketplaceScreen(): JSX.Element {
       setFiltering(true);
     }
     try {
-      const [l, meta] = await Promise.all([
-        queryClient.fetchQuery({
-          queryKey: ["marketplace-listings", filters],
-          queryFn: () => listActiveListings(filters),
-          staleTime: 60_000,
-        }),
-        getActiveFilters(),
-      ]);
+      const l = await queryClient.fetchQuery({
+        queryKey: ["marketplace-listings", filters],
+        queryFn: () => listActiveListings(filters),
+        staleTime: 60_000,
+      });
       if (reqId !== loadRequestId.current) return;
       setListings(l);
-      setFilterMeta(meta);
       setLoadError(false);
       // Secondary data loads after cards are rendered (non-blocking)
       const allEagohIds = [...new Set(l.map((li) => li.eagoh_id))];
@@ -2105,10 +2122,12 @@ export default function MarketplaceScreen(): JSX.Element {
   }, [user?.id, isPaid]);
 
   // ── Pull-to-refresh: refresh active tab's data ──
+  // On Browse, explicitly refresh both listings and filter metadata.
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
       if (tab === "browse") {
+        queryClient.invalidateQueries({ queryKey: ["marketplace-filter-meta"] });
         await loadBrowseData();
       } else if (tab === "my-listings") {
         await loadMyListingsData();
@@ -2120,7 +2139,7 @@ export default function MarketplaceScreen(): JSX.Element {
     } finally {
       setRefreshing(false);
     }
-  }, [tab, loadBrowseData, loadMyListingsData, loadActiveSyncsData, loadPurchasesData]);
+  }, [tab, loadBrowseData, loadMyListingsData, loadActiveSyncsData, loadPurchasesData, queryClient]);
 
   useEffect(() => {
     loadBrowseData();
@@ -2209,6 +2228,9 @@ export default function MarketplaceScreen(): JSX.Element {
     try {
       await toggleListingActive(id, active);
       h.selection();
+      // Invalidate filter metadata — activation/deactivation can change
+      // which domains/sports/ranks appear in active listings.
+      queryClient.invalidateQueries({ queryKey: ["marketplace-filter-meta"] });
 
       // ── Background refresh: refetch ONLY My Listings, not the entire page ──
       // Avoids the expensive multi-query loadBrowseData() that re-fetches all listings,
@@ -2226,7 +2248,7 @@ export default function MarketplaceScreen(): JSX.Element {
     } finally {
       setTogglingId(null);
     }
-  }, [togglingId, myListings, listings, user?.id, h]);
+  }, [togglingId, myListings, listings, user?.id, h, queryClient]);
 
   // Stable callbacks for ListingCard — prevent re-creation on every render
   const handlePurchasePress = useCallback((l: EnrichedListing) => {
@@ -2660,7 +2682,12 @@ export default function MarketplaceScreen(): JSX.Element {
       <CreateListingModal
         visible={createModal}
         onClose={() => setCreateModal(false)}
-        onCreated={() => { loadBrowseData(); loadMyListingsData(); }}
+        onCreated={() => {
+          // New listing may introduce new domains/sports to filter chips
+          queryClient.invalidateQueries({ queryKey: ["marketplace-filter-meta"] });
+          loadBrowseData();
+          loadMyListingsData();
+        }}
         creating={creating}
       />
       <EditListingModal
