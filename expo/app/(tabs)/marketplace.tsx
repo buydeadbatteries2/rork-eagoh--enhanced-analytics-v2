@@ -364,12 +364,16 @@ function FilterPanel({
   domains,
   sports,
   ranks,
+  searchInput,
+  onSearchChange,
 }: {
   filters: ListingFilters;
   setFilters: (f: ListingFilters) => void;
   domains: string[];
   sports: string[];
   ranks: string[];
+  searchInput: string;
+  onSearchChange: (v: string) => void;
 }): JSX.Element {
   const renderChips = (items: string[], selected: string | undefined, onSelect: (v: string) => void, allLabel: string = "All"): JSX.Element => (
     <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRail}>
@@ -389,8 +393,8 @@ function FilterPanel({
       <View style={styles.searchBox}>
         <Search color={palette.muted} size={18} />
         <TextInput
-          value={filters.search ?? ""}
-          onChangeText={(v) => setFilters({ ...filters, search: v || undefined })}
+          value={searchInput}
+          onChangeText={onSearchChange}
           placeholder="Search EAGOH, vendor, team..."
           placeholderTextColor={palette.muted}
           style={styles.searchInput}
@@ -400,7 +404,7 @@ function FilterPanel({
         <SlidersHorizontal color={palette.gold} size={16} />
         <Text style={styles.filterTitle}>Filters</Text>
         {Object.values(filters).some((v) => v) && (
-          <Pressable onPress={() => setFilters({})} style={styles.clearFilterBtn}>
+          <Pressable onPress={() => { setFilters({}); onSearchChange(""); }} style={styles.clearFilterBtn}>
             <Text style={styles.clearFilterText}>Clear</Text>
           </Pressable>
         )}
@@ -1106,21 +1110,21 @@ const DomainCarouselSection = memo(function DomainCarouselSection({
         <Text style={styles.carouselSectionTitle}>{domainLabel(domain)}</Text>
         <Text style={styles.carouselSectionCount}>{listings.length}</Text>
       </View>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.carouselRail}
-        {...HORIZONTAL_LIST_PERFORMANCE_PROPS}
-      >
-        {listings.map((item) => (
+      <FlatList
+        data={listings}
+        renderItem={({ item }) => (
           <CarouselListingCard
-            key={item.id}
             item={item}
             isPaid={isPaid}
             onPurchase={onPurchase}
           />
-        ))}
-      </ScrollView>
+        )}
+        keyExtractor={(item) => item.id}
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.carouselRail}
+        {...HORIZONTAL_LIST_PERFORMANCE_PROPS}
+      />
     </View>
   );
 });
@@ -1839,11 +1843,17 @@ const MktSponsoredCarousel = memo(function MktSponsoredCarousel({ userId, onProm
           </Pressable>
         </View>
       ) : (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingRight: 16 }} {...HORIZONTAL_LIST_PERFORMANCE_PROPS}>
-          {(banners ?? []).map((b) => (
-            <MktSponsoredBanner key={b.id} item={b} userId={userId} reputation={bannerRepMap.get(b.eagoh_id)} />
-          ))}
-        </ScrollView>
+        <FlatList
+          data={banners ?? []}
+          renderItem={({ item }) => (
+            <MktSponsoredBanner item={item} userId={userId} reputation={bannerRepMap.get(item.eagoh_id)} />
+          )}
+          keyExtractor={(item) => item.id}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ gap: 10, paddingRight: 16 }}
+          {...HORIZONTAL_LIST_PERFORMANCE_PROPS}
+        />
       )}
     </View>
   );
@@ -1863,6 +1873,61 @@ const SkeletonListingCard = memo(function SkeletonListingCard(): JSX.Element {
           <View style={styles.skeletonBtnBlock} />
         </View>
       </View>
+    </View>
+  );
+});
+
+// ── Virtualized Domain Listing Section ─────────────────────────────────
+
+const DomainListingSection = memo(function DomainListingSection({
+  domain,
+  domainListings,
+  isPaid,
+  currentUserId,
+  onPurchase,
+  onViewVendorProfile,
+  repMap,
+  vendorMetricsMap,
+  vendorRepMap,
+}: {
+  domain: string;
+  domainListings: EnrichedListing[];
+  isPaid: boolean;
+  currentUserId: string | null | undefined;
+  onPurchase: (listing: EnrichedListing) => void;
+  onViewVendorProfile: (vendorId: string) => void;
+  repMap: Map<string, ReputationRow>;
+  vendorMetricsMap: Map<string, VendorQualityMetrics>;
+  vendorRepMap: Map<string, PublicReputation>;
+}): JSX.Element {
+  const renderItem = useCallback(({ item }: { item: EnrichedListing }) => (
+    <ListingCard
+      item={item}
+      isPaid={isPaid}
+      currentUserId={currentUserId}
+      onPurchase={onPurchase}
+      reputation={repMap.get(item.eagoh_id)}
+      onViewVendorProfile={onViewVendorProfile}
+      vendorMetrics={vendorMetricsMap.get(item.vendor_id)}
+      vendorRep={vendorRepMap.get(item.vendor_id)}
+    />
+  ), [isPaid, currentUserId, onPurchase, onViewVendorProfile, repMap, vendorMetricsMap, vendorRepMap]);
+
+  return (
+    <View style={styles.carouselSection}>
+      <View style={styles.carouselSectionHeader}>
+        <Text style={styles.carouselSectionTitle}>{domainLabel(domain)}</Text>
+        <Text style={styles.carouselSectionCount}>{domainListings.length}</Text>
+      </View>
+      <FlatList
+        data={domainListings}
+        renderItem={renderItem}
+        keyExtractor={(item) => item.id}
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.carouselRail}
+        {...HORIZONTAL_LIST_PERFORMANCE_PROPS}
+      />
     </View>
   );
 });
@@ -1889,6 +1954,15 @@ export default function MarketplaceScreen(): JSX.Element {
   const [initialLoading, setInitialLoading] = useState(true);
   const [filtering, setFiltering] = useState(false);
   const [loadError, setLoadError] = useState(false);
+  // ── Debounced search: separate visible input from applied filter ──
+  const [searchInput, setSearchInput] = useState("");
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // ── Lazy tab loading: track which tabs have been loaded ──
+  const loadedTabsRef = useRef<Set<string>>(new Set(["browse"]));
+  const [myListingsLoading, setMyListingsLoading] = useState(false);
+  const [activeSyncsLoading, setActiveSyncsLoading] = useState(false);
+  const [purchasesLoading, setPurchasesLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [tab, setTab] = useState<"browse" | "rankings" | "my-listings" | "my-syncs" | "my-purchases">("browse");
   const [rankingsData, setRankingsData] = useState<Array<{ rank: number; eagoh_id: string; eagoh_name: string; reputation_score: number; rank_tier: RankTier; marketplace_trust: number; sync_success: number; marketplace_sales: number; owner_username: string }>>([]);
   const [rankingsLoading, setRankingsLoading] = useState(false);
@@ -1930,42 +2004,33 @@ export default function MarketplaceScreen(): JSX.Element {
 
   // Stale-request protection: only the latest filter change may update state.
   const loadRequestId = useRef(0);
-  // Track prior data presence via ref to avoid re-creating loadData on every listings update.
+  // Track prior data presence via ref to avoid re-creating loadBrowseData on every listings update.
   const hasPriorDataRef = useRef(false);
   hasPriorDataRef.current = listings.length > 0;
 
-  const loadData = useCallback(async () => {
+  // ── Browse-only load (listings + filters + secondary metadata) ──
+  const loadBrowseData = useCallback(async () => {
     if (!user?.id) { setInitialLoading(false); return; }
     const reqId = ++loadRequestId.current;
     const hasPriorData = hasPriorDataRef.current;
-    // Only show full-screen initial loader when there is no prior data
     if (!hasPriorData) {
       setInitialLoading(true);
       setLoadError(false);
     } else {
-      // Keep cards visible during filter refresh — show inline indicator only
       setFiltering(true);
     }
     try {
-      const [l, meta, syncs, myList, myPurch] = await Promise.all([
-        // Prefer the React Query cache (avoids duplicate fetch for same filters)
+      const [l, meta] = await Promise.all([
         queryClient.fetchQuery({
           queryKey: ["marketplace-listings", filters],
           queryFn: () => listActiveListings(filters),
           staleTime: 60_000,
         }),
         getActiveFilters(),
-        getActiveSyncs(user.id),
-        isPaid ? getMyListings(user.id) : Promise.resolve([]),
-        isPaid ? getMyPurchases(user.id) : Promise.resolve([]),
       ]);
-      // Stale guard: discard results from a superseded request
       if (reqId !== loadRequestId.current) return;
       setListings(l);
       setFilterMeta(meta);
-      setActiveSyncsState(syncs);
-      setMyListings(myList);
-      setPurchases(myPurch);
       setLoadError(false);
       // Secondary data loads after cards are rendered (non-blocking)
       const allEagohIds = [...new Set(l.map((li) => li.eagoh_id))];
@@ -1986,7 +2051,6 @@ export default function MarketplaceScreen(): JSX.Element {
     } catch (err) {
       if (reqId !== loadRequestId.current) return;
       console.warn("[marketplace] load error", err);
-      // Only surface error when there is no prior data to keep showing
       if (!hasPriorData) setLoadError(true);
     } finally {
       if (reqId === loadRequestId.current) {
@@ -1994,11 +2058,95 @@ export default function MarketplaceScreen(): JSX.Element {
         setFiltering(false);
       }
     }
-  }, [user?.id, isPaid, filters, queryClient]);
+  }, [user?.id, filters, queryClient]);
+
+  // ── Lazy tab loaders ──
+  const loadMyListingsData = useCallback(async () => {
+    if (!user?.id || !isPaid) return;
+    setMyListingsLoading(true);
+    try {
+      const fresh = await getMyListings(user.id);
+      setMyListings(fresh);
+    } catch (err) {
+      console.warn("[marketplace] my listings load error", err);
+    } finally {
+      setMyListingsLoading(false);
+    }
+  }, [user?.id, isPaid]);
+
+  const loadActiveSyncsData = useCallback(async () => {
+    if (!user?.id) return;
+    setActiveSyncsLoading(true);
+    try {
+      const syncs = await getActiveSyncs(user.id);
+      setActiveSyncsState(syncs);
+    } catch (err) {
+      console.warn("[marketplace] active syncs load error", err);
+    } finally {
+      setActiveSyncsLoading(false);
+    }
+  }, [user?.id]);
+
+  const loadPurchasesData = useCallback(async () => {
+    if (!user?.id || !isPaid) return;
+    setPurchasesLoading(true);
+    try {
+      const fresh = await getMyPurchases(user.id);
+      setPurchases(fresh);
+    } catch (err) {
+      console.warn("[marketplace] purchases load error", err);
+    } finally {
+      setPurchasesLoading(false);
+    }
+  }, [user?.id, isPaid]);
+
+  // ── Pull-to-refresh: refresh active tab's data ──
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      if (tab === "browse") {
+        await loadBrowseData();
+      } else if (tab === "my-listings") {
+        await loadMyListingsData();
+      } else if (tab === "my-syncs") {
+        await loadActiveSyncsData();
+      } else if (tab === "my-purchases") {
+        await loadPurchasesData();
+      }
+    } finally {
+      setRefreshing(false);
+    }
+  }, [tab, loadBrowseData, loadMyListingsData, loadActiveSyncsData, loadPurchasesData]);
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    loadBrowseData();
+  }, [loadBrowseData]);
+
+  // ── Debounced search: apply search term 400ms after typing stops ──
+  useEffect(() => {
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current);
+    }
+    searchDebounceRef.current = setTimeout(() => {
+      setFilters((prev) => ({
+        ...prev,
+        search: searchInput.trim() || undefined,
+      }));
+    }, 400);
+    return () => {
+      if (searchDebounceRef.current) {
+        clearTimeout(searchDebounceRef.current);
+      }
+    };
+  }, [searchInput]);
+
+  // ── Load active syncs once on mount (non-blocking, for header display) ──
+  useEffect(() => {
+    if (user?.id && isPaid) {
+      loadActiveSyncsData();
+      loadedTabsRef.current.add("my-syncs");
+    }
+  }, [user?.id, isPaid]);
 
   // Keep listings state in sync with the React Query cache so background
   // refetches (e.g. window refocus) update the UI without a full reload.
@@ -2026,8 +2174,9 @@ export default function MarketplaceScreen(): JSX.Element {
         h.success();
         Alert.alert("Sync Purchased", `You now have ${level} sync access for ${days} day(s).`);
         setPurchaseModal(null);
-        loadData();
-        // ── Refresh vendor orders + earnings so the vendor sees the new sale ──
+        loadActiveSyncsData();
+        if (loadedTabsRef.current.has("my-purchases")) loadPurchasesData();
+        queryClient.invalidateQueries({ queryKey: ["marketplace-listings"] });
         queryClient.invalidateQueries({ queryKey: ["vendorOrders"] });
         queryClient.invalidateQueries({ queryKey: ["vendorEarningsSummary"] });
       }
@@ -2036,7 +2185,7 @@ export default function MarketplaceScreen(): JSX.Element {
     } finally {
       setPurchasing(false);
     }
-  }, [user?.id, profile, purchaseModal, loadData]);
+  }, [user?.id, profile, purchaseModal, loadActiveSyncsData, loadPurchasesData]);
 
   const handleToggleListing = useCallback(async (id: string, active: boolean) => {
     // ── Re-entry guard: prevent duplicate requests from rapid taps ──
@@ -2060,7 +2209,7 @@ export default function MarketplaceScreen(): JSX.Element {
       h.selection();
 
       // ── Background refresh: refetch ONLY My Listings, not the entire page ──
-      // Avoids the expensive 5-query loadData() that re-fetches all listings,
+      // Avoids the expensive multi-query loadBrowseData() that re-fetches all listings,
       // syncs, purchases, reputations, and vendor metrics.
       if (user?.id) {
         getMyListings(user.id)
@@ -2122,7 +2271,14 @@ export default function MarketplaceScreen(): JSX.Element {
               <Pressable
                 key={t.key}
                 onPress={() => {
-                  setTab(t.key as typeof tab);
+                  const newTab = t.key as typeof tab;
+                  setTab(newTab);
+                  if (!loadedTabsRef.current.has(newTab)) {
+                    loadedTabsRef.current.add(newTab);
+                    if (newTab === "my-listings") loadMyListingsData();
+                    else if (newTab === "my-syncs") loadActiveSyncsData();
+                    else if (newTab === "my-purchases") loadPurchasesData();
+                  }
                   if (t.key === "rankings" && rankingsData.length === 0) {
                     setRankingsLoading(true);
                     getLeaderboard("top_vendors", {}, 10, 0)
@@ -2165,11 +2321,13 @@ export default function MarketplaceScreen(): JSX.Element {
             domains={filterMeta.domains}
             sports={filterMeta.sports}
             ranks={filterMeta.ranks}
+            searchInput={searchInput}
+            onSearchChange={setSearchInput}
           />
         )}
       </View>
     ),
-    [filters, setFilters, filterMeta, tab, activeSyncs, isPaid, user?.id],
+    [filters, setFilters, filterMeta, tab, activeSyncs, isPaid, user?.id, searchInput],
   );
 
   // Group listings by domain, sorted by most listings first
@@ -2192,7 +2350,7 @@ export default function MarketplaceScreen(): JSX.Element {
             <View style={styles.loadingWrap}>
               <PackageOpen color={palette.muted} size={36} />
               <Text style={styles.emptyTitle}>Unable to load the Exchange.</Text>
-              <Pressable onPress={() => { setLoadError(false); setInitialLoading(true); loadData(); }} style={({ pressed }) => [styles.emptyActionBtn, pressed && { opacity: 0.8 }]}>
+              <Pressable onPress={() => { setLoadError(false); setInitialLoading(true); loadBrowseData(); }} style={({ pressed }) => [styles.emptyActionBtn, pressed && { opacity: 0.8 }]}>
                 <Text style={styles.emptyActionText}>Try Again</Text>
               </Pressable>
             </View>
@@ -2217,32 +2375,18 @@ export default function MarketplaceScreen(): JSX.Element {
               <Text style={styles.filterRefreshText}>Updating results...</Text>
             </View>
             {domainGroups.map(([domain, domainListings]) => (
-              <View key={domain} style={styles.carouselSection}>
-                <View style={styles.carouselSectionHeader}>
-                  <Text style={styles.carouselSectionTitle}>{domainLabel(domain)}</Text>
-                  <Text style={styles.carouselSectionCount}>{domainListings.length}</Text>
-                </View>
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.carouselRail}
-                  {...HORIZONTAL_LIST_PERFORMANCE_PROPS}
-                >
-                  {domainListings.map((item) => (
-                    <ListingCard
-                      key={item.id}
-                      item={item}
-                      isPaid={isPaid}
-                      currentUserId={user?.id}
-                      onPurchase={handlePurchasePress}
-                      reputation={repMap.get(item.eagoh_id)}
-                      onViewVendorProfile={handleViewVendorProfile}
-                      vendorMetrics={vendorMetricsMap.get(item.vendor_id)}
-                      vendorRep={vendorRepMap.get(item.vendor_id)}
-                    />
-                  ))}
-                </ScrollView>
-              </View>
+              <DomainListingSection
+                key={domain}
+                domain={domain}
+                domainListings={domainListings}
+                isPaid={isPaid}
+                currentUserId={user?.id}
+                onPurchase={handlePurchasePress}
+                onViewVendorProfile={handleViewVendorProfile}
+                repMap={repMap}
+                vendorMetricsMap={vendorMetricsMap}
+                vendorRepMap={vendorRepMap}
+              />
             ))}
           </View>
         );
@@ -2264,38 +2408,32 @@ export default function MarketplaceScreen(): JSX.Element {
       return (
         <View style={styles.domainCarouselsWrap}>
           {domainGroups.map(([domain, domainListings]) => (
-            <View key={domain} style={styles.carouselSection}>
-              <View style={styles.carouselSectionHeader}>
-                <Text style={styles.carouselSectionTitle}>{domainLabel(domain)}</Text>
-                <Text style={styles.carouselSectionCount}>{domainListings.length}</Text>
-              </View>
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.carouselRail}
-                {...HORIZONTAL_LIST_PERFORMANCE_PROPS}
-              >
-                {domainListings.map((item) => (
-                  <ListingCard
-                    key={item.id}
-                    item={item}
-                    isPaid={isPaid}
-                    currentUserId={user?.id}
-                    onPurchase={handlePurchasePress}
-                    reputation={repMap.get(item.eagoh_id)}
-                    onViewVendorProfile={handleViewVendorProfile}
-                    vendorMetrics={vendorMetricsMap.get(item.vendor_id)}
-                    vendorRep={vendorRepMap.get(item.vendor_id)}
-                  />
-                ))}
-              </ScrollView>
-            </View>
+            <DomainListingSection
+              key={domain}
+              domain={domain}
+              domainListings={domainListings}
+              isPaid={isPaid}
+              currentUserId={user?.id}
+              onPurchase={handlePurchasePress}
+              onViewVendorProfile={handleViewVendorProfile}
+              repMap={repMap}
+              vendorMetricsMap={vendorMetricsMap}
+              vendorRepMap={vendorRepMap}
+            />
           ))}
         </View>
       );
     }
 
     if (tab === "my-listings") {
+      if (myListingsLoading && myListings.length === 0) {
+        return (
+          <View style={styles.loadingWrap}>
+            <ActivityIndicator color={palette.cyan} size="large" />
+            <Text style={styles.loadingTitle}>Loading My Listings...</Text>
+          </View>
+        );
+      }
       if (myListings.length === 0) {
         return (
           <View style={styles.emptyWrap}>
@@ -2317,7 +2455,7 @@ export default function MarketplaceScreen(): JSX.Element {
               item={item}
               onToggle={handleToggleListing}
               onEdit={(l) => setEditModal(l)}
-              onRecalc={loadData}
+              onRecalc={loadMyListingsData}
               reputation={repMap.get(item.eagoh_id)}
               togglingId={togglingId}
             />
@@ -2328,6 +2466,14 @@ export default function MarketplaceScreen(): JSX.Element {
 
     if (tab === "my-syncs") {
       const allActive = activeSyncs;
+      if (activeSyncsLoading && allActive.length === 0) {
+        return (
+          <View style={styles.loadingWrap}>
+            <ActivityIndicator color={palette.cyan} size="large" />
+            <Text style={styles.loadingTitle}>Loading Active Syncs...</Text>
+          </View>
+        );
+      }
       if (allActive.length === 0) {
         return (
           <View style={styles.emptyWrap}>
@@ -2347,6 +2493,14 @@ export default function MarketplaceScreen(): JSX.Element {
     }
 
     if (tab === "my-purchases") {
+      if (purchasesLoading && purchases.length === 0) {
+        return (
+          <View style={styles.loadingWrap}>
+            <ActivityIndicator color={palette.cyan} size="large" />
+            <Text style={styles.loadingTitle}>Loading Purchase History...</Text>
+          </View>
+        );
+      }
       if (purchases.length === 0) {
         return (
           <View style={styles.emptyWrap}>
@@ -2463,6 +2617,8 @@ export default function MarketplaceScreen(): JSX.Element {
           keyExtractor={() => "dummy"}
           contentContainerStyle={styles.scroll}
           showsVerticalScrollIndicator={false}
+          refreshing={refreshing}
+          onRefresh={handleRefresh}
           {...LIST_PERFORMANCE_PROPS}
         />
       </SafeAreaView>
@@ -2497,14 +2653,14 @@ export default function MarketplaceScreen(): JSX.Element {
       <CreateListingModal
         visible={createModal}
         onClose={() => setCreateModal(false)}
-        onCreated={loadData}
+        onCreated={() => { loadBrowseData(); loadMyListingsData(); }}
         creating={creating}
       />
       <EditListingModal
         visible={!!editModal}
         listing={editModal}
         onClose={() => setEditModal(null)}
-        onUpdated={loadData}
+        onUpdated={() => { loadBrowseData(); loadMyListingsData(); }}
         updating={updating}
       />
       <PublicProfileModal
