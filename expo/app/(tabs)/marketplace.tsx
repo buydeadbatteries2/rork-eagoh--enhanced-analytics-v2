@@ -1959,6 +1959,7 @@ export default function MarketplaceScreen(): JSX.Element {
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // ── Lazy tab loading: track which tabs have been loaded ──
   const loadedTabsRef = useRef<Set<string>>(new Set(["browse"]));
+  const loadingTabsRef = useRef<Set<string>>(new Set());
   const [myListingsLoading, setMyListingsLoading] = useState(false);
   const [activeSyncsLoading, setActiveSyncsLoading] = useState(false);
   const [purchasesLoading, setPurchasesLoading] = useState(false);
@@ -2067,6 +2068,7 @@ export default function MarketplaceScreen(): JSX.Element {
     try {
       const fresh = await getMyListings(user.id);
       setMyListings(fresh);
+      loadedTabsRef.current.add("my-listings");
     } catch (err) {
       console.warn("[marketplace] my listings load error", err);
     } finally {
@@ -2080,6 +2082,7 @@ export default function MarketplaceScreen(): JSX.Element {
     try {
       const syncs = await getActiveSyncs(user.id);
       setActiveSyncsState(syncs);
+      loadedTabsRef.current.add("my-syncs");
     } catch (err) {
       console.warn("[marketplace] active syncs load error", err);
     } finally {
@@ -2093,6 +2096,7 @@ export default function MarketplaceScreen(): JSX.Element {
     try {
       const fresh = await getMyPurchases(user.id);
       setPurchases(fresh);
+      loadedTabsRef.current.add("my-purchases");
     } catch (err) {
       console.warn("[marketplace] purchases load error", err);
     } finally {
@@ -2128,10 +2132,11 @@ export default function MarketplaceScreen(): JSX.Element {
       clearTimeout(searchDebounceRef.current);
     }
     searchDebounceRef.current = setTimeout(() => {
-      setFilters((prev) => ({
-        ...prev,
-        search: searchInput.trim() || undefined,
-      }));
+      setFilters((prev) => {
+        const nextSearch = searchInput.trim() || undefined;
+        if (prev.search === nextSearch) return prev;
+        return { ...prev, search: nextSearch };
+      });
     }, 400);
     return () => {
       if (searchDebounceRef.current) {
@@ -2270,11 +2275,16 @@ export default function MarketplaceScreen(): JSX.Element {
                 onPress={() => {
                   const newTab = t.key as typeof tab;
                   setTab(newTab);
-                  if (!loadedTabsRef.current.has(newTab)) {
-                    loadedTabsRef.current.add(newTab);
-                    if (newTab === "my-listings") loadMyListingsData();
-                    else if (newTab === "my-syncs") loadActiveSyncsData();
-                    else if (newTab === "my-purchases") loadPurchasesData();
+                  if (!loadedTabsRef.current.has(newTab) && !loadingTabsRef.current.has(newTab)) {
+                    loadingTabsRef.current.add(newTab);
+                    const loadFn =
+                      newTab === "my-listings" ? loadMyListingsData
+                      : newTab === "my-syncs" ? loadActiveSyncsData
+                      : newTab === "my-purchases" ? loadPurchasesData
+                      : null;
+                    if (loadFn) {
+                      loadFn().finally(() => { loadingTabsRef.current.delete(newTab); });
+                    }
                   }
                   if (t.key === "rankings" && rankingsData.length === 0) {
                     setRankingsLoading(true);
