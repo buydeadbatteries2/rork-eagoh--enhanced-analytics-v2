@@ -11043,6 +11043,15 @@ export default {
       return handleBannerPurchase(request, env);
     }
 
+    // Atomic Exchange sync purchase: calls the purchase_marketplace_sync_atomic
+    // PostgreSQL RPC which does everything in one transaction — buyer deduction,
+    // vendor credit, purchase insert, transaction logs, vendor stats. The client
+    // never directly deducts neurons, credits the vendor, or inserts purchase rows.
+    // Idempotency: deterministic key prevents duplicate charges from retries.
+    if (url.pathname === "/exchange/purchase" && request.method === "POST") {
+      return handleExchangePurchase(request, env);
+    }
+
     // Vendor sale notification: called by the client after a successful
     // Exchange sync purchase to create an in-app notification for the
     // vendor. Best-effort — never fails the purchase. The worker verifies
@@ -11491,7 +11500,7 @@ async function handleBannerPurchase(request: Request, env: Env): Promise<Respons
   });
 }
 
-// trigger rebuild — force deploy for atomic sync purchase endpoint
+// trigger rebuild — force deploy for atomic sync purchase endpoint + route registration
 
 // ── Vendor Sale Notification ──────────────────────────────────────────────
 // Creates an in-app notification for the vendor after a successful Exchange
@@ -11593,7 +11602,7 @@ async function handleExchangeSaleNotify(request: Request, env: Env): Promise<Res
   return jsonResponse({ ok: true });
 }
 
-// trigger rebuild — force deploy for atomic sync purchase endpoint
+// trigger rebuild — force deploy for atomic sync purchase endpoint + route registration
 
 // ── Atomic Exchange Sync Purchase ─────────────────────────────────────────
 // Calls the purchase_marketplace_sync_atomic PostgreSQL RPC which does
