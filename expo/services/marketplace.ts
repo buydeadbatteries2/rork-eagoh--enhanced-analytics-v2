@@ -83,6 +83,21 @@ async function triggerVendorSaleNotification(purchaseId: string): Promise<void> 
   }
 }
 
+/**
+ * Quote and escape a value for use inside a PostgREST `.or()` filter expression.
+ *
+ * Raw `.or()` strings are passed as-is to the PostgREST API — the Supabase
+ * client does not automatically escape or quote individual values within
+ * the expression. An unquoted value containing commas, parentheses, dots,
+ * or other PostgREST metacharacters can silently alter the filter semantics
+ * or cause a parse error. This wraps the value in double quotes (the
+ * PostgREST string-literal delimiter) after escaping backslashes and
+ * embedded double quotes so the value is interpreted literally.
+ */
+function quotePostgrestValue(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
 /** Looks up a domain specialization value from an EAGOH's dna array. */
 function getDomainDnaValue(dna: string[] | undefined | null, columnName: string): string | null {
   if (!dna || dna.length === 0) return null;
@@ -660,9 +675,14 @@ export async function listActiveListings(
   //    OR domain IS NULL and sport = selected (fallback to sport).
   //    Do not match a listing whose non-null domain differs merely
   //    because its sport matches.
+  //
+  //    The value must be quoted via quotePostgrestValue() because `.or()`
+  //    uses raw PostgREST filter syntax — unquoted values containing
+  //    metacharacters (commas, parentheses) could break the expression.
   if (filters.domain) {
+    const quotedDomain = quotePostgrestValue(filters.domain);
     query = query.or(
-      `domain.eq.${filters.domain},and(domain.is.null,sport.eq.${filters.domain})`,
+      `domain.eq.${quotedDomain},and(domain.is.null,sport.eq.${quotedDomain})`,
       { referencedTable: "eagoh" },
     );
   }

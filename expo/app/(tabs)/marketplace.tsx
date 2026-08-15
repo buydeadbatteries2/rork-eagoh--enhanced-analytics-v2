@@ -2123,12 +2123,21 @@ export default function MarketplaceScreen(): JSX.Element {
 
   // ── Pull-to-refresh: refresh active tab's data ──
   // On Browse, explicitly refresh both listings and filter metadata.
+  // invalidateQueries marks the listing cache stale so loadBrowseData's
+  // fetchQuery does a real network request instead of returning data that
+  // is still within its 60s stale window. refetchQueries forces a real
+  // metadata refetch. Both run in parallel so the spinner stays active
+  // until both complete. React Query deduplicates in-flight requests for
+  // the same key, so no duplicate listing requests are made.
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
       if (tab === "browse") {
-        queryClient.invalidateQueries({ queryKey: ["marketplace-filter-meta"] });
-        await loadBrowseData();
+        queryClient.invalidateQueries({ queryKey: ["marketplace-listings"] });
+        await Promise.all([
+          loadBrowseData(),
+          queryClient.refetchQueries({ queryKey: ["marketplace-filter-meta"] }),
+        ]);
       } else if (tab === "my-listings") {
         await loadMyListingsData();
       } else if (tab === "my-syncs") {
@@ -2219,15 +2228,24 @@ export default function MarketplaceScreen(): JSX.Element {
     setMyListings((items) =>
       items.map((l) => (l.id === id ? { ...l, active } : l)),
     );
-    // Also update the main `listings` array if the listing appears there
+    // Also update the main `listings` array if the listing appears there.
+    // On deactivation, remove it from Browse so it's not visible.
+    // On activation, just flip the flag (listing may not be in the array
+    // yet — it will appear on the next Browse refresh via cache invalidation).
     const prevAllListings = listings;
     setListings((items) =>
-      items.map((l) => (l.id === id ? { ...l, active } : l)),
+      active
+        ? items.map((l) => (l.id === id ? { ...l, active } : l))
+        : items.filter((l) => l.id !== id),
     );
 
     try {
       await toggleListingActive(id, active);
       h.selection();
+      // Invalidate listing cache so Browse reflects the change on next load.
+      // After deactivation, the listing won't reappear. After activation,
+      // the listing becomes eligible to appear in Browse.
+      queryClient.invalidateQueries({ queryKey: ["marketplace-listings"] });
       // Invalidate filter metadata — activation/deactivation can change
       // which domains/sports/ranks appear in active listings.
       queryClient.invalidateQueries({ queryKey: ["marketplace-filter-meta"] });
@@ -2683,6 +2701,8 @@ export default function MarketplaceScreen(): JSX.Element {
         visible={createModal}
         onClose={() => setCreateModal(false)}
         onCreated={() => {
+          // Invalidate listing cache so the new listing appears in Browse.
+          queryClient.invalidateQueries({ queryKey: ["marketplace-listings"] });
           // New listing may introduce new domains/sports to filter chips
           queryClient.invalidateQueries({ queryKey: ["marketplace-filter-meta"] });
           loadBrowseData();
@@ -2694,7 +2714,13 @@ export default function MarketplaceScreen(): JSX.Element {
         visible={!!editModal}
         listing={editModal}
         onClose={() => setEditModal(null)}
-        onUpdated={() => { loadBrowseData(); loadMyListingsData(); }}
+        onUpdated={() => {
+          // Invalidate listing cache so Browse reflects updated pricing/description.
+          // No filter metadata invalidation — editing doesn't introduce new domains/sports.
+          queryClient.invalidateQueries({ queryKey: ["marketplace-listings"] });
+          loadBrowseData();
+          loadMyListingsData();
+        }}
         updating={updating}
       />
       <PublicProfileModal
