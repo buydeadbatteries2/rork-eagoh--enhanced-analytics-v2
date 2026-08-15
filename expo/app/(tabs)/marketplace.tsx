@@ -2140,13 +2140,10 @@ export default function MarketplaceScreen(): JSX.Element {
     };
   }, [searchInput]);
 
-  // ── Load active syncs once on mount (non-blocking, for header display) ──
-  useEffect(() => {
-    if (user?.id && isPaid) {
-      loadActiveSyncsData();
-      loadedTabsRef.current.add("my-syncs");
-    }
-  }, [user?.id, isPaid]);
+  // Active Syncs are NOT loaded on mount. They load lazily when the user
+  // first opens the My Syncs tab, or after a purchase succeeds.
+  // The header compact display uses cached data when available, and is
+  // hidden otherwise — no separate automatic request is fired.
 
   // Keep listings state in sync with the React Query cache so background
   // refetches (e.g. window refocus) update the UI without a full reload.
