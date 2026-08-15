@@ -1033,17 +1033,22 @@ export async function expireSyncs(buyerId: string): Promise<number> {
   // per purchase: a failure on one does not stop the others. The RPC is granted
   // to authenticated and is idempotent (re-calling on an already-expired
   // purchase returns skipped=true). It never deactivates retained intelligence.
+  const results = await Promise.allSettled(
+    ids.map((id) => supabase.rpc("mark_purchase_expired", { p_purchase_id: id })),
+  );
   let expiredCount = 0;
-  for (const id of ids) {
-    const { error: rpcErr } = await supabase.rpc("mark_purchase_expired", {
-      p_purchase_id: id,
-    });
-    if (rpcErr) {
-      console.warn("[marketplace] mark_purchase_expired failed", id.slice(0, 8), rpcErr.message);
+  results.forEach((result, index) => {
+    if (result.status === "fulfilled") {
+      const rpcErr = result.value.error;
+      if (rpcErr) {
+        console.warn("[marketplace] mark_purchase_expired failed", ids[index].slice(0, 8), rpcErr.message);
+      } else {
+        expiredCount += 1;
+      }
     } else {
-      expiredCount += 1;
+      console.warn("[marketplace] mark_purchase_expired rejected", ids[index].slice(0, 8), result.reason instanceof Error ? result.reason.message : "unknown");
     }
-  }
+  });
 
   // NOTE: Normal sync expiration does NOT deactivate Retained Exchange
   // Intelligence. The buyer's retained 2% is permanent after a valid
@@ -1053,6 +1058,76 @@ export async function expireSyncs(buyerId: string): Promise<number> {
   // chargeback/dispute, invalid purchase cancellation, or admin revocation.
 
   return expiredCount;
+}
+
+/**
+ * Bulk-enrich sync purchase rows with EAGOH name/image and vendor username.
+ *
+ * Runs exactly 2 Supabase requests regardless of purchase count:
+ *   1. eagohs    (filtered by id IN (...))
+ *   2. profiles  (filtered by id IN (...))
+ *
+ * Results are converted into Maps keyed by eagoh_id / vendor_id and joined
+ * locally — eliminating the previous N+1 per-purchase query pattern.
+ * If one enrichment query fails, fallback values are used and the purchases
+ * are still returned with whatever enrichment data was successfully loaded.
+ */
+async function bulkEnrichPurchases(rows: SyncPurchaseRow[]): Promise<EnrichedPurchase[]> {
+  if (rows.length === 0) return [];
+
+  const uniqueEagohIds = [...new Set(rows.map((r) => r.eagoh_id))];
+  const uniqueVendorIds = [...new Set(rows.map((r) => r.vendor_id))];
+
+  // Run both enrichment queries concurrently
+  const [eagohRows, profileRows] = await Promise.all([
+    // 1. EAGOHs — bulk query by id
+    supabase
+      .from("eagohs")
+      .select("id, name, image_url, image_thumb_url")
+      .in("id", uniqueEagohIds)
+      .then(({ data, error }) => {
+        if (error) console.warn("[marketplace] bulk eagohs error (non-fatal)", error.message);
+        return (data ?? []) as { id: string; name: string | null; image_url: string | null; image_thumb_url: string | null }[];
+      }),
+    // 2. Profiles — bulk query by vendor id
+    supabase
+      .from("profiles")
+      .select("id, username")
+      .in("id", uniqueVendorIds)
+      .then(({ data, error }) => {
+        if (error) console.warn("[marketplace] bulk profiles error (non-fatal)", error.message);
+        return (data ?? []) as { id: string; username: string | null }[];
+      }),
+  ]);
+
+  // Build Maps for O(1) local lookup
+  const eagohById = new Map<
+    string,
+    { name: string | null; image_url: string | null; image_thumb_url: string | null }
+  >();
+  for (const e of eagohRows) {
+    eagohById.set(e.id, {
+      name: e.name,
+      image_url: e.image_url,
+      image_thumb_url: e.image_thumb_url,
+    });
+  }
+
+  const usernameByVendor = new Map<string, string | null>();
+  for (const p of profileRows) {
+    usernameByVendor.set(p.id, p.username);
+  }
+
+  // Enrich every purchase locally from the maps — no DB queries inside the loop
+  return rows.map((row) => {
+    const eagoh = eagohById.get(row.eagoh_id);
+    return {
+      ...row,
+      eagoh_name: eagoh?.name ?? "Unknown EAGOH",
+      eagoh_image_url: eagoh?.image_thumb_url ?? eagoh?.image_url ?? null,
+      vendor_username: usernameByVendor.get(row.vendor_id) ?? null,
+    };
+  });
 }
 
 /** Get active syncs for a buyer (currently active purchases). */
@@ -1069,27 +1144,7 @@ export async function getActiveSyncs(buyerId: string): Promise<EnrichedPurchase[
   if (error) throw error;
   const rows = (data ?? []) as SyncPurchaseRow[];
 
-  return Promise.all(
-    rows.map(async (row) => {
-      const { data: eagoh } = await supabase
-        .from("eagohs")
-        .select("name, image_thumb_url")
-        .eq("id", row.eagoh_id)
-        .maybeSingle();
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("username")
-        .eq("id", row.vendor_id)
-        .maybeSingle();
-
-      return {
-        ...row,
-        eagoh_name: (eagoh as any)?.name ?? "Unknown EAGOH",
-        eagoh_image_url: (eagoh as any)?.image_thumb_url ?? (eagoh as any)?.image_url ?? null,
-        vendor_username: (profile as { username: string | null } | null)?.username ?? null,
-      };
-    }),
-  );
+  return bulkEnrichPurchases(rows);
 }
 
 /** Get all purchases (including expired) for a buyer. */
@@ -1104,26 +1159,7 @@ export async function getMyPurchases(buyerId: string, limit: number = 30): Promi
   if (error) throw error;
   const rows = (data ?? []) as SyncPurchaseRow[];
 
-  return Promise.all(
-    rows.map(async (row) => {
-      const { data: eagoh } = await supabase
-        .from("eagohs")
-        .select("name, image_thumb_url")
-        .eq("id", row.eagoh_id)
-        .maybeSingle();
-      const { data: profile } = await supabase
-        .from("profiles")
-        .select("username")
-        .eq("id", row.vendor_id)
-        .maybeSingle();
-      return {
-        ...row,
-        eagoh_name: (eagoh as any)?.name ?? "Unknown EAGOH",
-        eagoh_image_url: (eagoh as any)?.image_thumb_url ?? (eagoh as any)?.image_url ?? null,
-        vendor_username: (profile as { username: string | null } | null)?.username ?? null,
-      };
-    }),
-  );
+  return bulkEnrichPurchases(rows);
 }
 
 /** Get a single listing by ID (enriched). */

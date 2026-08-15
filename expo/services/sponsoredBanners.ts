@@ -695,76 +695,98 @@ export async function getBannerAnalytics(bannerId: string): Promise<{
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
+/**
+ * Bulk-enrich banner rows with vendor stats and profiles.
+ *
+ * Runs exactly 2 Supabase requests regardless of banner count:
+ *   1. marketplace_vendor_stats  (filtered by vendor_id IN (...))
+ *   2. profiles                  (filtered by id IN (...))
+ *
+ * Results are converted into Maps keyed by vendor/user ID and joined
+ * locally — eliminating the previous N+1 per-banner query pattern.
+ * A failed stats or profile query does not prevent banners from rendering;
+ * fallback values are used instead.
+ */
 async function enrichBanners(banners: any[]): Promise<EnrichedBanner[]> {
-  const enriched: EnrichedBanner[] = [];
-
-  for (const b of banners) {
-    try {
-      if (!b || !b.id || !b.eagoh_id) {
-        console.warn("[sponsoredBanners] skipping invalid banner row (missing id or eagoh_id)");
-        continue;
-      }
-
-      const eagoh = b.eagoh ?? {};
-      // Get vendor stats for rank/score
-      let vendorRank = "UNRANKED";
-      let syncScore = 0;
-      let qualityScore = 0;
-      let vendorUsername: string | null = null;
-
-      // Try vendor stats (best-effort — RLS or missing table must not crash the page)
-      try {
-        const { data: stats } = await supabase
-          .from("marketplace_vendor_stats")
-          .select("rank, sync_success_score, avg_quality_score")
-          .eq("vendor_id", b.purchaser_id)
-          .maybeSingle();
-
-        if (stats) {
-          vendorRank = stats.rank ?? "UNRANKED";
-          syncScore = stats.sync_success_score ?? 0;
-          qualityScore = stats.avg_quality_score ?? 0;
-        }
-      } catch (statsErr) {
-        console.warn("[sponsoredBanners] vendor stats fetch failed (non-fatal)", statsErr instanceof Error ? statsErr.message : "unknown");
-      }
-
-      // Try username (best-effort)
-      try {
-        const { data: profile } = await supabase
-          .from("profiles")
-          .select("username")
-          .eq("id", b.purchaser_id)
-          .maybeSingle();
-
-        vendorUsername = profile?.username ?? null;
-      } catch (profileErr) {
-        console.warn("[sponsoredBanners] profile fetch failed (non-fatal)", profileErr instanceof Error ? profileErr.message : "unknown");
-      }
-
-      enriched.push({
-        ...b,
-        eagoh_name: (typeof eagoh.name === "string" ? eagoh.name : "Unnamed") || "Unnamed",
-        eagoh_domain: (typeof eagoh.sport === "string" ? eagoh.sport : "unknown") || "unknown",
-        eagoh_image_url: resolveBannerEagohImage({
-          image_url: typeof eagoh.image_url === "string" ? eagoh.image_url : null,
-          image_thumb_url: typeof eagoh.image_thumb_url === "string" ? eagoh.image_thumb_url : null,
-        }),
-        vendor_username: vendorUsername,
-        quality_score: qualityScore,
-        sync_score: syncScore,
-        vendor_rank: vendorRank,
-        listing_id: b.listing_id ?? null,
-      });
-    } catch (bannerErr) {
-      console.warn("[sponsoredBanners] skipping banner due to enrichment error (non-fatal)", bannerId(b), bannerErr instanceof Error ? bannerErr.message : "unknown");
-      continue;
+  // Filter out invalid rows missing id or eagoh_id
+  const validBanners = banners.filter((b) => {
+    if (!b || !b.id || !b.eagoh_id) {
+      console.warn("[sponsoredBanners] skipping invalid banner row (missing id or eagoh_id)");
+      return false;
     }
+    return true;
+  });
+
+  if (validBanners.length === 0) return [];
+
+  // Collect unique valid purchaser_id values for bulk queries
+  const uniqueVendorIds = [...new Set(
+    validBanners
+      .map((b) => b.purchaser_id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0),
+  )];
+
+  // Run both enrichment queries concurrently
+  const [statsRows, profileRows] = await Promise.all([
+    // 1. Vendor stats — bulk query by purchaser_id
+    uniqueVendorIds.length > 0
+      ? supabase
+          .from("marketplace_vendor_stats")
+          .select("vendor_id, rank, sync_success_score, avg_quality_score")
+          .in("vendor_id", uniqueVendorIds)
+          .then(({ data, error }) => {
+            if (error) console.warn("[sponsoredBanners] bulk vendor stats error (non-fatal)", error.message);
+            return (data ?? []) as { vendor_id: string; rank: string; sync_success_score: number; avg_quality_score: number }[];
+          })
+      : Promise.resolve([] as { vendor_id: string; rank: string; sync_success_score: number; avg_quality_score: number }[]),
+    // 2. Profiles — bulk query by user id
+    uniqueVendorIds.length > 0
+      ? supabase
+          .from("profiles")
+          .select("id, username")
+          .in("id", uniqueVendorIds)
+          .then(({ data, error }) => {
+            if (error) console.warn("[sponsoredBanners] bulk profiles error (non-fatal)", error.message);
+            return (data ?? []) as { id: string; username: string | null }[];
+          })
+      : Promise.resolve([] as { id: string; username: string | null }[]),
+  ]);
+
+  // Build Maps for O(1) local lookup
+  const statsByVendor = new Map<
+    string,
+    { rank: string; sync_success_score: number; avg_quality_score: number }
+  >();
+  for (const s of statsRows) {
+    statsByVendor.set(s.vendor_id, {
+      rank: s.rank,
+      sync_success_score: s.sync_success_score,
+      avg_quality_score: s.avg_quality_score,
+    });
   }
 
-  return enriched;
-}
+  const usernameByVendor = new Map<string, string | null>();
+  for (const p of profileRows) {
+    usernameByVendor.set(p.id, p.username);
+  }
 
-function bannerId(b: any): string {
-  return (b?.id ?? "unknown").slice(0, 8);
+  // Enrich every banner locally from the maps — no DB queries inside the loop
+  return validBanners.map((b) => {
+    const eagoh = b.eagoh ?? {};
+    const stats = statsByVendor.get(b.purchaser_id);
+    return {
+      ...b,
+      eagoh_name: (typeof eagoh.name === "string" ? eagoh.name : "Unnamed") || "Unnamed",
+      eagoh_domain: (typeof eagoh.sport === "string" ? eagoh.sport : "unknown") || "unknown",
+      eagoh_image_url: resolveBannerEagohImage({
+        image_url: typeof eagoh.image_url === "string" ? eagoh.image_url : null,
+        image_thumb_url: typeof eagoh.image_thumb_url === "string" ? eagoh.image_thumb_url : null,
+      }),
+      vendor_username: usernameByVendor.get(b.purchaser_id) ?? null,
+      quality_score: stats?.avg_quality_score ?? 0,
+      sync_score: stats?.sync_success_score ?? 0,
+      vendor_rank: stats?.rank ?? "UNRANKED",
+      listing_id: b.listing_id ?? null,
+    } as EnrichedBanner;
+  });
 }
