@@ -308,7 +308,32 @@ exception
 end;
 $$;
 
--- Grant execute to authenticated (the worker calls via service_role which bypasses RLS)
+-- ── Permissions ──
+-- This function is SECURITY DEFINER and accepts p_buyer_id as a parameter.
+-- The client must NEVER be able to call this RPC directly — otherwise any
+-- authenticated user could pass an arbitrary buyer_id and deduct neurons
+-- from another user's balance.
+--
+-- The ONLY allowed path is:
+--   App → authenticated /exchange/purchase Worker → service-role Supabase
+--   client → purchase_marketplace_sync_atomic
+--
+-- PostgreSQL grants EXECUTE on functions to PUBLIC by default. We must
+-- explicitly revoke that default privilege from PUBLIC, anon, and
+-- authenticated, then grant ONLY to service_role.
+
+revoke all on function public.purchase_marketplace_sync_atomic(
+  uuid, uuid, text, int, text
+) from public;
+
+revoke all on function public.purchase_marketplace_sync_atomic(
+  uuid, uuid, text, int, text
+) from anon;
+
+revoke all on function public.purchase_marketplace_sync_atomic(
+  uuid, uuid, text, int, text
+) from authenticated;
+
 grant execute on function public.purchase_marketplace_sync_atomic(
   uuid, uuid, text, int, text
-) to authenticated, anon;
+) to service_role;
