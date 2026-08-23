@@ -990,7 +990,7 @@ function EditListingModal({
   return (
     <View style={styles.modalOverlayAbs}>
       <Pressable style={StyleSheet.absoluteFill} onPress={Keyboard.dismiss}>
-        <Pressable style={[styles.modalSheet, styles.modalSheetCreate]} onPress={() => {}}>
+        <Pressable style={[styles.modalSheet, styles.editModalSheet]} onPress={() => {}}>
           <LinearGradient colors={["#0A1628", "#050D18"]} style={StyleSheet.absoluteFill} />
           <View style={styles.modalHandle} />
           <View style={styles.modalHeader}>
@@ -1002,9 +1002,10 @@ function EditListingModal({
 
           <KeyboardAvoidingView
             behavior={Platform.OS === "ios" ? "padding" : undefined}
-            style={{ flex: 1 }}
+            style={styles.editKeyboardAvoid}
           >
             <ScrollView
+              style={styles.editModalScroll}
               contentContainerStyle={styles.createModalScroll}
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
@@ -3411,6 +3412,19 @@ const styles = StyleSheet.create({
     maxHeight: SCREEN_HEIGHT * 0.75,
     height: SCREEN_HEIGHT * 0.75,
     flexShrink: 0,
+  },
+  // Compact bottom sheet for Edit Pricing — sizes naturally around its
+  // content instead of a fixed height, with a responsive cap so a very small
+  // screen or open keyboard makes it scroll rather than overflow.
+  editModalSheet: {
+    maxHeight: "72%",
+    flexShrink: 1,
+  },
+  editKeyboardAvoid: {
+    flexShrink: 1,
+  },
+  editModalScroll: {
+    flexShrink: 1,
   },
   createModalScroll: { paddingBottom: 24 },
   modalHandle: {
