@@ -205,11 +205,17 @@ export default function SalesOrdersScreen(): JSX.Element {
   const { refetch: refetchOrders } = ordersQuery;
   const { refetch: refetchSummary } = summaryQuery;
 
+  // While either query is refetching, Try Again is disabled and shows a
+  // spinner — rapid taps can never create repeated request groups. The
+  // button re-enables once both queries settle.
+  const isRetrying = ordersQuery.isFetching || summaryQuery.isFetching;
+
   const handleTryAgain = useCallback(() => {
+    if (isRetrying) return;
     h.light();
     void refetchOrders();
     void refetchSummary();
-  }, [h, refetchOrders, refetchSummary]);
+  }, [h, refetchOrders, refetchSummary, isRetrying]);
 
   const [refreshing, setRefreshing] = useState(false);
   const handleRefresh = useCallback(async () => {
@@ -266,9 +272,17 @@ export default function SalesOrdersScreen(): JSX.Element {
           </Text>
           <Pressable
             onPress={handleTryAgain}
-            style={({ pressed }) => [styles.retryBtn, pressed && { opacity: 0.8 }]}
+            disabled={isRetrying}
+            style={({ pressed }) => [
+              styles.retryBtn,
+              (pressed || isRetrying) && { opacity: 0.8 },
+            ]}
           >
-            <RotateCcw color={palette.void} size={15} />
+            {isRetrying ? (
+              <ActivityIndicator color={palette.void} size="small" />
+            ) : (
+              <RotateCcw color={palette.void} size={15} />
+            )}
             <Text style={styles.retryBtnText}>Try Again</Text>
           </Pressable>
         </View>

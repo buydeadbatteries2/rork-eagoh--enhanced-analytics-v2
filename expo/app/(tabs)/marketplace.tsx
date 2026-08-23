@@ -71,6 +71,7 @@ import {
   canTransact,
   computeTotalCost,
   createListing,
+  extractErrorMessage,
   formatMarketplaceError,
   getActiveFilters,
   getActiveSyncs,
@@ -970,8 +971,7 @@ function EditListingModal({
     } catch (err: unknown) {
       // Technical details only in dev, capped — never the full server response.
       if (__DEV__) {
-        const raw = err instanceof Error ? err.message : String(err);
-        console.log("[marketplace] updateListing failed:", raw.slice(0, 300));
+        console.log("[marketplace] updateListing failed:", extractErrorMessage(err).slice(0, 300));
       }
       const info = formatMarketplaceError(err);
       Alert.alert(info.title, info.message);

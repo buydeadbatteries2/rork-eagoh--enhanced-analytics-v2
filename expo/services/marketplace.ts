@@ -356,16 +356,45 @@ function isGatewayOrHtmlResponse(raw: string): boolean {
 }
 
 /**
+ * Safely extracts a human-readable message from any common error shape:
+ * JavaScript Error instances, raw strings, Supabase/PostgREST plain objects
+ * with a string `message`, and objects nesting the message under
+ * `error.message`. Returns "" when nothing recognizable is found.
+ */
+export function extractErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+
+  if (err && typeof err === "object") {
+    const record = err as Record<string, unknown>;
+
+    if (typeof record.message === "string") {
+      return record.message;
+    }
+
+    if (record.error && typeof record.error === "object") {
+      const nested = record.error as Record<string, unknown>;
+      if (typeof nested.message === "string") {
+        return nested.message;
+      }
+    }
+  }
+
+  return "";
+}
+
+/**
  * Formats a marketplace error for display in an Alert.
  *
  * Supabase gateway timeouts (Cloudflare 522) return an HTML error page in
- * the response body. Surfacing that raw HTML in an Alert is unreadable and
+ * the response body, sometimes wrapped in a plain error object rather than
+ * an Error instance. Surfacing that raw HTML in an Alert is unreadable and
  * leaks infrastructure details, so gateway/HTML responses are converted
  * into a friendly "Connection problem" message. Other errors are collapsed
  * to a single line and capped to a reasonable length.
  */
 export function formatMarketplaceError(err: unknown): MarketplaceErrorInfo {
-  const raw = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  const raw = extractErrorMessage(err);
   if (isGatewayOrHtmlResponse(raw)) {
     return { title: "Connection problem", message: CONNECTION_PROBLEM_MESSAGE };
   }
@@ -1050,8 +1079,9 @@ export async function updateListing(
   // Price and description edits affect no vendor-stat field (listings,
   // active listings, sales, earnings, sync score, quality score, rank),
   // so the recalc chain (≈11 sequential queries) is skipped entirely.
-  // Stats recalculation still runs where statistics actually change:
-  // listing creation, activation/deactivation, and purchases.
+  // Stats are only refreshed where they actually change: listing creation
+  // recalcs client-side, and purchases update them server-side inside the
+  // atomic purchase RPC. Activation/deactivation performs no stats recalc.
 
   return listing;
 }
