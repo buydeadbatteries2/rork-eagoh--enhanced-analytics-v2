@@ -989,10 +989,8 @@ function EditListingModal({
 
   return (
     <View style={styles.modalOverlayAbs}>
-      {/* Dismiss catcher — sibling (not parent) of the sheet so the overlay's
-          justifyContent: "flex-end" anchors the sheet to the BOTTOM. */}
-      <Pressable style={StyleSheet.absoluteFill} onPress={Keyboard.dismiss} />
-      <Pressable style={[styles.modalSheet, styles.editModalSheet]} onPress={() => {}}>
+      <Pressable style={styles.editModalBackdrop} onPress={Keyboard.dismiss}>
+        <Pressable style={[styles.modalSheet, styles.editModalSheet]} onPress={() => {}}>
           <LinearGradient colors={["#0A1628", "#050D18"]} style={StyleSheet.absoluteFill} />
           <View style={styles.modalHandle} />
           <View style={styles.modalHeader}>
@@ -1069,6 +1067,7 @@ function EditListingModal({
               </Pressable>
             </ScrollView>
           </KeyboardAvoidingView>
+        </Pressable>
       </Pressable>
     </View>
   );
@@ -3414,11 +3413,24 @@ const styles = StyleSheet.create({
     height: SCREEN_HEIGHT * 0.75,
     flexShrink: 0,
   },
+  // Full-screen backdrop for Edit Pricing. Carries the bottom alignment
+  // (justifyContent: "flex-end") so the nested sheet anchors to the bottom
+  // of the screen instead of the top.
+  editModalBackdrop: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: "flex-end",
+  },
   // Compact bottom sheet for Edit Pricing — sizes naturally around its
   // content instead of a fixed height, with a responsive cap so a very small
   // screen or open keyboard makes it scroll rather than overflow.
   editModalSheet: {
+    width: "100%",
     maxHeight: "72%",
+    alignSelf: "stretch",
     flexShrink: 1,
   },
   editKeyboardAvoid: {
