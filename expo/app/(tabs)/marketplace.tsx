@@ -71,6 +71,7 @@ import {
   canTransact,
   computeTotalCost,
   createListing,
+  formatMarketplaceError,
   getActiveFilters,
   getActiveSyncs,
   getMyListings,
@@ -86,6 +87,7 @@ import {
   type EnrichedPurchase,
   type ListingFilters,
   type SyncLevel,
+  type VendorStatsRow,
 } from "@/services/marketplace";
 import type { EagohRecord } from "@/services/eagohs";
 import {
@@ -301,19 +303,28 @@ const VendorStatsCard = memo(function VendorStatsCard(): JSX.Element | null {
   const { user } = useAuth();
   const { profile, effectiveSubscriptionTier: tier } = useProfile();
   const router = useRouter();
-  const [stats, setStats] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
+  const isVendorEligible = !!user?.id && !!profile && canTransact(tier);
 
-  useEffect(() => {
-    if (!user?.id || !profile || !canTransact(tier)) return;
-    setLoading(true);
-    getVendorStats(user.id)
-      .then((s) => { setStats(s); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, [user?.id, profile]);
+  // Cached vendor stats — ~60s staleTime avoids refetching on every Exchange
+  // visit. Loading and error states never hide the card, so Sales & Orders
+  // is tappable immediately for any authenticated paid subscriber.
+  const statsQuery = useQuery<VendorStatsRow | null>({
+    queryKey: ["vendorStats", user?.id],
+    queryFn: () => getVendorStats(user!.id),
+    staleTime: 60_000,
+    enabled: isVendorEligible,
+  });
 
-  if (!profile || !canTransact(tier) || loading) return null;
-  if (!stats || stats.total_listings === 0) return null;
+  if (!isVendorEligible) return null;
+
+  const stats = statsQuery.data ?? null;
+  // Preserve existing behavior: hide the dashboard for users known to have
+  // zero listings. Loading/error keep the shell visible with placeholders.
+  if (stats && stats.total_listings === 0) return null;
+
+  const showStats = stats != null;
+  const rankHex = showStats ? rankColor(stats.rank) : palette.muted;
+  const statValue = (v: number): string | number => (showStats ? v : "—");
 
   return (
     <View style={styles.vendorStatsCard}>
@@ -321,23 +332,27 @@ const VendorStatsCard = memo(function VendorStatsCard(): JSX.Element | null {
       <View style={styles.vendorStatsHeader}>
         <Crown color={palette.violet} size={18} />
         <Text style={styles.vendorStatsTitle}>Vendor Dashboard</Text>
-        <Text style={[styles.rankBadge, { color: rankColor(stats.rank), borderColor: `${rankColor(stats.rank)}55` }]}>{stats.rank}</Text>
+        {statsQuery.isPending ? (
+          <ActivityIndicator color={palette.muted} size="small" />
+        ) : (
+          <Text style={[styles.rankBadge, { color: rankHex, borderColor: `${rankHex}55` }]}>{showStats ? stats.rank : "—"}</Text>
+        )}
       </View>
       <View style={styles.vendorStatsGrid}>
         <View style={styles.vendorStatItem}>
-          <Text style={styles.vendorStatValue}>{stats.active_listings}</Text>
+          <Text style={styles.vendorStatValue}>{statValue(stats?.active_listings ?? 0)}</Text>
           <Text style={styles.vendorStatLabel}>Active</Text>
         </View>
         <View style={styles.vendorStatItem}>
-          <Text style={styles.vendorStatValue}>{stats.total_sales}</Text>
+          <Text style={styles.vendorStatValue}>{statValue(stats?.total_sales ?? 0)}</Text>
           <Text style={styles.vendorStatLabel}>Sales</Text>
         </View>
         <View style={styles.vendorStatItem}>
-          <Text style={[styles.vendorStatValue, { color: palette.gold }]}>{stats.edge_earned_this_month}</Text>
+          <Text style={[styles.vendorStatValue, { color: palette.gold }]}>{statValue(stats?.edge_earned_this_month ?? 0)}</Text>
           <Text style={styles.vendorStatLabel}>EC This Month</Text>
         </View>
         <View style={styles.vendorStatItem}>
-          <Text style={[styles.vendorStatValue, { color: palette.cyan }]}>{stats.sync_success_score}</Text>
+          <Text style={[styles.vendorStatValue, { color: palette.cyan }]}>{statValue(stats?.sync_success_score ?? 0)}</Text>
           <Text style={styles.vendorStatLabel}>Sync Score</Text>
         </View>
       </View>
@@ -905,19 +920,18 @@ function EditListingModal({
   listing,
   onClose,
   onUpdated,
-  updating,
 }: {
   visible: boolean;
   listing: EnrichedListing | null;
   onClose: () => void;
   onUpdated: () => void;
-  updating: boolean;
 }): JSX.Element {
   const h = useHaptics();
   const [price25, setPrice25] = useState("");
   const [price50, setPrice50] = useState("");
   const [price75, setPrice75] = useState("");
   const [price100, setPrice100] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (listing) {
@@ -940,7 +954,9 @@ function EditListingModal({
 
   const handleUpdate = useCallback(async () => {
     Keyboard.dismiss();
-    if (!listing?.id) return;
+    // Guard against double-submission from rapid taps.
+    if (!listing?.id || submitting) return;
+    setSubmitting(true);
     try {
       await updateListing(listing.id, {
         price25PerDay: parseInt(price25, 10) || 0,
@@ -952,9 +968,17 @@ function EditListingModal({
       onUpdated();
       onClose();
     } catch (err: unknown) {
-      Alert.alert("Error", (err as Error).message ?? "Failed to update listing.");
+      // Technical details only in dev, capped — never the full server response.
+      if (__DEV__) {
+        const raw = err instanceof Error ? err.message : String(err);
+        console.log("[marketplace] updateListing failed:", raw.slice(0, 300));
+      }
+      const info = formatMarketplaceError(err);
+      Alert.alert(info.title, info.message);
+    } finally {
+      setSubmitting(false);
     }
-  }, [listing?.id, price25, price50, price75, price100, h, onUpdated, onClose]);
+  }, [listing?.id, submitting, price25, price50, price75, price100, h, onUpdated, onClose]);
 
   // All early returns must come AFTER all hooks
   if (!listing) return <></>;
@@ -1023,15 +1047,15 @@ function EditListingModal({
 
               <Pressable
                 onPress={handleUpdate}
-                disabled={updating}
+                disabled={submitting}
                 style={({ pressed }) => [
                   styles.confirmButton,
-                  updating && styles.confirmButtonDisabled,
+                  submitting && styles.confirmButtonDisabled,
                   pressed && styles.pressed,
                   { marginTop: 20 },
                 ]}
               >
-                {updating ? (
+                {submitting ? (
                   <ActivityIndicator color={palette.void} size="small" />
                 ) : (
                   <>
@@ -1978,7 +2002,6 @@ export default function MarketplaceScreen(): JSX.Element {
   const [creating, setCreating] = useState(false);
 
   const [editModal, setEditModal] = useState<EnrichedListing | null>(null);
-  const [updating, setUpdating] = useState(false);
 
   const [showSourceInfo, setShowSourceInfo] = useState(false);
   const [publicProfileVendorId, setPublicProfileVendorId] = useState<string | null>(null);
@@ -2721,7 +2744,6 @@ export default function MarketplaceScreen(): JSX.Element {
           loadBrowseData();
           loadMyListingsData();
         }}
-        updating={updating}
       />
       <PublicProfileModal
         visible={!!publicProfileVendorId}

@@ -56,19 +56,28 @@ function mapOrderStatus(purchaseStatus: string | null, active: boolean): OrderSt
  * RLS allows vendors to SELECT their own purchases (msp_self_select).
  */
 export async function getVendorOrders(vendorId: string, limit: number = 50): Promise<VendorOrder[]> {
-  const { data, error } = await supabase
-    .from("marketplace_sync_purchases")
-    .select(`
-      id, eagoh_id, buyer_display_name, buyer_avatar_url,
-      sync_level, days, edge_cost, created_at, expires_at,
-      active, purchase_status
-    `)
-    .eq("vendor_id", vendorId)
-    .order("created_at", { ascending: false })
-    .limit(limit);
+  // Orders and the vendor's own EAGOHs load concurrently (one round trip).
+  // EAGOHs are fetched by owner rather than derived from the order rows, so
+  // both queries can start immediately instead of chaining sequentially.
+  const [ordersRes, eagohsRes] = await Promise.all([
+    supabase
+      .from("marketplace_sync_purchases")
+      .select(`
+        id, eagoh_id, buyer_display_name, buyer_avatar_url,
+        sync_level, days, edge_cost, created_at, expires_at,
+        active, purchase_status
+      `)
+      .eq("vendor_id", vendorId)
+      .order("created_at", { ascending: false })
+      .limit(limit),
+    supabase
+      .from("eagohs")
+      .select("id, name, image_url, image_thumb_url")
+      .eq("user_id", vendorId),
+  ]);
 
-  if (error) throw error;
-  const rows = (data ?? []) as Array<{
+  if (ordersRes.error) throw ordersRes.error;
+  const rows = (ordersRes.data ?? []) as Array<{
     id: string;
     eagoh_id: string;
     buyer_display_name: string | null;
@@ -82,18 +91,15 @@ export async function getVendorOrders(vendorId: string, limit: number = 50): Pro
     purchase_status: string | null;
   }>;
 
-  if (rows.length === 0) return [];
-
-  // Bulk-fetch EAGOH names + images to avoid N+1
-  const eagohIds = [...new Set(rows.map((r) => r.eagoh_id))];
-  const { data: eagohs } = await supabase
-    .from("eagohs")
-    .select("id, name, image_url, image_thumb_url")
-    .in("id", eagohIds);
-
+  // EAGOH enrichment is best-effort: if it fails, orders still render with
+  // an "Unknown EAGOH" fallback name and null image.
   const eagohMap = new Map<string, { name: string; image_url: string | null; image_thumb_url: string | null }>();
-  for (const e of (eagohs ?? []) as Array<{ id: string; name: string; image_url: string | null; image_thumb_url: string | null }>) {
-    eagohMap.set(e.id, e);
+  if (eagohsRes.error) {
+    console.warn("[vendorOrders] EAGOH enrichment failed:", eagohsRes.error.message);
+  } else {
+    for (const e of (eagohsRes.data ?? []) as Array<{ id: string; name: string; image_url: string | null; image_thumb_url: string | null }>) {
+      eagohMap.set(e.id, e);
+    }
   }
 
   return rows.map((row) => {
@@ -102,7 +108,7 @@ export async function getVendorOrders(vendorId: string, limit: number = 50): Pro
       id: row.id,
       eagoh_id: row.eagoh_id,
       eagoh_name: eagoh?.name ?? "Unknown EAGOH",
-      eagoh_image_url: resolveMarketplaceEagohImage(eagoh ?? null),
+      eagoh_image_url: eagoh ? resolveMarketplaceEagohImage(eagoh) : null,
       buyer_display_name: row.buyer_display_name ?? null,
       buyer_avatar_url: row.buyer_avatar_url ?? null,
       sync_level: row.sync_level,
@@ -123,26 +129,27 @@ export async function getVendorOrders(vendorId: string, limit: number = 50): Pro
  * Uses the existing marketplace_vendor_stats table + marketplace_sync_purchases.
  */
 export async function getVendorEarningsSummary(vendorId: string): Promise<VendorEarningsSummary> {
-  // Fetch vendor stats for lifetime totals
-  const { data: stats } = await supabase
-    .from("marketplace_vendor_stats")
-    .select("total_sales, total_edge_earned, edge_earned_this_month")
-    .eq("vendor_id", vendorId)
-    .maybeSingle();
-
-  const statsRow = stats as { total_sales: number; total_edge_earned: number; edge_earned_this_month: number } | null;
-
-  // Calculate sales this month from purchases
   const now = new Date();
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
 
-  const { data: monthData } = await supabase
-    .from("marketplace_sync_purchases")
-    .select("edge_cost, purchase_status")
-    .eq("vendor_id", vendorId)
-    .gte("created_at", monthStart);
+  // Vendor stats and this month's purchases load concurrently (one round trip).
+  // Errors stay non-fatal (fallback to 0s) so a summary failure never
+  // prevents the order history from displaying.
+  const [statsRes, monthRes] = await Promise.all([
+    supabase
+      .from("marketplace_vendor_stats")
+      .select("total_sales, total_edge_earned, edge_earned_this_month")
+      .eq("vendor_id", vendorId)
+      .maybeSingle(),
+    supabase
+      .from("marketplace_sync_purchases")
+      .select("edge_cost, purchase_status")
+      .eq("vendor_id", vendorId)
+      .gte("created_at", monthStart),
+  ]);
 
-  const monthRows = (monthData ?? []) as Array<{ edge_cost: number; purchase_status: string | null }>;
+  const statsRow = statsRes.data as { total_sales: number; total_edge_earned: number; edge_earned_this_month: number } | null;
+  const monthRows = (monthRes.data ?? []) as Array<{ edge_cost: number; purchase_status: string | null }>;
   const reversedStatuses = ["refunded", "payment_reversed", "charged_back", "disputed", "invalidated", "admin_revoked"];
   const validMonthRows = monthRows.filter((r) => !r.purchase_status || !reversedStatuses.includes(r.purchase_status));
   const salesThisMonth = validMonthRows.length;

@@ -336,6 +336,49 @@ function currentMonthKey(): string {
 
 // ── Vendor Stats ───────────────────────────────────────────────────────
 
+/** Title + message pair for a user-facing marketplace error alert. */
+export type MarketplaceErrorInfo = { title: string; message: string };
+
+const CONNECTION_PROBLEM_MESSAGE =
+  "EAGOH could not confirm the update because Supabase did not respond. Reopen the listing to verify the price, then try again if needed.";
+
+/** Detects Cloudflare/Supabase gateway failures (522) and raw HTML error pages. */
+function isGatewayOrHtmlResponse(raw: string): boolean {
+  const lowered = raw.toLowerCase();
+  return (
+    lowered.includes("<!doctype html") ||
+    lowered.includes("<html") ||
+    lowered.includes("<head") ||
+    lowered.includes("supabase.co | 522") ||
+    lowered.includes("cloudflare") ||
+    (lowered.includes("522") && lowered.includes("connection"))
+  );
+}
+
+/**
+ * Formats a marketplace error for display in an Alert.
+ *
+ * Supabase gateway timeouts (Cloudflare 522) return an HTML error page in
+ * the response body. Surfacing that raw HTML in an Alert is unreadable and
+ * leaks infrastructure details, so gateway/HTML responses are converted
+ * into a friendly "Connection problem" message. Other errors are collapsed
+ * to a single line and capped to a reasonable length.
+ */
+export function formatMarketplaceError(err: unknown): MarketplaceErrorInfo {
+  const raw = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+  if (isGatewayOrHtmlResponse(raw)) {
+    return { title: "Connection problem", message: CONNECTION_PROBLEM_MESSAGE };
+  }
+  const trimmed = raw.replace(/\s+/g, " ").trim();
+  const concise =
+    trimmed.length > 0
+      ? trimmed.length > 140
+        ? `${trimmed.slice(0, 140)}…`
+        : trimmed
+      : "Something went wrong. Please try again.";
+  return { title: "Error", message: concise };
+}
+
 export async function getVendorStats(vendorId: string): Promise<VendorStatsRow | null> {
   const { data, error } = await supabase
     .from("marketplace_vendor_stats")
@@ -1003,8 +1046,12 @@ export async function updateListing(
   const listing = (data as MarketplaceListingRow[])?.[0];
   if (!listing) throw new Error("Failed to update listing — no row returned.");
 
-  // Recalc vendor stats
-  await recalculateVendorStats(listing.vendor_id);
+  // NOTE: vendor stats are intentionally NOT recalculated here.
+  // Price and description edits affect no vendor-stat field (listings,
+  // active listings, sales, earnings, sync score, quality score, rank),
+  // so the recalc chain (≈11 sequential queries) is skipped entirely.
+  // Stats recalculation still runs where statistics actually change:
+  // listing creation, activation/deactivation, and purchases.
 
   return listing;
 }

@@ -27,8 +27,9 @@ import {
   CheckCircle,
   XCircle,
   RotateCcw,
+  WifiOff,
 } from "lucide-react-native";
-import React, { memo, useCallback } from "react";
+import React, { memo, useCallback, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -40,7 +41,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Image } from "expo-image";
 
 // ── Status helpers ─────────────────────────────────────────────────────
@@ -181,14 +182,16 @@ const OrderCard = memo(function OrderCard({ order }: { order: VendorOrder }): JS
 export default function SalesOrdersScreen(): JSX.Element {
   const { user } = useAuth();
   const h = useHaptics();
-  const queryClient = useQueryClient();
   const goBack = useSafeBack();
 
+  // No automatic retries — repeated 522 attempts would keep the screen on a
+  // spinner for a long time. A Try Again button is shown instead.
   const ordersQuery = useQuery<VendorOrder[]>({
     queryKey: ["vendorOrders", user?.id],
     queryFn: () => getVendorOrders(user!.id),
     staleTime: 30_000,
     enabled: !!user?.id,
+    retry: false,
   });
 
   const summaryQuery = useQuery<VendorEarningsSummary>({
@@ -196,16 +199,37 @@ export default function SalesOrdersScreen(): JSX.Element {
     queryFn: () => getVendorEarningsSummary(user!.id),
     staleTime: 30_000,
     enabled: !!user?.id,
+    retry: false,
   });
 
-  const handleRefresh = useCallback(() => {
+  const { refetch: refetchOrders } = ordersQuery;
+  const { refetch: refetchSummary } = summaryQuery;
+
+  const handleTryAgain = useCallback(() => {
     h.light();
-    queryClient.invalidateQueries({ queryKey: ["vendorOrders", user?.id] });
-    queryClient.invalidateQueries({ queryKey: ["vendorEarningsSummary", user?.id] });
-  }, [h, queryClient, user?.id]);
+    void refetchOrders();
+    void refetchSummary();
+  }, [h, refetchOrders, refetchSummary]);
+
+  const [refreshing, setRefreshing] = useState(false);
+  const handleRefresh = useCallback(async () => {
+    h.light();
+    setRefreshing(true);
+    try {
+      // Wait for BOTH refetches to settle so the spinner stays active
+      // through the entire refresh.
+      await Promise.allSettled([refetchOrders(), refetchSummary()]);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [h, refetchOrders, refetchSummary]);
 
   const orders = ordersQuery.data ?? [];
-  const isLoading = ordersQuery.isLoading && orders.length === 0;
+  const isLoading = ordersQuery.isPending && orders.length === 0;
+  // First load failed with nothing cached → show the error state.
+  // If order history loaded but only the summary failed, the orders render
+  // with summary fallback values (never a full-screen error).
+  const isFirstLoadError = ordersQuery.isError && orders.length === 0;
 
   const renderItem = useCallback(({ item }: { item: VendorOrder }) => (
     <OrderCard order={item} />
@@ -233,7 +257,22 @@ export default function SalesOrdersScreen(): JSX.Element {
         <View style={{ width: 22 }} />
       </View>
 
-      {isLoading ? (
+      {isFirstLoadError ? (
+        <View style={styles.errorContainer}>
+          <WifiOff color={palette.muted} size={40} />
+          <Text style={styles.errorTitle}>Unable to load Sales & Orders</Text>
+          <Text style={styles.errorHint}>
+            EAGOH could not reach the marketplace service. Check your connection and try again.
+          </Text>
+          <Pressable
+            onPress={handleTryAgain}
+            style={({ pressed }) => [styles.retryBtn, pressed && { opacity: 0.8 }]}
+          >
+            <RotateCcw color={palette.void} size={15} />
+            <Text style={styles.retryBtnText}>Try Again</Text>
+          </Pressable>
+        </View>
+      ) : isLoading ? (
         <View style={styles.loadingContainer}>
           <ActivityIndicator color={palette.cyan} size="large" />
         </View>
@@ -257,7 +296,7 @@ export default function SalesOrdersScreen(): JSX.Element {
           contentContainerStyle={styles.listContent}
           refreshControl={
             <RefreshControl
-              refreshing={ordersQuery.isRefetching || summaryQuery.isRefetching}
+              refreshing={refreshing}
               onRefresh={handleRefresh}
               tintColor={palette.cyan}
               colors={[palette.cyan]}
@@ -513,5 +552,41 @@ const styles = StyleSheet.create({
     textAlign: "center",
     paddingHorizontal: 40,
     lineHeight: 20,
+  },
+  // First-load error
+  errorContainer: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 32,
+    gap: 12,
+  },
+  errorTitle: {
+    color: palette.text,
+    fontSize: 17,
+    fontWeight: "900",
+    textAlign: "center",
+  },
+  errorHint: {
+    color: palette.muted,
+    fontSize: 13,
+    fontWeight: "600",
+    textAlign: "center",
+    lineHeight: 20,
+    marginBottom: 8,
+  },
+  retryBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: palette.cyan,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 10,
+  },
+  retryBtnText: {
+    color: palette.void,
+    fontSize: 14,
+    fontWeight: "900",
   },
 });
