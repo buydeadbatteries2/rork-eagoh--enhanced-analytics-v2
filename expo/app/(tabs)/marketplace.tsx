@@ -989,8 +989,10 @@ function EditListingModal({
 
   return (
     <View style={styles.modalOverlayAbs}>
-      <Pressable style={StyleSheet.absoluteFill} onPress={Keyboard.dismiss}>
-        <Pressable style={[styles.modalSheet, styles.editModalSheet]} onPress={() => {}}>
+      {/* Dismiss catcher — sibling (not parent) of the sheet so the overlay's
+          justifyContent: "flex-end" anchors the sheet to the BOTTOM. */}
+      <Pressable style={StyleSheet.absoluteFill} onPress={Keyboard.dismiss} />
+      <Pressable style={[styles.modalSheet, styles.editModalSheet]} onPress={() => {}}>
           <LinearGradient colors={["#0A1628", "#050D18"]} style={StyleSheet.absoluteFill} />
           <View style={styles.modalHandle} />
           <View style={styles.modalHeader}>
@@ -1067,7 +1069,6 @@ function EditListingModal({
               </Pressable>
             </ScrollView>
           </KeyboardAvoidingView>
-        </Pressable>
       </Pressable>
     </View>
   );
