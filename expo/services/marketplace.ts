@@ -1,5 +1,6 @@
 import { supabase } from "@/lib/supabase";
 import type { UserProfile, SubscriptionTier } from "@/services/profile";
+import { hasProAccess } from "@/services/tiers";
 import type { EagohRecord } from "@/services/eagohs";
 import { getTeamById } from "@/data/teams";
 import { getBulkEagohHasCredentials } from "@/services/eagohCredentials";
@@ -321,10 +322,9 @@ export function computeTotalCost(listing: MarketplaceListingRow, level: SyncLeve
 
 // ── Tier gating ─────────────────────────────────────────────────────────
 
-const PAID_TIERS: SubscriptionTier[] = ["pro", "oracle_elite", "syndicate"];
-
+/** Any tier with paid Pro access may transact on the Exchange. */
 export function canTransact(tier: SubscriptionTier): boolean {
-  return PAID_TIERS.includes(tier);
+  return hasProAccess(tier);
 }
 
 // ── Current month key ──────────────────────────────────────────────────

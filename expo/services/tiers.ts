@@ -217,10 +217,13 @@ export const TIER_LABELS: Record<SubscriptionTier, string> = {
 export const TIER_BENEFITS: Record<Exclude<SubscriptionTier, "free">, string[]> = {
   pro: [
     "600 monthly Neurons",
-    "Up to 2 EAGOHs",
+    "Up to 2 included EAGOHs",
+    "All analysis session types",
     "Full Intelligence Domain access",
-    "Marketplace access",
-    "Faction Network access",
+    "Full Marketplace suite",
+    "Full Forge and Reforge access",
+    "Faction Network leadership",
+    "Sponsored Banner access",
   ],
   oracle_elite: [
     "1,400 monthly Neurons",

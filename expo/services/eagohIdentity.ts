@@ -6,6 +6,7 @@
  */
 
 import type { SubscriptionTier } from "@/services/profile";
+import { hasProAccess } from "@/services/tiers";
 
 // ── Constants ──────────────────────────────────────────────────────
 
@@ -14,13 +15,6 @@ export const RENAME_EDGE_COST = 75;
 
 /** Days a user must wait between renames. */
 export const RENAME_COOLDOWN_DAYS = 30;
-
-/** Tiers allowed to rename. Free users cannot rename. */
-export const RENAME_ALLOWED_TIERS: readonly SubscriptionTier[] = [
-  "pro",
-  "oracle_elite",
-  "syndicate",
-];
 
 /** Base cost per changed section (before bundle discounts). */
 export const REFORGE_SECTION_COST = 15;
@@ -93,7 +87,7 @@ export function calculateReforgeCost(
  * Returns true if the user's tier permits renaming.
  */
 export function canRenameEAGOH(tier: SubscriptionTier): boolean {
-  return (RENAME_ALLOWED_TIERS as readonly string[]).includes(tier);
+  return hasProAccess(tier);
 }
 
 /**

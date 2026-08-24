@@ -1,4 +1,5 @@
 import type { SubscriptionTier } from "@/services/profile";
+import { hasProAccess } from "@/services/tiers";
 
 /**
  * Centralized Free-tier permission system.
@@ -31,13 +32,13 @@ const FREE_ALLOWED_SESSIONS: ReadonlySet<SessionTypeId> = new Set([
 
 /** Returns true when the given tier is allowed to use the specified session type. */
 export function canUseSessionType(tier: SubscriptionTier, sessionId: SessionTypeId): boolean {
-  if (tier !== "free") return true;
+  if (hasProAccess(tier)) return true;
   return FREE_ALLOWED_SESSIONS.has(sessionId);
 }
 
 /** Free users may never use Forge. */
 export function canUseForge(tier: SubscriptionTier): boolean {
-  return tier !== "free";
+  return hasProAccess(tier);
 }
 
 /** Quick Check is the only analysis session available to free users, and it is always available. */
@@ -47,17 +48,17 @@ export function canUseQuickCheck(_tier: SubscriptionTier): boolean {
 
 /** Free users may never use the Exchange / marketplace. */
 export function canUseExchange(tier: SubscriptionTier): boolean {
-  return tier !== "free";
+  return hasProAccess(tier);
 }
 
 /** Free users may never use Open Intelligence. */
 export function canUseOpenIntelligence(tier: SubscriptionTier): boolean {
-  return tier !== "free";
+  return hasProAccess(tier);
 }
 
 /** Free users may never create or join Factions. */
 export function canUseFactions(tier: SubscriptionTier): boolean {
-  return tier !== "free";
+  return hasProAccess(tier);
 }
 
 /** Free users may view the subscription / Neuron store to upgrade. */
@@ -67,27 +68,27 @@ export function canViewSubscriptionStore(_tier: SubscriptionTier): boolean {
 
 /** Free users may never purchase sync access on the Exchange. */
 export function canPurchaseSync(tier: SubscriptionTier): boolean {
-  return tier !== "free";
+  return hasProAccess(tier);
 }
 
 /** Free users may never list EAGOHs on the Exchange. */
 export function canListOnExchange(tier: SubscriptionTier): boolean {
-  return tier !== "free";
+  return hasProAccess(tier);
 }
 
 /** Free users may never purchase Neuron packs from the store. */
 export function canPurchaseNeuronPacks(tier: SubscriptionTier): boolean {
-  return tier !== "free";
+  return hasProAccess(tier);
 }
 
 /** Free users may never create, rename, or reforge EAGOHs. */
 export function canCreateEagoh(tier: SubscriptionTier): boolean {
-  return tier !== "free";
+  return hasProAccess(tier);
 }
 
 /** Free users may never rename EAGOHs (reinforced server-side too). */
 export function canRenameEagoh(tier: SubscriptionTier): boolean {
-  return tier !== "free";
+  return hasProAccess(tier);
 }
 
 // ── Session eligibility ──────────────────────────────────────────────────
@@ -125,7 +126,7 @@ export function getSessionEligibility({
 
   // Faction Network & My Rankings: view-only, no EAGOH required, tier-gated
   if (sessionType === "faction-network" || sessionType === "my-rankings") {
-    if (tier === "free") {
+    if (!hasProAccess(tier)) {
       return { allowed: false, reason: "tier_too_low" };
     }
     return { allowed: true, requiresEagoh: true };
@@ -136,7 +137,7 @@ export function getSessionEligibility({
     return { allowed: false, reason: "eagoh_required" };
   }
 
-  if (tier === "free") {
+  if (!hasProAccess(tier)) {
     return { allowed: false, reason: "tier_too_low" };
   }
 
