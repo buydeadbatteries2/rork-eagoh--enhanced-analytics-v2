@@ -62,6 +62,43 @@ export const [EdgeProvider, useEdge] = createContextHook(() => {
     [queryClient, userId],
   );
 
+  /**
+   * Apply trusted Neuron balances returned by the Worker (Phase S2B-2).
+   *
+   * Accepts ONLY validated numeric balances from successful analyst results
+   * (subscription + purchased must sum to total, all non-negative integers).
+   * The server already persisted them via deduct_neurons_atomic — this
+   * performs NO Supabase wallet write. Updates the cached profile's
+   * edge_subscription/edge_purchased while preserving every other field,
+   * invalidates transaction history, and refetches the profile in the
+   * background for confirmation.
+   */
+  const applyServerBalances = useCallback(
+    ({ subscription, purchased, total }: { subscription: number; purchased: number; total: number }): void => {
+      const isNonNegativeInt = (v: unknown): v is number =>
+        typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 0;
+      if (
+        !isNonNegativeInt(subscription) ||
+        !isNonNegativeInt(purchased) ||
+        !isNonNegativeInt(total) ||
+        total !== subscription + purchased
+      ) {
+        return;
+      }
+      if (!profile) return;
+      queryClient.setQueryData(profileKey(userId), {
+        ...profile,
+        edge_subscription: subscription,
+        edge_purchased: purchased,
+      });
+      queryClient.invalidateQueries({ queryKey: txKey(userId) });
+      // Background refetch for confirmation — the optimistic cache update
+      // above renders immediately.
+      queryClient.invalidateQueries({ queryKey: profileKey(userId) });
+    },
+    [profile, queryClient, userId],
+  );
+
   const requireCtx = useCallback((): { uid: string; p: UserProfile } => {
     if (!userId || !profile) throw new Error("Profile not loaded");
     return { uid: userId, p: profile };
@@ -147,6 +184,9 @@ export const [EdgeProvider, useEdge] = createContextHook(() => {
     transactions: txQuery.data ?? [],
     isLoadingTransactions: txQuery.isLoading,
     canAfford,
+
+    // trusted Worker-reported balances (analyst sessions — Phase S2B-2)
+    applyServerBalances,
 
     // generic
     spend: (amount: number, reason: EdgeReason, note?: string) =>

@@ -91,6 +91,19 @@ export type AnalystCallResult = {
   grounding: PersonalGrounding;
   sources: AnalystSource[];
   visualBlocks: VisualBlock[] | null;
+  /** Trusted charge metadata returned by the Worker (Phase S2B-2). The
+   *  Worker charged for this session via deduct_neurons_atomic; these values
+   *  are the server-authoritative cost and post-charge balances. */
+  neuronCharge: NeuronCharge;
+};
+
+/** Server-authoritative charge metadata for one analyst session. */
+export type NeuronCharge = {
+  cost: number;
+  duplicate: boolean;
+  subscriptionBalance: number;
+  purchasedBalance: number;
+  combinedBalance: number;
 };
 
 /** Specific error codes returned by the Cloudflare worker. */
@@ -100,6 +113,10 @@ export type AnalystErrorCode =
   | "invalid_request"
   | "unauthorized"
   | "eagoh_not_found"
+  | "insufficient_neurons"
+  | "subscription_required"
+  | "charge_failed"
+  | "server_error"
   | "openai_error"
   | "openai_rate_limit"
   | "openai_empty_response"
@@ -202,6 +219,10 @@ const ERROR_MESSAGES: Record<AnalystErrorCode, string> = {
   invalid_request: "Invalid session request.",
   unauthorized: "Please sign in again.",
   eagoh_not_found: "Selected EAGOH not found or access denied.",
+  insufficient_neurons: "Insufficient Neurons for this session. Top up your balance to continue.",
+  subscription_required: "This session requires a paid subscription.",
+  charge_failed: "The charge for this session could not be completed. Please try again.",
+  server_error: "The analyst service could not complete your request. Please try again.",
   openai_error: "Analysis could not be completed. Please try again.",
   openai_rate_limit: "Analyst service is temporarily busy. Please try again.",
   openai_empty_response: "Analyst returned an empty response.",
@@ -212,6 +233,74 @@ const ERROR_MESSAGES: Record<AnalystErrorCode, string> = {
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Generate the charge idempotency key — one canonical lowercase UUID-v4 per
+ * callAnalyst() invocation (Phase S2B-2). Prefers Web Crypto; falls back to a
+ * dependency-free v4 implementation for React Native runtimes without
+ * crypto.randomUUID. Used ONLY for idempotency — never for authentication,
+ * and never derived from the prompt, user ID, timestamp alone, or session
+ * type.
+ */
+export function generateRequestId(): string {
+  const cryptoObj: Crypto | undefined = globalThis.crypto;
+  if (cryptoObj && typeof cryptoObj.randomUUID === "function") {
+    return cryptoObj.randomUUID().toLowerCase();
+  }
+  if (cryptoObj && typeof cryptoObj.getRandomValues === "function") {
+    const bytes = new Uint8Array(16);
+    cryptoObj.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 10xx
+    const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0"));
+    return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10, 16).join("")}`;
+  }
+  // Last-resort Math.random fallback — idempotency only, not authentication.
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+/**
+ * Strictly validate trusted Worker charge metadata (Phase S2B-2). Returns
+ * the parsed NeuronCharge only when: cost is a positive finite integer,
+ * duplicate is a boolean, all balances are finite non-negative integers, and
+ * combined equals subscription plus purchased. Any missing, malformed,
+ * negative, non-integer, or inconsistent value → null. Missing balances are
+ * NEVER defaulted to zero.
+ */
+export function parseNeuronCharge(raw: unknown): NeuronCharge | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const c = raw as Record<string, unknown>;
+  const { cost, duplicate } = c;
+  const sub = c.subscriptionBalance;
+  const purch = c.purchasedBalance;
+  const comb = c.combinedBalance;
+  const isNonNegativeInt = (v: unknown): v is number =>
+    typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 0;
+  if (
+    typeof cost !== "number" ||
+    !Number.isFinite(cost) ||
+    !Number.isInteger(cost) ||
+    cost <= 0
+  ) {
+    return null;
+  }
+  if (typeof duplicate !== "boolean") return null;
+  if (!isNonNegativeInt(sub) || !isNonNegativeInt(purch) || !isNonNegativeInt(comb)) {
+    return null;
+  }
+  if (comb !== sub + purch) return null;
+  return {
+    cost,
+    duplicate,
+    subscriptionBalance: sub,
+    purchasedBalance: purch,
+    combinedBalance: comb,
+  };
+}
 
 function buildSystemHints(input: AnalystCallInput): string {
   const personality = PERSONALITY_PRESETS[input.personality ?? "tactical"];
@@ -246,18 +335,24 @@ function classifyWorkerError(
   errorCode?: string,
   errorMessage?: string,
 ): AnalystErrorCode {
-  // Worker returns specific errorCode strings
+  // Worker returns specific errorCode strings — exact codes take priority
+  // over generic HTTP mappings.
   if (errorCode === "missing_api_key") return "missing_api_key";
   if (errorCode === "missing_config") return "missing_config";
   if (errorCode === "invalid_request") return "invalid_request";
   if (errorCode === "unauthorized") return "unauthorized";
   if (errorCode === "eagoh_not_found") return "eagoh_not_found";
+  if (errorCode === "insufficient_neurons") return "insufficient_neurons";
+  if (errorCode === "subscription_required") return "subscription_required";
+  if (errorCode === "charge_failed") return "charge_failed";
+  if (errorCode === "server_error") return "server_error";
   if (errorCode === "openai_rate_limit") return "openai_rate_limit";
   if (errorCode === "openai_empty_response") return "openai_empty_response";
   if (errorCode === "openai_error") return "openai_error";
 
   // Fall back to HTTP status heuristics
   if (httpStatus === 401) return "unauthorized";
+  if (httpStatus === 402) return "insufficient_neurons";
   if (httpStatus === 403) return "eagoh_not_found";
   if (httpStatus === 503) return "missing_config";
   if (httpStatus === 429) return "openai_rate_limit";
@@ -384,8 +479,14 @@ async function callAnalyst(
     };
   }
 
+  // Charge idempotency key — one canonical lowercase UUID per invocation,
+  // generated BEFORE the network request. Never derived from the prompt, user
+  // ID, timestamp alone, or session type.
+  const requestId = generateRequestId();
+
   // Build the grounded request payload (no raw OI context)
   const payload = {
+    requestId,
     prompt,
     sessionType: input.sessionType,
     eagohId: input.eagohId,
@@ -445,6 +546,7 @@ async function callAnalyst(
     grounding?: PersonalGrounding;
     sources?: AnalystSource[];
     visualBlocks?: unknown;
+    neuronCharge?: unknown;
     error?: string;
     errorCode?: string;
   };
@@ -499,6 +601,25 @@ async function callAnalyst(
   }
 
   const budget = SESSION_BUDGETS[input.sessionType];
+
+  // Strictly validate the trusted Worker charge metadata. A "successful"
+  // response without valid charge metadata is NOT safe to display — return a
+  // safe charge_failed result instead. Missing balances are never defaulted
+  // to zero.
+  const neuronCharge = parseNeuronCharge(data.neuronCharge);
+  if (!neuronCharge) {
+    devLog("error", {
+      reason: "invalid_charge_metadata",
+      httpStatus: response.status,
+    });
+    return {
+      ok: false,
+      errorCode: "charge_failed",
+      error: ERROR_MESSAGES.charge_failed,
+      fallback: localFallback(input),
+    };
+  }
+
   return {
     ok: true,
     reply: data.reply.trim(),
@@ -517,6 +638,7 @@ async function callAnalyst(
     },
     sources: data.sources ?? [],
     visualBlocks: parseVisualBlocks(data.visualBlocks),
+    neuronCharge,
   };
 }
 

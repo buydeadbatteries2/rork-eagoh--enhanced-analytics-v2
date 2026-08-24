@@ -34,7 +34,7 @@ import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "
 import { Animated, DimensionValue, Easing, FlatList, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useEdge } from "@/providers/EdgeProvider";
-import { getQuickCheckCost, runQuickCheck, runQuickAnalytics, runStandardSession, runDeepDive, type AnalystRequestKind, type AnalystCallError, type ConversationMessage } from "@/services/analyst";
+import { getQuickCheckCost, runQuickCheck, runQuickAnalytics, runStandardSession, runDeepDive, type AnalystRequestKind, type ConversationMessage } from "@/services/analyst";
 import { LAB_OPTIONS } from "@/services/forgeLabs";
 
 type LabMode = "forge" | "intelligence" | "analyst";
@@ -412,7 +412,7 @@ export default function LabsScreen(): JSX.Element {
   const [isAnalystTyping, setIsAnalystTyping] = useState<boolean>(false);
   const [analystError, setAnalystError] = useState<string | null>(null);
   const [connectedModel, setConnectedModel] = useState<string>("gpt-4o-mini");
-  const { deductQuickCheck, total: edgeTotal, isMutating: isEdgeMutating } = useEdge();
+  const { total: edgeTotal, applyServerBalances } = useEdge();
   const [forgeState, setForgeState] = useState<ForgeState>({ name: "Apex Cipher", sport: "football", gender: "androgynous", dna: ["oracle", "icon"], teams: ["austin"], appearance: { headwear: "cyber-helmet", body: "cyber-armor", footwear: "futuristic-cleats", accessories: "diamond-chains" }, cyberneticIntensity: "moderate", pose: "strategist-stance", lab: "neon_vault" });
   const stepIndex = steps.indexOf(activeStep);
   const completion = useMemo((): string => `${Math.round(((stepIndex + 1) / steps.length) * 100)}%`, [stepIndex]);
@@ -427,11 +427,11 @@ export default function LabsScreen(): JSX.Element {
   const handleDepth = useCallback((nextDepth: EntryDepth): void => { h.selection(); const nextMax = entryDepths.find((item) => item.id === nextDepth)?.max ?? 110; setDepth(nextDepth); setObservation((current) => current.slice(0, nextMax)); }, [h]);
   const handleSendPrompt = useCallback(async (): Promise<void> => {
     const prompt = draftPrompt.trim();
-    if (!prompt || isAnalystTyping || isEdgeMutating) return;
+    if (!prompt || isAnalystTyping) return;
     h.selection();
     setAnalystError(null);
 
-    // ---- Quick Check path: live OpenAI via secure server — Edge deducted ONLY on success ----
+    // ---- Quick Check path: live OpenAI via secure Worker — charged server-side ----
     if (selectedSession === "quick-check") {
       const cost = getQuickCheckCost(prompt);
       if (edgeTotal < cost) {
@@ -466,23 +466,17 @@ export default function LabsScreen(): JSX.Element {
         return;
       }
 
-      // Analyst succeeded — now deduct Edge
-      try {
-        await deductQuickCheck(prompt, `Quick Check (${kind}) · ${cost} Neurons`);
-      } catch (deductionErr) {
-        const errMsg = deductionErr instanceof Error ? deductionErr.message : String(deductionErr);
-        console.error("[labs] Neuron deduction failed after successful analyst call", { cost, error: errMsg });
-        // Still show the reply — Edge deduction is a secondary concern
-        setConnectedModel(result.model);
-        setMessages((current) => [...current, { id: `a-${Date.now()}`, sender: "analyst", text: result.reply, confidence: result.confidence }]);
-        const isInsufficient = errMsg.toLowerCase().includes("insufficient");
-        setAnalystError(isInsufficient ? `Insufficient Neurons (${cost} needed). Here's your analysis anyway.` : "Neuron deduction failed, but here's your analysis.");
-        setIsAnalystTyping(false);
-        return;
-      }
+      // Analyst succeeded — the Worker already charged for this Quick Check
+      // (deduct_neurons_atomic). Apply the trusted balances it returned; the
+      // locally computed `cost` above is early-UX display only.
+      applyServerBalances({
+        subscription: result.neuronCharge.subscriptionBalance,
+        purchased: result.neuronCharge.purchasedBalance,
+        total: result.neuronCharge.combinedBalance,
+      });
 
       setConnectedModel(result.model);
-      setMessages((current) => [...current, { id: `a-${Date.now()}`, sender: "analyst", text: result.reply, confidence: result.confidence, cost }]);
+      setMessages((current) => [...current, { id: `a-${Date.now()}`, sender: "analyst", text: result.reply, confidence: result.confidence, cost: result.neuronCharge.cost }]);
       setIsAnalystTyping(false);
       return;
     }
@@ -506,14 +500,20 @@ export default function LabsScreen(): JSX.Element {
     }
 
     if (result.ok) {
+      // Trusted Worker charge — apply the server-authoritative balances.
+      applyServerBalances({
+        subscription: result.neuronCharge.subscriptionBalance,
+        purchased: result.neuronCharge.purchasedBalance,
+        total: result.neuronCharge.combinedBalance,
+      });
       setConnectedModel(result.model);
-      setMessages((current) => [...current, { id: `a-${Date.now()}`, sender: "analyst", text: result.reply, confidence: result.confidence }]);
+      setMessages((current) => [...current, { id: `a-${Date.now()}`, sender: "analyst", text: result.reply, confidence: result.confidence, cost: result.neuronCharge.cost }]);
     } else {
       setAnalystError(result.error);
       setMessages((current) => [...current, { id: `a-${Date.now()}`, sender: "analyst", text: result.fallback, confidence: 74 }]);
     }
     setIsAnalystTyping(false);
-  }, [draftPrompt, isAnalystTyping, isEdgeMutating, selectedSession, edgeTotal, deductQuickCheck]);
+  }, [draftPrompt, isAnalystTyping, selectedSession, edgeTotal, applyServerBalances]);
 
   const renderStep = (): JSX.Element => {
     if (activeStep === "Identity") return <View style={styles.stepPanel}><SectionTitle eyebrow="01 / IDENTITY" title="Name the intelligence entity." /><TextInput value={forgeState.name} onChangeText={(value) => setSingle("name", value)} placeholder="Enter EAGOH name" placeholderTextColor={palette.muted} style={styles.input} /><SectionTitle eyebrow="SPORT MATRIX" title="Select a primary sport." /><View style={styles.gridList}>{sports.map((item) => <OptionChip key={item.id} option={item} selected={forgeState.sport === item.id} onPress={(id) => setSingle("sport", id)} />)}</View><SectionTitle eyebrow="FORM FACTOR" title="Choose gender expression." /><View style={styles.gridList}>{genders.map((item) => <OptionChip key={item.id} option={item} selected={forgeState.gender === item.id} onPress={(id) => setSingle("gender", id)} />)}</View></View>;

@@ -78,7 +78,7 @@ import { useEagohs } from "@/providers/EagohProvider";
 import { canUseSessionType, getSessionEligibility } from "@/services/permissions";
 import { INTELLIGENCE_DOMAINS, getDomainColor, normalizeDomainId } from "@/services/domains";
 import { guardDomainRequest } from "@/services/domainGuard";
-import { getQuickCheckCost, runQuickCheck, runQuickAnalytics, runStandardSession, runDeepDive, runPremiumEvent, getSessionCost, type AnalystSessionType, type AnalystRequestKind, type AnalystErrorCode, type ConversationMessage, type PersonalGrounding, type AnalystSource } from "@/services/analyst";
+import { runQuickCheck, runQuickAnalytics, runStandardSession, runDeepDive, runPremiumEvent, getSessionCost, type AnalystSessionType, type AnalystRequestKind, type AnalystErrorCode, type ConversationMessage, type PersonalGrounding, type AnalystSource } from "@/services/analyst";
 import {
   createThread,
   addMessage,
@@ -92,7 +92,6 @@ import {
   type ThreadWithMeta,
 } from "@/services/analystThreads";
 import type { EagohRecord } from "@/services/eagohs";
-import type { EdgeReason } from "@/services/edge";
 import { AnalysisVisualBlocks, AnalyticsDisclaimer } from "@/components/analysis/AnalysisVisualBlock";
 import { parseVisualBlocks, type VisualBlock } from "@/components/analysis/visualBlockTypes";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -471,7 +470,7 @@ function AnalystChatThread({
   onThreadSaved: (eagohId: string | null) => void;
 }): JSX.Element {
   const { profile } = useProfile();
-  const { spend, total: edgeTotal } = useEdge();
+  const { total: edgeTotal, applyServerBalances } = useEdge();
   const scrollRef = useRef<ScrollView>(null);
   const inputRef = useRef<TextInput>(null);
 
@@ -691,31 +690,15 @@ function AnalystChatThread({
         return;
       }
 
-      // 4. Deduct Edge
-      const reasonMap: Record<string, EdgeReason> = {
-        "quick-check": "quick_check",
-        "quick-analysis": "quick_analysis",
-        "standard": "standard_analysis",
-        "oracle": "oracle_dive",
-        "premium-event": "premium_event",
-      };
-      try {
-        await spend(cost, reasonMap[currentSession.id] ?? "manual", `${currentSession.name} · ${cost} Neurons`);
-      } catch (deductErr: unknown) {
-        const errMsg = deductErr instanceof Error ? deductErr.message : String(deductErr);
-        console.error("[sessions] Neuron deduction failed (initial)", { session: currentSession.id, cost, error: errMsg });
-        // Show the actual error to the user if it's a known message, otherwise generic
-        const isInsufficient = errMsg.toLowerCase().includes("insufficient");
-        const isUpgrade = errMsg.toLowerCase().includes("upgrade");
-        setError(
-          isUpgrade ? errMsg :
-          isInsufficient ? `Insufficient Neurons. Need ${cost} Neurons for this session.` :
-          "Neuron deduction failed. Please try again."
-        );
-        setIsSending(false);
-        setIsInitialising(false);
-        return;
-      }
+      // 4. Apply the trusted Worker charge (Phase S2B-2) — the session was
+      // charged server-side via deduct_neurons_atomic. The precomputed client
+      // cost above is display/preflight only; the Worker's cost is final.
+      applyServerBalances({
+        subscription: result.neuronCharge.subscriptionBalance,
+        purchased: result.neuronCharge.purchasedBalance,
+        total: result.neuronCharge.combinedBalance,
+      });
+      const chargedCost = result.neuronCharge.cost;
 
       // 5. Create thread in DB
       try {
@@ -732,11 +715,11 @@ function AnalystChatThread({
         }
         setCurrentThreadId(thread.id);
 
-        const userMsg = await addMessage({ threadId: thread.id, userId: currentProfile.id, role: "user", content: prompt, edgeCost: cost });
+        const userMsg = await addMessage({ threadId: thread.id, userId: currentProfile.id, role: "user", content: prompt, edgeCost: chargedCost });
         const assistantMsg = await addMessage({ threadId: thread.id, userId: currentProfile.id, role: "assistant", content: result.reply, edgeCost: 0, visualBlocks: result.visualBlocks });
 
         setMessages([
-          { id: userMsg.id, sender: "user", text: prompt, cost },
+          { id: userMsg.id, sender: "user", text: prompt, cost: chargedCost },
           { id: assistantMsg.id, sender: "analyst", text: result.reply, confidence: result.confidence, grounding: result.grounding, sources: result.sources, visualBlocks: result.visualBlocks },
         ]);
         onThreadSaved(thread.eagoh_id);
@@ -766,7 +749,7 @@ function AnalystChatThread({
       setIsSending(false);
       setIsInitialising(false);
     }
-  }, [spend, onThreadSaved]);
+  }, [applyServerBalances, onThreadSaved]);
 
   // Send follow-up message
   const handleSend = useCallback(async (): Promise<void> => {
@@ -840,45 +823,29 @@ function AnalystChatThread({
       return;
     }
 
-    // Deduct Edge
-    const reasonMap: Record<string, EdgeReason> = {
-      "quick-check": "quick_check",
-      "quick-analysis": "quick_analysis",
-      "standard": "standard_analysis",
-      "oracle": "oracle_dive",
-      "premium-event": "premium_event",
-    };
-    try {
-      await spend(cost, reasonMap[session.id] ?? "manual", `${session.name} follow-up · ${cost} Neurons`);
-    } catch (deductErr: unknown) {
-      const errMsg = deductErr instanceof Error ? deductErr.message : String(deductErr);
-      console.error("[sessions] Neuron deduction failed (follow-up)", { session: session.id, cost, error: errMsg });
-      setMessages((prev) => [...prev, { id: `u-${Date.now()}`, sender: "user", text, cost }]);
-      const isInsufficient = errMsg.toLowerCase().includes("insufficient");
-      const isUpgrade = errMsg.toLowerCase().includes("upgrade");
-      setError(
-        isUpgrade ? errMsg :
-        isInsufficient ? `Insufficient Neurons. Need ${cost} Neurons for this session.` :
-        "Neuron deduction failed. Please try again."
-      );
-      setIsSending(false);
-      return;
-    }
+    // Apply the trusted Worker charge (Phase S2B-2) — charged server-side.
+    // The precomputed client cost above is display/preflight only.
+    applyServerBalances({
+      subscription: result.neuronCharge.subscriptionBalance,
+      purchased: result.neuronCharge.purchasedBalance,
+      total: result.neuronCharge.combinedBalance,
+    });
+    const chargedCost = result.neuronCharge.cost;
 
     // Save to DB
     try {
-      const userMsg = await addMessage({ threadId: currentThreadId, userId: profile.id, role: "user", content: text, edgeCost: cost });
+      const userMsg = await addMessage({ threadId: currentThreadId, userId: profile.id, role: "user", content: text, edgeCost: chargedCost });
       const assistantMsg = await addMessage({ threadId: currentThreadId, userId: profile.id, role: "assistant", content: result.reply, edgeCost: 0, visualBlocks: result.visualBlocks });
 
       setMessages((prev) => [
         ...prev,
-        { id: userMsg.id, sender: "user", text, cost },
+        { id: userMsg.id, sender: "user", text, cost: chargedCost },
         { id: assistantMsg.id, sender: "analyst", text: result.reply, confidence: result.confidence, grounding: result.grounding, sources: result.sources, visualBlocks: result.visualBlocks },
       ]);
     } catch {
       setMessages((prev) => [
         ...prev,
-        { id: `u-${Date.now()}`, sender: "user", text, cost },
+        { id: `u-${Date.now()}`, sender: "user", text, cost: chargedCost },
         { id: `a-${Date.now()}`, sender: "analyst", text: result.reply, confidence: result.confidence, grounding: result.grounding, sources: result.sources, visualBlocks: result.visualBlocks },
       ]);
       setError("Could not save to history.");
@@ -888,7 +855,7 @@ function AnalystChatThread({
     if (attemptId === requestAttemptRef.current) {
       setIsSending(false);
     }
-  }, [inputText, profile, currentThreadId, messages, eagoh, session, edgeTotal, spend]);
+  }, [inputText, profile, currentThreadId, messages, eagoh, session, edgeTotal, applyServerBalances]);
 
   // Scroll on new messages
   useEffect(() => {
