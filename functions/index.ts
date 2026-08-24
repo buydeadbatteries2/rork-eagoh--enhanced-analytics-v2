@@ -5331,8 +5331,81 @@ function computeAnalystSessionCost(sessionType: SessionType, prompt: string): nu
   return range.max;
 }
 
+/** Strict structural validation of the analyst request body (Phase S2B-1
+ *  correction). Takes the JSON value already decoded as `unknown` and
+ *  enforces, before the object is ever accessed as an AnalystRequest:
+ *  non-null object, not an array, `prompt` is a non-empty string, `requestId`
+ *  passes UUID normalization, and `sessionType` passes the whitelist.
+ *  Malformed input never throws — it returns a discriminated error the caller
+ *  maps to HTTP 400 invalid_request. */
+function validateAnalystRequestBody(
+  raw: unknown,
+):
+  | { prompt: string; requestId: string; sessionType: SessionType }
+  | { error: "payload" | "prompt" | "requestId" | "sessionType" } {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { error: "payload" };
+  }
+  const candidate = raw as Record<string, unknown>;
+  if (typeof candidate.prompt !== "string" || !candidate.prompt.trim()) {
+    return { error: "prompt" };
+  }
+  const requestId = normalizeAnalystRequestId(candidate.requestId);
+  if (!requestId) {
+    return { error: "requestId" };
+  }
+  if (
+    typeof candidate.sessionType !== "string" ||
+    !ANALYST_SESSION_TYPES.has(candidate.sessionType)
+  ) {
+    return { error: "sessionType" };
+  }
+  return {
+    prompt: candidate.prompt.trim(),
+    requestId,
+    sessionType: candidate.sessionType as SessionType,
+  };
+}
+
+/** Strict validation of a successful `deduct_neurons_atomic` result (Phase
+ *  S2B-1 correction). Returns the confirmed duplicate flag and balances only
+ *  when: `duplicate` is a boolean; all three balances are finite, non-negative
+ *  integers; and combined === subscription + purchased. Any missing,
+ *  invalid, negative, non-integer, or inconsistent field → null, meaning the
+ *  RPC response is malformed and must be treated as a failed charge. Missing
+ *  balances are NEVER defaulted to zero. */
+function validateChargeRpcSuccess(result: unknown): {
+  duplicate: boolean;
+  subscriptionBalance: number;
+  purchasedBalance: number;
+  combinedBalance: number;
+} | null {
+  if (typeof result !== "object" || result === null) return null;
+  const r = result as Record<string, unknown>;
+  if (typeof r.duplicate !== "boolean") return null;
+  const sub = r.subscription_balance;
+  const purch = r.purchased_balance;
+  const comb = r.combined_balance;
+  const isNonNegativeInt = (v: unknown): v is number =>
+    typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 0;
+  if (!isNonNegativeInt(sub) || !isNonNegativeInt(purch) || !isNonNegativeInt(comb)) {
+    return null;
+  }
+  if (comb !== sub + purch) return null;
+  return {
+    duplicate: r.duplicate,
+    subscriptionBalance: sub,
+    purchasedBalance: purch,
+    combinedBalance: comb,
+  };
+}
+
 type AnalystAccess = {
   allowed: boolean;
+  /** Trusted paid-access result resolved once per request — reused for
+   *  Faction/Exchange Intelligence eligibility so admin overrides and dev
+   *  tiers behave consistently across the whole request. */
+  isPaidTier: boolean;
   subscriptionBalance: number;
   purchasedBalance: number;
   combinedBalance: number;
@@ -5342,10 +5415,13 @@ type AnalystAccessResult = AnalystAccess | { error: "profile_unavailable" };
 
 /** Resolve analyst session access from trusted database records only:
  *  profiles.subscription_tier (base paid access), an ACTIVE admin_tier_override
- *  (null/future expiry = active, past = expired), and dev_test_subscriptions
- *  rows only when ENABLE_DEV_TEST_SUBSCRIPTIONS === "true". Tier information
- *  is never taken from the request body. Balances are normalized to
- *  non-negative integers (NULL or negative behaves as zero). */
+ *  (null expiry or expiry strictly in the future = active, and it REPLACES the
+ *  base tier — including a "free" override that downgrades paid access;
+ *  expired or unparseable expiry = the override is ignored), and
+ *  dev_test_subscriptions rows only when ENABLE_DEV_TEST_SUBSCRIPTIONS ===
+ *  "true" (flag-gated, highest tier wins). Tier information is never taken
+ *  from the request body. Balances are normalized to non-negative integers
+ *  (NULL or negative behaves as zero). */
 async function resolveAnalystAccess(
   serviceClient: SupabaseClient,
   userId: string,
@@ -5374,12 +5450,14 @@ async function resolveAnalystAccess(
   const baseTier = typeof p.subscription_tier === "string" && p.subscription_tier ? p.subscription_tier : "free";
   let effectiveTier = baseTier;
 
-  // Active admin override: null or future expiry = active, past (or invalid)
-  // = expired. Only elevates — never downgrades a real paid tier.
+  // Admin override: an ACTIVE override (null expiry, or expiry strictly in
+  // the future) REPLACES the base tier — a "free" override downgrades paid
+  // access. Expired or unparseable expiry → the override is ignored entirely
+  // and the base tier stands. Never "higher tier wins" for overrides.
   if (p.admin_tier_override) {
     const expiresMs = p.admin_tier_expires_at ? new Date(p.admin_tier_expires_at).getTime() : null;
-    const overrideActive = expiresMs === null || (Number.isFinite(expiresMs) && Date.now() <= expiresMs);
-    if (overrideActive && (tierPriority[p.admin_tier_override] ?? 0) > (tierPriority[effectiveTier] ?? 0)) {
+    const overrideActive = expiresMs === null || (Number.isFinite(expiresMs) && expiresMs > Date.now());
+    if (overrideActive) {
       effectiveTier = p.admin_tier_override;
     }
   }
@@ -5412,6 +5490,7 @@ async function resolveAnalystAccess(
 
   return {
     allowed,
+    isPaidTier,
     subscriptionBalance,
     purchasedBalance,
     combinedBalance: subscriptionBalance + purchasedBalance,
@@ -5437,10 +5516,14 @@ async function handleAnalystChat(request: Request, env: Env): Promise<Response> 
     );
   }
 
-  // ── Parse request ────────────────────────────────────────────────────────
-  let payload: AnalystRequest;
+  // ── Parse & strictly validate the request object (Phase S2B-1 correction) ──
+  // The JSON is decoded as `unknown` and every strictly-required field is
+  // validated BEFORE the value is accessed as an AnalystRequest: JSON null,
+  // arrays, numbers, strings, and booleans are all rejected with 400 — never
+  // an unhandled exception.
+  let rawPayload: unknown;
   try {
-    payload = (await request.json()) as AnalystRequest;
+    rawPayload = await request.json();
   } catch {
     return jsonResponse(
       { ok: false, errorCode: "invalid_request", error: "Invalid request payload." },
@@ -5448,24 +5531,23 @@ async function handleAnalystChat(request: Request, env: Env): Promise<Response> 
     );
   }
 
-  const prompt = payload.prompt?.trim();
-  if (!prompt) {
+  const validated = validateAnalystRequestBody(rawPayload);
+  if ("error" in validated) {
+    const errorMessages: Record<typeof validated.error, string> = {
+      payload: "Invalid request payload.",
+      prompt: "Prompt is required.",
+      requestId: "A valid requestId is required.",
+      sessionType: "Invalid session type.",
+    };
     return jsonResponse(
-      { ok: false, errorCode: "invalid_request", error: "Prompt is required." },
+      { ok: false, errorCode: "invalid_request", error: errorMessages[validated.error] },
       400,
     );
   }
 
-  // ── Request ID (charge idempotency key) — Phase S2B-1 ──
-  // Trimmed and lowercased, then required to be a canonical hyphenated UUID.
-  // The charge idempotency key is NEVER generated from prompt text.
-  const normalizedRequestId = normalizeAnalystRequestId(payload.requestId);
-  if (!normalizedRequestId) {
-    return jsonResponse(
-      { ok: false, errorCode: "invalid_request", error: "A valid requestId is required." },
-      400,
-    );
-  }
+  const payload = rawPayload as AnalystRequest;
+  const prompt = validated.prompt;
+  const normalizedRequestId = validated.requestId;
 
   // ── Extract JWT ──────────────────────────────────────────────────────────
   const authHeader = request.headers.get("Authorization") ?? "";
@@ -5492,16 +5574,10 @@ async function handleAnalystChat(request: Request, env: Env): Promise<Response> 
     );
   }
 
-  // ── Session type whitelist — Phase S2B-1 ──
-  // Every other runtime value is rejected before any retrieval, web search,
-  // or OpenAI work.
-  const sessionType = payload.sessionType;
-  if (typeof sessionType !== "string" || !ANALYST_SESSION_TYPES.has(sessionType)) {
-    return jsonResponse(
-      { ok: false, errorCode: "invalid_request", error: "Invalid session type." },
-      400,
-    );
-  }
+  // Session type was strictly validated together with the request body
+  // above — every other runtime value was rejected before any retrieval, web
+  // search, or OpenAI work.
+  const sessionType = validated.sessionType;
   const personality = payload.personality ?? "tactical";
   const kind = payload.kind ?? "general";
   const safePrompt = prompt.slice(0, 1200);
@@ -5608,8 +5684,13 @@ async function handleAnalystChat(request: Request, env: Env): Promise<Response> 
   let factionOICount = 0;
   let rankedFactionEntries: FactionOIEntry[] = [];
 
-  // Only retrieve faction intelligence for paid users with an active faction
-  const isPaid = await isPaidUser(supabase, userId);
+  // Only retrieve faction intelligence for paid users with an active faction.
+  // Phase S2B-1 correction: reuse the single resolved paid-access result
+  // (access.isPaidTier) instead of re-querying isPaidUser() from the raw
+  // profile tier, so active admin overrides and flag-gated dev tiers behave
+  // consistently across the entire request — access check, preflight, and
+  // Faction/Exchange Intelligence retrieval all use the same resolution.
+  const isPaid = access.isPaidTier;
   if (isPaid) {
     const factionResult = await retrieveFactionOpenIntelligence(supabase, userId, prompt, sessionType);
     if (factionResult.entries.length > 0) {
@@ -6076,15 +6157,32 @@ async function handleAnalystChat(request: Request, env: Env): Promise<Response> 
         );
       }
 
+      // Strict success validation (Phase S2B-1 correction): a malformed RPC
+      // response is treated as a FAILED charge — no analysis, no successful
+      // usage audits, no zero-defaulted balances, and no raw RPC data
+      // exposed. Valid insufficient-balance and duplicate behavior above is
+      // unchanged.
+      const confirmedCharge = validateChargeRpcSuccess(chargeResult);
+      if (!confirmedCharge) {
+        console.warn("[analyst] charge RPC malformed response", {
+          userIdPrefix: userId.slice(0, 8),
+          category: "rpc_malformed_response",
+        });
+        return jsonResponse(
+          { ok: false, errorCode: "charge_failed", error: "Charge failed. No analysis was returned." },
+          500,
+        );
+      }
+
       // Duplicate idempotency key → the RPC did not deduct again; the
       // analysis is returned normally and the duplicate flag is surfaced in
       // the response metadata.
       const neuronCharge = {
         cost: chargeCost,
-        duplicate: chargeResult.duplicate === true,
-        subscriptionBalance: Math.max(chargeResult.subscription_balance ?? 0, 0),
-        purchasedBalance: Math.max(chargeResult.purchased_balance ?? 0, 0),
-        combinedBalance: Math.max(chargeResult.combined_balance ?? 0, 0),
+        duplicate: confirmedCharge.duplicate,
+        subscriptionBalance: confirmedCharge.subscriptionBalance,
+        purchasedBalance: confirmedCharge.purchasedBalance,
+        combinedBalance: confirmedCharge.combinedBalance,
       };
 
       console.log("[analyst] charge complete", {
