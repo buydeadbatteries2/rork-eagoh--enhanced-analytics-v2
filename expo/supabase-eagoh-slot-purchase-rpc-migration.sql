@@ -7,12 +7,18 @@
 --
 -- Atomic operation order (all-or-nothing):
 --   1. Validate p_user_id
---   2. Validate p_idempotency_key (non-empty, ≤ 200 chars)
+--   2. Validate p_idempotency_key — must be a canonical hyphenated UUID
+--      (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx), normalized to lowercase;
+--      arbitrary strings and reserved keys (e.g. legacy-eagoh-capacity-v1:…)
+--      are rejected before the purchase starts
 --   3. Lock the user's profiles row (FOR UPDATE) — serializes concurrent
 --      purchases for the same user
 --   4. AFTER the profile lock: idempotency lookup on eagoh_slot_transactions
 --   5. Duplicate → return the stored successful result, never re-charge
---   6. Resolve paid access from trusted DB records only (never client input)
+--   6. Resolve paid access from trusted database records only (never client
+--      input): profiles.subscription_tier or an active admin_tier_override.
+--      dev_test_subscriptions is INTENTIONALLY EXCLUDED — development rows
+--      must never authorize permanent account entitlements.
 --   7. Ensure an eagoh_slot_entitlements row exists (INSERT … ON CONFLICT)
 --   8. Lock the entitlement row (FOR UPDATE)
 --   9. Verify purchased_slots + grandfathered_slots < 3
@@ -38,6 +44,17 @@
 
 begin;
 
+-- ── Replace the Phase 4A global idempotency index with a per-user unique
+--    index. Phase 4A enforced key uniqueness across ALL users; purchases are
+--    idempotent per user, so two different users must be able to use the
+--    same key for their own independent purchases. Existing transaction
+--    rows are never changed or deleted — only the index is replaced.
+drop index if exists public.idx_eagoh_slot_transactions_idempotency;
+
+create unique index idx_eagoh_slot_transactions_idempotency
+ on public.eagoh_slot_transactions(user_id, idempotency_key)
+ where idempotency_key is not null;
+
 create or replace function public.purchase_eagoh_slot_atomic(
   p_user_id uuid,
   p_idempotency_key text
@@ -59,10 +76,9 @@ declare
   v_admin_override    text;
   v_admin_expires     timestamptz;
   v_real_tier         text;
-  v_dev_test_tier     text;
   v_effective_tier    text;
-  v_current_priority  int;
-  v_dev_priority      int;
+  v_idempotency_key   text;
+  v_is_duplicate      boolean;
   v_purchased_slots   int;
   v_grandfathered_slots int;
   v_from_sub          int;
@@ -71,18 +87,21 @@ declare
   v_next_purchased    int;
   v_total_additional  int;
   v_total_capacity    int;
-  v_existing_delta    int;
-  v_existing_cost     int;
 begin
   -- ── 1. Validate p_user_id ──
   if p_user_id is null then
     return jsonb_build_object('ok', false, 'error', 'Invalid request.');
   end if;
 
-  -- ── 2. Validate the idempotency key ──
-  if p_idempotency_key is null
-     or length(btrim(p_idempotency_key)) < 1
-     or length(p_idempotency_key) > 200 then
+  -- ── 2. Validate the idempotency key: canonical hyphenated UUID only ──
+  -- Accept any hexadecimal UUID variant (v1–v7, not just v4). Normalize to
+  -- lowercase so the same key in different cases is one identity. Anything
+  -- else — arbitrary strings, empty keys, reserved keys such as
+  -- legacy-eagoh-capacity-v1:<user_id> — is rejected before the purchase
+  -- starts. The normalized value is used for duplicate lookup AND audit
+  -- insertion, so lookups and stored rows always agree.
+  v_idempotency_key := lower(btrim(coalesce(p_idempotency_key, '')));
+  if v_idempotency_key !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
     return jsonb_build_object('ok', false, 'error', 'Invalid idempotency key.');
   end if;
 
@@ -102,17 +121,18 @@ begin
   end if;
 
   -- ── 4. Idempotency check (AFTER the profile lock) ──
-  -- Only kind = 'purchase' rows match: grandfather grants use a different
-  -- reserved key namespace and kind, so they can never satisfy a client key.
-  select slot_delta, neuron_cost
-    into v_existing_delta, v_existing_cost
-  from public.eagoh_slot_transactions
-  where user_id = p_user_id
-    and idempotency_key = p_idempotency_key
-    and kind = 'purchase'
-  limit 1;
+  -- Scoped to user_id + normalized key + kind = 'purchase'. Grandfather
+  -- grants use a different key namespace and kind, so they can never
+  -- satisfy a client purchase key. Minimal exists() lookup.
+  select exists(
+    select 1
+    from public.eagoh_slot_transactions
+    where user_id = p_user_id
+      and idempotency_key = v_idempotency_key
+      and kind = 'purchase'
+  ) into v_is_duplicate;
 
-  if found then
+  if v_is_duplicate then
     -- ── 5. Duplicate: return the stored/current successful result ──
     -- Never charge again, never grant a second slot for the same key.
     v_purchased_slots := 0;
@@ -141,7 +161,13 @@ begin
   end if;
 
   -- ── 6. Resolve paid access from trusted database records ──
-  -- Never trust a client-supplied tier.
+  -- Never trust a client-supplied tier. Only two sources are recognized:
+  --   (a) profiles.subscription_tier
+  --   (b) an active profiles.admin_tier_override
+  -- dev_test_subscriptions is INTENTIONALLY EXCLUDED here: development test
+  -- rows are temporary test scaffolding and must NEVER authorize a permanent
+  -- account entitlement such as a purchased EAGOH slot. There is no flag,
+  -- parameter, or override that can re-enable them for this RPC.
   v_real_tier := coalesce(v_subscription_tier, 'free');
   v_effective_tier := v_real_tier;
 
@@ -153,36 +179,6 @@ begin
   if v_admin_override is not null then
     if v_admin_expires is null or v_admin_expires > now() then
       v_effective_tier := v_admin_override;
-    end if;
-  end if;
-
-  -- Dev test subscriptions (Expo Go / Rork testing). In production this table
-  -- is empty — safe to always check. Highest tier wins, matching the
-  -- purchase_banner_atomic resolution pattern.
-  select test_tier
-    into v_dev_test_tier
-  from public.dev_test_subscriptions
-  where user_id = p_user_id
-    and (expires_at is null or expires_at > now())
-  limit 1;
-
-  if v_dev_test_tier is not null then
-    v_current_priority := case v_effective_tier
-      when 'free' then 0
-      when 'pro' then 1
-      when 'oracle_elite' then 2
-      when 'syndicate' then 3
-      else 0
-    end;
-    v_dev_priority := case v_dev_test_tier
-      when 'free' then 0
-      when 'pro' then 1
-      when 'oracle_elite' then 2
-      when 'syndicate' then 3
-      else 0
-    end;
-    if v_dev_priority > v_current_priority then
-      v_effective_tier := v_dev_test_tier;
     end if;
   end if;
 
@@ -247,7 +243,7 @@ begin
   insert into public.eagoh_slot_transactions (
     user_id, kind, slot_delta, neuron_cost, idempotency_key, metadata
   ) values (
-    p_user_id, 'purchase', 1, c_slot_cost, p_idempotency_key,
+    p_user_id, 'purchase', 1, c_slot_cost, v_idempotency_key,
     jsonb_build_object(
       'reason', 'eagoh_slot_purchase',
       'from_subscription', v_from_sub,

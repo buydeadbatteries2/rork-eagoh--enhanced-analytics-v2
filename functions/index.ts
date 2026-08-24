@@ -11774,14 +11774,18 @@ async function handleEagohSlotPurchase(request: Request, env: Env): Promise<Resp
 
   // Require a client-supplied idempotency key so app retries reuse the same
   // key and the RPC returns the original result instead of double-charging.
+  // Only canonical hyphenated UUIDs are accepted: the key is trimmed and
+  // normalized to lowercase, then anything that is not exactly
+  // xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (hex) is rejected with 400 before
+  // the purchase starts. Arbitrary strings and reserved keys such as
+  // "legacy-eagoh-capacity-v1:..." never pass. The normalized value is sent
+  // to the RPC and used for both duplicate lookup and audit insertion.
   // Never accept userId, tier, slot count, or price from the request body.
   const idempotencyKey = typeof payload.idempotencyKey === "string"
-    ? payload.idempotencyKey.trim()
+    ? payload.idempotencyKey.trim().toLowerCase()
     : "";
-  if (!idempotencyKey) {
-    return jsonResponse({ ok: false, error: "Idempotency key required." }, 400);
-  }
-  if (idempotencyKey.length > 200) {
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  if (!UUID_RE.test(idempotencyKey)) {
     return jsonResponse({ ok: false, error: "Invalid idempotency key." }, 400);
   }
 
