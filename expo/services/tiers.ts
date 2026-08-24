@@ -218,7 +218,6 @@ export const TIER_BENEFITS: Record<Exclude<SubscriptionTier, "free">, string[]> 
   pro: [
     "600 monthly Neurons",
     "Up to 2 EAGOHs",
-    "1.0x Neuron efficiency",
     "Full Intelligence Domain access",
     "Marketplace access",
     "Faction Network access",
@@ -226,7 +225,6 @@ export const TIER_BENEFITS: Record<Exclude<SubscriptionTier, "free">, string[]> 
   oracle_elite: [
     "1,400 monthly Neurons",
     "Up to 3 EAGOHs",
-    "1.0x Neuron efficiency",
     "Priority analyst processing",
     "Advanced Marketplace tools",
     "Faction Network leadership",
@@ -234,7 +232,6 @@ export const TIER_BENEFITS: Record<Exclude<SubscriptionTier, "free">, string[]> 
   syndicate: [
     "3,700 monthly Neurons",
     "Up to 5 EAGOHs",
-    "1.0x Neuron efficiency",
     "Maximum analyst processing",
     "Full Marketplace suite",
     "Faction Network command",
