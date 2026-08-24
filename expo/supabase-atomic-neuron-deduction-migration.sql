@@ -126,7 +126,12 @@ begin
   end if;
 
   -- ── 2. Lock the profile row — concurrent same-user operations serialize ──
-  select edge_subscription, edge_purchased
+  -- Balances are normalized to non-negative integers: legacy NULL behaves
+  -- as zero, and corrupt negative values cannot increase available spending.
+  -- Read-time normalization only — no separate write backfills or "heals"
+  -- the profile; only a normal successful deduction updates it.
+  select greatest(coalesce(edge_subscription, 0), 0),
+         greatest(coalesce(edge_purchased, 0), 0)
     into v_sub_balance, v_purch_balance
     from public.profiles
     where id = p_user_id
