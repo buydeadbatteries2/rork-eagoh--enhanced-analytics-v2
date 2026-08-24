@@ -98,6 +98,8 @@ type ConversationMessage = {
 
 type AnalystRequest = {
   prompt: string;
+  /** Client-generated canonical UUID — the charge idempotency key (Phase S2B-1). */
+  requestId: string;
   sessionType: SessionType;
   eagohId: string | null;
   personality?: string;
@@ -5267,6 +5269,155 @@ async function handleGetIntelligenceAnalytics(request: Request, env: Env): Promi
   });
 }
 
+// ── Phase S2B-1: Server-authoritative analyst session charging ────────────
+// The Worker validates the session type, resolves tier access from trusted
+// database records, computes the cost itself, and charges through the
+// service-role-only deduct_neurons_atomic RPC. A client-supplied amount,
+// reason, tier, balance, or note is NEVER accepted.
+
+const ANALYST_SESSION_TYPES: ReadonlySet<string> = new Set([
+  "quick-check",
+  "quick-analytics",
+  "standard",
+  "oracle",
+  "premium-event",
+]);
+
+/** Mirrors the client SESSION_COST_RANGES exactly. */
+const ANALYST_SESSION_COST_RANGES: Record<SessionType, { min: number; max: number }> = {
+  "quick-check": { min: 1, max: 3 },
+  "quick-analytics": { min: 10, max: 15 },
+  standard: { min: 40, max: 75 },
+  oracle: { min: 150, max: 300 },
+  "premium-event": { min: 75, max: 150 },
+};
+
+const ANALYST_SESSION_LABELS: Record<SessionType, string> = {
+  "quick-check": "Quick Check",
+  "quick-analytics": "Quick Analytics",
+  standard: "Standard Analysis",
+  oracle: "Oracle Deep Dive",
+  "premium-event": "Premium Event Analysis",
+};
+
+/** Maps validated session types to the S2A RPC deduction-only reason whitelist. */
+const ANALYST_SESSION_REASONS: Record<SessionType, string> = {
+  "quick-check": "quick_check",
+  "quick-analytics": "quick_analysis",
+  standard: "standard_analysis",
+  oracle: "oracle_dive",
+  "premium-event": "premium_event",
+};
+
+const ANALYST_REQUEST_ID_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Normalize a client-supplied analyst request ID to a canonical lowercase
+ *  hyphenated UUID, or null when missing/invalid. The charge idempotency key
+ *  is ALWAYS this normalized request ID — never generated from prompt text. */
+function normalizeAnalystRequestId(raw: unknown): string | null {
+  const normalized = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  return ANALYST_REQUEST_ID_UUID_RE.test(normalized) ? normalized : null;
+}
+
+/** Server-authoritative session cost — mirrors the client algorithm exactly:
+ *  word-count / question-mark complexity over the trimmed prompt. */
+function computeAnalystSessionCost(sessionType: SessionType, prompt: string): number {
+  const range = ANALYST_SESSION_COST_RANGES[sessionType];
+  const trimmed = prompt.trim();
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  const questionMarks = (trimmed.match(/\?/g) ?? []).length;
+  if (wordCount <= 12 && questionMarks <= 1) return range.min;
+  if (wordCount <= 30 && questionMarks <= 2) return Math.round((range.min + range.max) / 2);
+  return range.max;
+}
+
+type AnalystAccess = {
+  allowed: boolean;
+  subscriptionBalance: number;
+  purchasedBalance: number;
+  combinedBalance: number;
+};
+
+type AnalystAccessResult = AnalystAccess | { error: "profile_unavailable" };
+
+/** Resolve analyst session access from trusted database records only:
+ *  profiles.subscription_tier (base paid access), an ACTIVE admin_tier_override
+ *  (null/future expiry = active, past = expired), and dev_test_subscriptions
+ *  rows only when ENABLE_DEV_TEST_SUBSCRIPTIONS === "true". Tier information
+ *  is never taken from the request body. Balances are normalized to
+ *  non-negative integers (NULL or negative behaves as zero). */
+async function resolveAnalystAccess(
+  serviceClient: SupabaseClient,
+  userId: string,
+  sessionType: SessionType,
+  env: Env,
+): Promise<AnalystAccessResult> {
+  const { data: profile, error: profileErr } = await serviceClient
+    .from("profiles")
+    .select("subscription_tier, admin_tier_override, admin_tier_expires_at, edge_subscription, edge_purchased")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (profileErr || !profile) {
+    return { error: "profile_unavailable" };
+  }
+
+  const p = profile as {
+    subscription_tier: string | null;
+    admin_tier_override: string | null;
+    admin_tier_expires_at: string | null;
+    edge_subscription: number | null;
+    edge_purchased: number | null;
+  };
+
+  const tierPriority: Record<string, number> = { free: 0, pro: 1, oracle_elite: 2, syndicate: 3 };
+  const baseTier = typeof p.subscription_tier === "string" && p.subscription_tier ? p.subscription_tier : "free";
+  let effectiveTier = baseTier;
+
+  // Active admin override: null or future expiry = active, past (or invalid)
+  // = expired. Only elevates — never downgrades a real paid tier.
+  if (p.admin_tier_override) {
+    const expiresMs = p.admin_tier_expires_at ? new Date(p.admin_tier_expires_at).getTime() : null;
+    const overrideActive = expiresMs === null || (Number.isFinite(expiresMs) && Date.now() <= expiresMs);
+    if (overrideActive && (tierPriority[p.admin_tier_override] ?? 0) > (tierPriority[effectiveTier] ?? 0)) {
+      effectiveTier = p.admin_tier_override;
+    }
+  }
+
+  // Dev test tiers are honored ONLY when the worker flag is explicitly
+  // enabled — never in production.
+  if (env.ENABLE_DEV_TEST_SUBSCRIPTIONS === "true") {
+    const { data: devRow } = await serviceClient
+      .from("dev_test_subscriptions")
+      .select("test_tier, expires_at")
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (devRow) {
+      const d = devRow as { test_tier: string | null; expires_at: string | null };
+      const expiresMs = d.expires_at ? new Date(d.expires_at).getTime() : null;
+      const devActive = expiresMs === null || (Number.isFinite(expiresMs) && Date.now() <= expiresMs);
+      if (devActive && d.test_tier && (tierPriority[d.test_tier] ?? 0) > (tierPriority[effectiveTier] ?? 0)) {
+        effectiveTier = d.test_tier;
+      }
+    }
+  }
+
+  const subscriptionBalance = Math.max(p.edge_subscription ?? 0, 0);
+  const purchasedBalance = Math.max(p.edge_purchased ?? 0, 0);
+
+  // quick-check is open to everyone (including Free); every other session
+  // requires a paid tier.
+  const isPaidTier = effectiveTier === "pro" || effectiveTier === "oracle_elite" || effectiveTier === "syndicate";
+  const allowed = sessionType === "quick-check" || isPaidTier;
+
+  return {
+    allowed,
+    subscriptionBalance,
+    purchasedBalance,
+    combinedBalance: subscriptionBalance + purchasedBalance,
+  };
+}
+
 // ── Main Handler ─────────────────────────────────────────────────────────────
 
 async function handleAnalystChat(request: Request, env: Env): Promise<Response> {
@@ -5305,6 +5456,17 @@ async function handleAnalystChat(request: Request, env: Env): Promise<Response> 
     );
   }
 
+  // ── Request ID (charge idempotency key) — Phase S2B-1 ──
+  // Trimmed and lowercased, then required to be a canonical hyphenated UUID.
+  // The charge idempotency key is NEVER generated from prompt text.
+  const normalizedRequestId = normalizeAnalystRequestId(payload.requestId);
+  if (!normalizedRequestId) {
+    return jsonResponse(
+      { ok: false, errorCode: "invalid_request", error: "A valid requestId is required." },
+      400,
+    );
+  }
+
   // ── Extract JWT ──────────────────────────────────────────────────────────
   const authHeader = request.headers.get("Authorization") ?? "";
   const jwt = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
@@ -5330,7 +5492,16 @@ async function handleAnalystChat(request: Request, env: Env): Promise<Response> 
     );
   }
 
-  const sessionType = payload.sessionType ?? "standard";
+  // ── Session type whitelist — Phase S2B-1 ──
+  // Every other runtime value is rejected before any retrieval, web search,
+  // or OpenAI work.
+  const sessionType = payload.sessionType;
+  if (typeof sessionType !== "string" || !ANALYST_SESSION_TYPES.has(sessionType)) {
+    return jsonResponse(
+      { ok: false, errorCode: "invalid_request", error: "Invalid session type." },
+      400,
+    );
+  }
   const personality = payload.personality ?? "tactical";
   const kind = payload.kind ?? "general";
   const safePrompt = prompt.slice(0, 1200);
@@ -5339,12 +5510,52 @@ async function handleAnalystChat(request: Request, env: Env): Promise<Response> 
   const messageId = payload.messageId ?? null;
 
   console.log("[analyst] request", {
-    userId,
+    userIdPrefix: userId.slice(0, 8),
     sessionType,
     eagohId: payload.eagohId ?? "none",
     promptLen: safePrompt.length,
     hasConversationContext: (payload.conversationContext?.length ?? 0) > 0,
   });
+
+  // ── Server-side access check & preflight (Phase S2B-1) ──
+  // Runs BEFORE any expensive intelligence retrieval, web search, or OpenAI
+  // work. Tier access is resolved from trusted database records only.
+  const analystServiceClient = getServiceRoleClient(env);
+  if (!analystServiceClient) {
+    return jsonResponse(
+      { ok: false, errorCode: "server_error", error: "Analyst service is not fully configured." },
+      500,
+    );
+  }
+
+  const access = await resolveAnalystAccess(analystServiceClient, userId, sessionType, env);
+  if ("error" in access) {
+    console.warn("[analyst] access check failed", { userIdPrefix: userId.slice(0, 8) });
+    return jsonResponse(
+      { ok: false, errorCode: "server_error", error: "Could not verify account access." },
+      500,
+    );
+  }
+  if (!access.allowed) {
+    return jsonResponse(
+      { ok: false, errorCode: "subscription_required", error: "This session requires a paid subscription." },
+      403,
+    );
+  }
+
+  // Server-authoritative cost from the validated session type and the
+  // trimmed/capped prompt. A client amount is never accepted.
+  const chargeCost = computeAnalystSessionCost(sessionType, safePrompt);
+
+  // Non-locking preflight balance check: reject obviously insufficient users
+  // before OpenAI usage. The atomic RPC remains the final authority against
+  // races.
+  if (access.combinedBalance < chargeCost) {
+    return jsonResponse(
+      { ok: false, errorCode: "insufficient_neurons", error: "Insufficient Neurons for this session." },
+      402,
+    );
+  }
 
   // ── EAGOH ownership verification & Personal OI retrieval ──────────────────
   let eagohMeta: { name: string; domain: string } | null = null;
@@ -5802,6 +6013,86 @@ async function handleAnalystChat(request: Request, env: Env): Promise<Response> 
         hasEagoh: !!payload.eagohId,
       });
 
+      // ── Phase S2B-1: Charge for the session (after successful analysis) ──
+      // A valid reply and visual blocks are prepared, but NO successful usage
+      // audits are written and the reply is NOT returned until the atomic
+      // deduction RPC succeeds (or is confirmed duplicate). Failed OpenAI
+      // requests never reach this point — they are never charged. All RPC
+      // arguments are Worker-derived: the JWT user ID, the Worker-calculated
+      // cost, the Worker-mapped reason, the normalized UUID request ID, and a
+      // safe session-label note.
+      const { data: chargeRpcData, error: chargeRpcErr } = await analystServiceClient.rpc(
+        "deduct_neurons_atomic",
+        {
+          p_user_id: userId,
+          p_amount: chargeCost,
+          p_reason: ANALYST_SESSION_REASONS[sessionType],
+          p_idempotency_key: normalizedRequestId,
+          p_note: `Analyst session: ${ANALYST_SESSION_LABELS[sessionType]}`.slice(0, 300),
+        },
+      );
+
+      if (chargeRpcErr) {
+        // Transport failure — do not return the generated analysis.
+        console.warn("[analyst] charge RPC error", {
+          userIdPrefix: userId.slice(0, 8),
+          category: "rpc_transport_error",
+        });
+        return jsonResponse(
+          { ok: false, errorCode: "charge_failed", error: "Charge failed. No analysis was returned." },
+          500,
+        );
+      }
+
+      const chargeResult = chargeRpcData as {
+        ok?: boolean;
+        error?: string;
+        duplicate?: boolean;
+        subscription_balance?: number;
+        purchased_balance?: number;
+        combined_balance?: number;
+      } | null;
+
+      if (!chargeResult || chargeResult.ok !== true) {
+        if (chargeResult?.error === "insufficient_balance") {
+          // Balance changed after preflight — do not return the analysis.
+          console.warn("[analyst] charge rejected: insufficient balance", {
+            userIdPrefix: userId.slice(0, 8),
+          });
+          return jsonResponse(
+            { ok: false, errorCode: "insufficient_neurons", error: "Insufficient Neurons for this session." },
+            402,
+          );
+        }
+        // Any other RPC rejection — do not return the analysis. No raw SQL
+        // details are exposed.
+        console.warn("[analyst] charge RPC rejected", {
+          userIdPrefix: userId.slice(0, 8),
+          category: "rpc_rejected",
+        });
+        return jsonResponse(
+          { ok: false, errorCode: "charge_failed", error: "Charge failed. No analysis was returned." },
+          500,
+        );
+      }
+
+      // Duplicate idempotency key → the RPC did not deduct again; the
+      // analysis is returned normally and the duplicate flag is surfaced in
+      // the response metadata.
+      const neuronCharge = {
+        cost: chargeCost,
+        duplicate: chargeResult.duplicate === true,
+        subscriptionBalance: Math.max(chargeResult.subscription_balance ?? 0, 0),
+        purchasedBalance: Math.max(chargeResult.purchased_balance ?? 0, 0),
+        combinedBalance: Math.max(chargeResult.combined_balance ?? 0, 0),
+      };
+
+      console.log("[analyst] charge complete", {
+        userIdPrefix: userId.slice(0, 8),
+        sessionType,
+        duplicate: neuronCharge.duplicate,
+      });
+
       // ── Phase 5A: Write audit records (best-effort, never fails the session) ──
       const auditClient = getServiceRoleClient(env);
       if (auditClient) {
@@ -5978,6 +6269,7 @@ async function handleAnalystChat(request: Request, env: Env): Promise<Response> 
         sources: externalResearchResult.sources,
         openIntelligenceReferences,
         visualBlocks: visualBlocks ?? undefined,
+        neuronCharge,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
