@@ -68,10 +68,11 @@ export const [EdgeProvider, useEdge] = createContextHook(() => {
    * Accepts ONLY validated numeric balances from successful analyst results
    * (subscription + purchased must sum to total, all non-negative integers).
    * The server already persisted them via deduct_neurons_atomic — this
-   * performs NO Supabase wallet write. Updates the cached profile's
-   * edge_subscription/edge_purchased while preserving every other field,
-   * invalidates transaction history, and refetches the profile in the
-   * background for confirmation.
+   * performs NO Supabase wallet write. Uses a functional updater over the
+   * CURRENT cached profile (never a closed-over snapshot) so newer unrelated
+   * fields survive, and always invalidates the profile + transaction queries
+   * when a user is signed in — even if no profile is cached yet, since the
+   * Worker may already have completed the deduction.
    */
   const applyServerBalances = useCallback(
     ({ subscription, purchased, total }: { subscription: number; purchased: number; total: number }): void => {
@@ -85,18 +86,24 @@ export const [EdgeProvider, useEdge] = createContextHook(() => {
       ) {
         return;
       }
-      if (!profile) return;
-      queryClient.setQueryData(profileKey(userId), {
-        ...profile,
-        edge_subscription: subscription,
-        edge_purchased: purchased,
-      });
+      if (!userId) return;
+      queryClient.setQueryData<UserProfile | null | undefined>(
+        profileKey(userId),
+        (current) =>
+          current
+            ? {
+                ...current,
+                edge_subscription: subscription,
+                edge_purchased: purchased,
+              }
+            : current,
+      );
       queryClient.invalidateQueries({ queryKey: txKey(userId) });
       // Background refetch for confirmation — the optimistic cache update
       // above renders immediately.
       queryClient.invalidateQueries({ queryKey: profileKey(userId) });
     },
-    [profile, queryClient, userId],
+    [queryClient, userId],
   );
 
   const requireCtx = useCallback((): { uid: string; p: UserProfile } => {
