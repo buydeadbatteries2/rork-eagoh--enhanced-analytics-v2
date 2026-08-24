@@ -574,6 +574,17 @@ export default function SubscriptionScreen(): JSX.Element {
   /** True while offerings or customer info are still being fetched from RevenueCat. */
   const stillLoading: boolean = isOfferingsLoading || isCustomerInfoLoading;
 
+  // ── Derived availability state ────────────────────────────────────────
+  // Paid subscribers (Pro or legacy) never see the "unavailable" state when
+  // the Pro offering is temporarily missing — their access is already active.
+  // Free users only see the Pro card when a real Pro package is loaded.
+  const paidAccessActive: boolean = hasProAccess(currentTier);
+  const proPackageAvailable: boolean = Boolean(tierPackages.pro);
+  const shouldShowUnavailable: boolean =
+    !stillLoading && !proPackageAvailable && !paidAccessActive;
+  const shouldShowProCard: boolean =
+    proPackageAvailable || paidAccessActive;
+
   const handleTestSubscribe = useCallback(
     async (tier: Exclude<SubscriptionTier, "free">): Promise<void> => {
       if (!user?.id) {
@@ -1017,10 +1028,11 @@ export default function SubscriptionScreen(): JSX.Element {
           </View>
         ) : null}
 
-        {/* No Pro package found — subscriptions unavailable. Availability is
-            based on the PRO package specifically, not merely on any legacy
-            subscription package being returned. */}
-        {!stillLoading && !tierPackages.pro ? (
+        {/* No Pro package found and no active paid access — subscriptions
+            unavailable. Availability is based on the PRO package specifically,
+            not merely on any legacy subscription package being returned, and
+            existing paid subscribers are exempt from this state. */}
+        {shouldShowUnavailable ? (
           <View style={styles.statusCenter}>
             <Coins color={palette.muted} size={36} />
             <Text style={styles.statusTitle}>Subscriptions Temporarily Unavailable</Text>
@@ -1051,15 +1063,20 @@ export default function SubscriptionScreen(): JSX.Element {
           </View>
         ) : null}
 
-        {/* Pro card — the only plan offered for new purchases */}
-        <TierCard
-          tier="pro"
-          rcPackage={tierPackages.pro}
-          isCurrent={hasProAccess(currentTier) && !purchaseSuccess}
-          showCurrentBadge={currentTier === "pro" && !purchaseSuccess}
-          onSubscribe={handleSubscribe}
-          isPurchasing={isPurchasing && purchasingTier === "pro"}
-        />
+        {/* Pro card — the only plan offered for new purchases. Rendered only
+            when a real Pro package is loaded OR the user already has paid
+            access (Pro or legacy); a free user without a Pro package sees the
+            unavailable state above instead of an empty card. */}
+        {shouldShowProCard ? (
+          <TierCard
+            tier="pro"
+            rcPackage={tierPackages.pro}
+            isCurrent={paidAccessActive && !purchaseSuccess}
+            showCurrentBadge={currentTier === "pro" && !purchaseSuccess}
+            onSubscribe={handleSubscribe}
+            isPurchasing={isPurchasing && purchasingTier === "pro"}
+          />
+        ) : null}
 
         {/* Restore purchases */}
         <Pressable
