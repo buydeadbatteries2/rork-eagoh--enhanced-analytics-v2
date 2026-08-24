@@ -10,6 +10,29 @@ export type SubscriptionTier = "free" | "pro" | "oracle_elite" | "syndicate";
 /** Admin override tier — mirrors SubscriptionTier but also allows null (no override). */
 export type AdminOverrideTier = SubscriptionTier | null;
 
+/** Unified access model: every paid tier maps to "pro"; free stays "free". */
+export type UnifiedAccessTier = "free" | "pro";
+
+/**
+ * Whether a resolved tier has paid Pro access.
+ *
+ * EAGOH is transitioning to a single Pro feature model. Legacy Oracle Elite
+ * and Syndicate identifiers remain temporarily supported, so their
+ * subscribers keep full Pro access while those tiers are phased out.
+ */
+export function hasProAccess(tier: SubscriptionTier): boolean {
+  return tier !== "free";
+}
+
+/**
+ * Map any legacy tier to the unified access model.
+ *
+ * `free` → "free"; every paid legacy tier (pro, oracle_elite, syndicate) → "pro".
+ */
+export function getUnifiedAccessTier(tier: SubscriptionTier): UnifiedAccessTier {
+  return tier === "free" ? "free" : "pro";
+}
+
 /** Monthly subscription Neuron allocations per tier. Free tier receives 25 every month. */
 export const TIER_MONTHLY_ALLOCATION: Record<SubscriptionTier, number> = {
   free: 25,
@@ -30,12 +53,19 @@ export const TIER_MAX_EAGOHS: Record<SubscriptionTier, number> = {
   syndicate: 5,
 };
 
-/** Neuron efficiency multiplier per tier. */
+/**
+ * Neuron efficiency multiplier per tier.
+ *
+ * EAGOH is transitioning to a single Pro feature model. Legacy Oracle Elite
+ * and Syndicate identifiers remain temporarily supported so existing
+ * subscribers keep resolving correctly, but all paid tiers now share the
+ * same 1.0x Neuron economy.
+ */
 export const TIER_MULTIPLIER: Record<SubscriptionTier, number> = {
   free: 0,
   pro: 1.0,
-  oracle_elite: 1.2,
-  syndicate: 1.5,
+  oracle_elite: 1.0,
+  syndicate: 1.0,
 };
 
 // ── RevenueCat identifiers ──────────────────────────────────────────────────
@@ -196,7 +226,7 @@ export const TIER_BENEFITS: Record<Exclude<SubscriptionTier, "free">, string[]> 
   oracle_elite: [
     "1,400 monthly Neurons",
     "Up to 3 EAGOHs",
-    "1.2x Neuron efficiency",
+    "1.0x Neuron efficiency",
     "Priority analyst processing",
     "Advanced Marketplace tools",
     "Faction Network leadership",
@@ -204,7 +234,7 @@ export const TIER_BENEFITS: Record<Exclude<SubscriptionTier, "free">, string[]> 
   syndicate: [
     "3,700 monthly Neurons",
     "Up to 5 EAGOHs",
-    "1.5x Neuron efficiency",
+    "1.0x Neuron efficiency",
     "Maximum analyst processing",
     "Full Marketplace suite",
     "Faction Network command",

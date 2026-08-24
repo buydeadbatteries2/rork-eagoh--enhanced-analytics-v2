@@ -31,7 +31,7 @@ import {
   getRenameCooldownRemaining,
   RENAME_EDGE_COST,
 } from "@/services/eagohIdentity";
-import { TIER_MAX_EAGOHS, TIER_MULTIPLIER, getForgeCost } from "@/services/edge";
+import { TIER_MAX_EAGOHS, getForgeCost } from "@/services/edge";
 import type { EagohDraft } from "@/services/eagohs";
 import { useHaptics } from "@/hooks/useHaptics";
 import TeamSelector from "@/app/_components/TeamSelector";
@@ -833,7 +833,6 @@ export default function ForgeScreen(): JSX.Element {
     );
   }
 
-  const multiplier = TIER_MULTIPLIER[currentTier] ?? 0;
   const maxEagohs = TIER_MAX_EAGOHS[currentTier] ?? 0;
   const forgeCost = getForgeCost(isEditing ? "full_reforge" : "initial");
   const domainLabel = INTELLIGENCE_DOMAINS.find((d) => d.id === domain)?.label ?? domain;
@@ -2952,7 +2951,6 @@ const styles = StyleSheet.create({
   infoDot: { width: 3, height: 3, borderRadius: 2, backgroundColor: palette.muted },
   infoShell: { color: palette.muted, fontSize: 10, fontWeight: "800", letterSpacing: 0.8 },
   infoSlots: { color: palette.muted, fontSize: 10, fontWeight: "700" },
-  multiplier: { color: palette.gold, fontSize: 10, fontWeight: "900" },
   stepperBar: { paddingHorizontal: 12, paddingTop: 8, paddingBottom: 6, borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.06)" },
   stepperTopRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 7 },
   stepCounter: { color: palette.cyan, fontSize: 11, fontWeight: "900", letterSpacing: 1 },
