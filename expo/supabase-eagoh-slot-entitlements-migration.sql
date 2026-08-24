@@ -12,16 +12,24 @@
 --   public.eagoh_slot_entitlements  one row per user (owner read-only via RLS)
 --   public.eagoh_slot_transactions  immutable audit log (owner read-only via RLS)
 --
--- This migration is fully idempotent: re-running it never duplicates audit
--- entries or increases capacity beyond the deterministic grant.
+-- This migration is fully idempotent. Grandfathering is a ONE-TIME SNAPSHOT:
+-- re-running it never grants additional capacity based on EAGOHs forged after
+-- the snapshot, never updates an existing entitlement row, and never
+-- duplicates audit entries.
 --
--- Grandfathering: users who already own more than 2 user-forged EAGOHs keep
--- that capacity as grandfathered_slots = min(forged_count - 2, 3). No EAGOH
--- is deleted or deactivated, and no Neurons are deducted.
+-- Grandfathering: at migration time every existing auth.users account
+-- receives an entitlement row. Accounts owning more than 2 user-forged
+-- EAGOHs receive grandfathered_slots = min(forged_count - 2, 3):
+--   forged 0–2 → 0 | 3 → 1 | 4 → 2 | 5+ → 3
+-- No EAGOH is deleted or deactivated, and no Neurons are deducted.
 --
 -- NOTE: This file is created only — it has NOT been executed against the
 -- live Supabase project. No client-callable slot-purchase RPC is created here.
 -- ────────────────────────────────────────────────────────────────────────────
+
+-- Table creation, policies, snapshot, and auditing succeed or fail together.
+-- Every statement is idempotent, so re-running the whole transaction is safe.
+begin;
 
 -- ── 1. eagoh_slot_entitlements ──────────────────────────────────────────────
 
@@ -118,25 +126,37 @@ begin
 end;
 $$;
 
+-- Restrict direct execution to service_role. PUBLIC, anon, and authenticated
+-- are explicitly revoked so no client can invoke the trigger function
+-- directly. Authorized server-side updates still fire the trigger normally.
+revoke execute on function public.set_eagoh_slot_entitlements_updated_at()
+  from public, anon, authenticated;
+grant execute on function public.set_eagoh_slot_entitlements_updated_at()
+  to service_role;
+
 create trigger trg_eagoh_slot_entitlements_updated_at
   before update on public.eagoh_slot_entitlements
   for each row
   execute function public.set_eagoh_slot_entitlements_updated_at();
 
--- ── 6. Grandfather existing EAGOH capacity ──────────────────────────────────
+-- ── 6. Grandfather snapshot (one-time, frozen) ──────────────────────────────
 -- Count user-forged, non-default-shell EAGOHs per user using the exact null
 -- semantics of EagohProvider:
---   • is_default_shell = true                        → excluded (default shell)
+--   • is_default_shell = true                             → excluded (default shell)
 --   • is_default_shell IS NULL AND is_user_forged = false → excluded (legacy row)
---   • everything else                                → counted as user-forged
+--   • everything else                                      → counted as user-forged
 --
--- Users with more than 2 forged EAGOHs receive
---   grandfathered_slots = min(forged_count - 2, 3).
+-- EVERY existing auth.users account is included in the snapshot — including
+-- accounts that receive zero grandfathered slots — and receives one
+-- entitlement row with purchased_slots = 0.
+--
+-- `on conflict (user_id) do nothing` means existing rows are NEVER updated:
+-- any previously stored purchased or grandfathered capacity is preserved and
+-- the snapshot stays frozen. A re-run after a user forges additional EAGOHs
+-- therefore cannot grant more capacity, and accounts created after this
+-- migration never receive rows here.
+--
 --   forged 0–2 → 0 | 3 → 1 | 4 → 2 | 5+ → 3
---
--- Existing purchased_slots are always preserved and the combined total never
--- exceeds 3 (grandfathered capacity is capped by the room purchased slots
--- leave). The WHERE guard makes re-runs inert when the data is unchanged.
 -- No EAGOH is deleted or deactivated and no Neurons are deducted.
 
 with user_forged_counts as (
@@ -149,62 +169,59 @@ with user_forged_counts as (
     and not (e.is_default_shell is null and e.is_user_forged is false)
   group by e.user_id
 ),
-grants as (
+snapshot as (
   select
-    c.user_id,
-    c.forged_count,
-    least(c.forged_count - 2, 3)::smallint as grant_slots
-  from user_forged_counts c
-  where c.forged_count > 2
+    u.id as user_id,
+    least(greatest(coalesce(c.forged_count, 0) - 2, 0), 3)::smallint
+      as grandfathered_slots
+  from auth.users u
+  left join user_forged_counts c on c.user_id = u.id
 )
-insert into public.eagoh_slot_entitlements (user_id, grandfathered_slots)
-select g.user_id, g.grant_slots
-from grants g
-on conflict (user_id) do update
-  set grandfathered_slots = least(
-        excluded.grandfathered_slots,
-        greatest(3 - public.eagoh_slot_entitlements.purchased_slots, 0)
-      ),
-      updated_at = now()
-  where least(
-        excluded.grandfathered_slots,
-        greatest(3 - public.eagoh_slot_entitlements.purchased_slots, 0)
-      ) > public.eagoh_slot_entitlements.grandfathered_slots;
-
--- ── 7. Audit entries for grandfather grants ─────────────────────────────────
--- Deterministic idempotency key (legacy-eagoh-capacity-v1:<user_id>) means a
--- re-run can never duplicate audit rows; the unique partial index on
--- idempotency_key is the enforcement backstop.
-
-with user_forged_counts as (
-  select
-    e.user_id,
-    count(*)::int as forged_count
-  from public.eagohs e
-  where e.user_id is not null
-    and coalesce(e.is_default_shell, false) = false
-    and not (e.is_default_shell is null and e.is_user_forged is false)
-  group by e.user_id
-),
-grants as (
-  select
-    c.user_id,
-    c.forged_count,
-    least(c.forged_count - 2, 3)::smallint as grant_slots
-  from user_forged_counts c
-  where c.forged_count > 2
+insert into public.eagoh_slot_entitlements (
+  user_id,
+  purchased_slots,
+  grandfathered_slots
 )
-insert into public.eagoh_slot_transactions (user_id, kind, slot_delta, neuron_cost, idempotency_key, metadata)
 select
-  g.user_id,
-  'grandfather_grant',
-  g.grant_slots,
+  user_id,
   0,
-  'legacy-eagoh-capacity-v1:' || g.user_id::text,
+  grandfathered_slots
+from snapshot
+on conflict (user_id) do nothing;
+
+-- ── 7. Grandfather audit rows (from the STORED entitlement values) ──────────
+-- Audit rows are derived from the grandfathered_slots value actually stored
+-- in the entitlement table, so the audit trail always agrees with the
+-- entitlement — including any pre-existing row whose stored value differs
+-- from the raw snapshot grant (e.g. purchased slots already occupying part of
+-- the 3-slot ceiling). Only non-zero grants are audited.
+--
+-- The deterministic idempotency key (legacy-eagoh-capacity-v1:<user_id>) plus
+-- `on conflict do nothing` makes re-runs pure no-ops while still allowing
+-- this statement to repair any missing audit rows; the unique partial index
+-- on idempotency_key is the enforcement backstop.
+
+insert into public.eagoh_slot_transactions (
+  user_id,
+  kind,
+  slot_delta,
+  neuron_cost,
+  idempotency_key,
+  metadata
+)
+select
+  e.user_id,
+  'grandfather_grant',
+  e.grandfathered_slots,
+  0,
+  'legacy-eagoh-capacity-v1:' || e.user_id::text,
   jsonb_build_object(
     'reason', 'legacy_eagoh_capacity_grandfather',
-    'forged_count', g.forged_count,
+    'granted_slots', e.grandfathered_slots,
     'migration', 'eagoh-slot-entitlements'
   )
-from grants g
+from public.eagoh_slot_entitlements e
+where e.grandfathered_slots > 0
 on conflict do nothing;
+
+commit;
