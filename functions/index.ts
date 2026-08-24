@@ -12131,8 +12131,135 @@ async function handleExchangeSaleNotify(request: Request, env: Env): Promise<Res
 // purchase rows.
 //
 // The client never directly deducts neurons, credits the vendor, or inserts
-// a purchase row. Idempotency: a client-supplied key prevents duplicate
-// purchases from retries/double-taps.
+// a purchase row.
+//
+// Phase D2 — server-side same-domain enforcement:
+//   1. The request body is strictly validated (unknown-decoded, non-null
+//      non-array object, canonical UUIDs, valid sync level, integer days
+//      1–5). Client-supplied domain, price, buyer ID, tier, balance, and
+//      idempotency fields are ignored entirely.
+//   2. The buyer EAGOH is loaded via the service-role client and verified
+//      (ownership + forged-EAGOH eligibility + non-dormant + usable domain).
+//      Client-sent EAGOH objects are never trusted.
+//   3. The listing and its joined vendor EAGOH are loaded via the service-
+//      role client (exists, active, vendor EAGOH non-dormant with a domain).
+//   4. Buyer and vendor domains (trusted database values, normalized with
+//      the same canonical behavior as the client's normalizeDomainId()) must
+//      match — otherwise HTTP 409 BEFORE the RPC runs: no Neurons deducted,
+//      no vendor credit, no purchase row, no retention, no notification.
+//   5. The idempotency key is derived inside the Worker from trusted values:
+//      sync:<authenticatedUserId>:<buyerEagohId>:<listingId>:<syncLevel>:<days>
+
+// ── Phase D2: Exchange purchase validation helpers (pure, exported for tests) ──
+
+const EXCHANGE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const EXCHANGE_SYNC_LEVELS: readonly string[] = ["25%", "50%", "75%", "100%"];
+
+/** Canonical intelligence-domain IDs — must match services/domains.ts. */
+const DOMAIN_CANONICAL_IDS: ReadonlySet<string> = new Set([
+  "sports", "music", "film-tv", "fashion", "education", "gaming",
+  "business", "finance", "technology", "health-fitness",
+]);
+
+/** Domain alias map — mirrors NORMALIZE_MAP in services/domains.ts. */
+const DOMAIN_ALIAS_MAP: Record<string, string> = {
+  sport: "sports",
+  film_tv: "film-tv",
+  "film & television": "film-tv",
+  "film and television": "film-tv",
+  "film-television": "film-tv",
+  filmtv: "film-tv",
+  filmtelevision: "film-tv",
+  film_television: "film-tv",
+  health_fitness: "health-fitness",
+  "health & fitness": "health-fitness",
+  "health and fitness": "health-fitness",
+  healthfitness: "health-fitness",
+  "health-fit": "health-fitness",
+  health_fit: "health-fitness",
+};
+
+/**
+ * Normalize a domain ID to its canonical form using the same canonical
+ * behavior as the client's normalizeDomainId() in services/domains.ts:
+ * canonical fast path → explicit alias map → collapsed-separator alias match
+ * → canonical collapsed match → lowercased trimmed fallback.
+ */
+export function normalizeExchangeDomain(raw: string): string {
+  const trimmed = raw.trim();
+  if (DOMAIN_CANONICAL_IDS.has(trimmed)) return trimmed;
+  const lower = trimmed.toLowerCase();
+  if (DOMAIN_ALIAS_MAP[lower] !== undefined) return DOMAIN_ALIAS_MAP[lower];
+  const collapsed = lower.replace(/[^a-z0-9]/g, "");
+  if (DOMAIN_ALIAS_MAP[collapsed] !== undefined) return DOMAIN_ALIAS_MAP[collapsed];
+  for (const canonical of DOMAIN_CANONICAL_IDS) {
+    if (canonical.replace(/[^a-z0-9]/g, "") === collapsed) return canonical;
+  }
+  return lower;
+}
+
+/** Strictly validated exchange purchase request. */
+export type ExchangePurchaseRequest = {
+  listingId: string;
+  buyerEagohId: string;
+  syncLevel: string;
+  days: number;
+};
+
+/**
+ * Strictly decode + validate the purchase request body (decoded as unknown).
+ * Returns null for any invalid input. Client-supplied domain, price, buyer
+ * ID, tier, balance, and idempotency fields are never read.
+ */
+export function parseExchangePurchasePayload(body: unknown): ExchangePurchaseRequest | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+  const raw = body as Record<string, unknown>;
+  const listingId = typeof raw.listingId === "string" ? raw.listingId.trim().toLowerCase() : "";
+  if (!EXCHANGE_UUID_RE.test(listingId)) return null;
+  const buyerEagohId = typeof raw.buyerEagohId === "string" ? raw.buyerEagohId.trim().toLowerCase() : "";
+  if (!EXCHANGE_UUID_RE.test(buyerEagohId)) return null;
+  const syncLevel = typeof raw.syncLevel === "string" ? raw.syncLevel.trim() : "";
+  if (!EXCHANGE_SYNC_LEVELS.includes(syncLevel)) return null;
+  const days = typeof raw.days === "number" ? raw.days : Number.NaN;
+  if (!Number.isInteger(days) || days < 1 || days > 5) return null;
+  return { listingId, buyerEagohId, syncLevel, days };
+}
+
+/** Derive the idempotency key from trusted/validated values only. */
+export function deriveExchangeIdempotencyKey(
+  userId: string,
+  buyerEagohId: string,
+  listingId: string,
+  syncLevel: string,
+  days: number,
+): string {
+  return `sync:${userId}:${buyerEagohId}:${listingId}:${syncLevel}:${days}`;
+}
+
+/** Service-role buyer EAGOH row shape used for eligibility checks. */
+export type BuyerEagohRow = {
+  user_id: string | null;
+  is_default_shell: boolean | null;
+  is_user_forged: boolean | null;
+  status: string | null;
+  domain: string | null;
+  sport: string | null;
+};
+
+/**
+ * Eligible buyer EAGOH check — same forged-EAGOH null semantics as the
+ * client: exclude default shells (true, or null when not user-forged),
+ * exclude dormant, and require a usable domain via domain ?? sport.
+ * Ownership (user_id === authenticated userId) is enforced first.
+ */
+export function isEligibleBuyerEagohRow(row: BuyerEagohRow | null, userId: string): boolean {
+  if (!row) return false;
+  if (row.user_id !== userId) return false;
+  if (row.is_default_shell === true) return false;
+  if (row.is_default_shell === null && row.is_user_forged === false) return false;
+  if (row.status === "dormant") return false;
+  return !!(row.domain ?? row.sport);
+}
 
 async function handleExchangePurchase(request: Request, env: Env): Promise<Response> {
   if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
@@ -12150,39 +12277,127 @@ async function handleExchangePurchase(request: Request, env: Env): Promise<Respo
   const serviceClient = getServiceRoleClient(env);
   if (!serviceClient) return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
 
-  let payload: {
-    listingId?: unknown;
-    syncLevel?: unknown;
-    days?: unknown;
-    idempotencyKey?: unknown;
-  };
+  let body: unknown;
   try {
-    payload = (await request.json()) as typeof payload;
+    body = await request.json();
   } catch {
-    return jsonResponse({ ok: false, error: "Invalid request." }, 400);
+    return jsonResponse({ ok: false, errorCode: "invalid_request", error: "Invalid request." }, 400);
   }
 
-  const listingId = typeof payload.listingId === "string" ? payload.listingId.trim() : "";
-  if (!listingId) return jsonResponse({ ok: false, error: "Listing ID required." }, 400);
+  // Strict validation — only listingId, buyerEagohId, syncLevel, and days
+  // are accepted. Everything else (domain, price, buyerId, tier, balance,
+  // idempotencyKey…) is ignored and never forwarded to the RPC.
+  const parsed = parseExchangePurchasePayload(body);
+  if (!parsed) {
+    return jsonResponse({ ok: false, errorCode: "invalid_request", error: "Invalid purchase request." }, 400);
+  }
+  const { listingId, buyerEagohId, syncLevel, days } = parsed;
 
-  const syncLevel = typeof payload.syncLevel === "string" ? payload.syncLevel.trim() : "";
-  if (!["25%", "50%", "75%", "100%"].includes(syncLevel)) {
-    return jsonResponse({ ok: false, error: "Invalid sync level." }, 400);
+  // ── Verify the buyer EAGOH using service-role data ──
+  // The row is loaded from the database — a client-sent EAGOH object is
+  // never trusted. Ownership, forged-EAGOH eligibility, dormant status, and
+  // usable domain are all enforced here.
+  const { data: buyerEagohRow, error: buyerEagohErr } = await serviceClient
+    .from("eagohs")
+    .select("id, user_id, is_default_shell, is_user_forged, status, domain, sport")
+    .eq("id", buyerEagohId)
+    .maybeSingle();
+
+  if (buyerEagohErr) {
+    console.warn("[exchange/purchase] buyer EAGOH lookup failed", {
+      userIdPrefix: userId.slice(0, 8),
+      error: buyerEagohErr.message,
+    });
+    return jsonResponse({ ok: false, error: "Purchase failed. No neurons were charged." }, 500);
   }
 
-  const days = typeof payload.days === "number" ? payload.days : 0;
-  if (days < 1 || days > 5) {
-    return jsonResponse({ ok: false, error: "Duration must be between 1 and 5 days." }, 400);
+  const buyerEagoh = (buyerEagohRow ?? null) as BuyerEagohRow | null;
+  const eligibleBuyerEagoh = isEligibleBuyerEagohRow(buyerEagoh, userId) ? buyerEagoh : null;
+  if (!eligibleBuyerEagoh) {
+    console.warn("[exchange/purchase] buyer EAGOH not eligible", {
+      userIdPrefix: userId.slice(0, 8),
+      reason: buyerEagoh ? "ineligible" : "not_found",
+    });
+    return jsonResponse({
+      ok: false,
+      errorCode: "buyer_eagoh_not_eligible",
+      error: "Select an active forged EAGOH to make this purchase.",
+    }, 403);
   }
 
-  // ── Generate idempotency key if not provided ──
-  // Format: sync:<userId>:<listingId>:<syncLevel>:<days>
-  // Deterministic — the same purchase attempt from retries produces the same
-  // key, so the RPC returns the original result. The unique index only applies
-  // to active purchases, so a new purchase after expiration is allowed.
-  const idempotencyKey = (typeof payload.idempotencyKey === "string" && payload.idempotencyKey.trim())
-    ? payload.idempotencyKey.trim()
-    : `sync:${userId}:${listingId}:${syncLevel}:${days}`;
+  // ── Verify the vendor listing and its EAGOH ──
+  // The Worker precheck never calculates or trusts the price — pricing stays
+  // exclusively inside the atomic RPC.
+  const { data: listingRow, error: listingErr } = await serviceClient
+    .from("marketplace_listings")
+    .select("id, vendor_id, active, eagoh: eagohs!inner(id, user_id, status, domain, sport)")
+    .eq("id", listingId)
+    .maybeSingle();
+
+  if (listingErr) {
+    console.warn("[exchange/purchase] listing lookup failed", {
+      userIdPrefix: userId.slice(0, 8),
+      error: listingErr.message,
+    });
+    return jsonResponse({ ok: false, error: "Purchase failed. No neurons were charged." }, 500);
+  }
+
+  const listing = (listingRow ?? null) as {
+    vendor_id: string;
+    active: boolean;
+    eagoh: { id: string; user_id: string | null; status: string | null; domain: string | null; sport: string | null } | null;
+  } | null;
+
+  if (!listing || !listing.active) {
+    return jsonResponse({
+      ok: false,
+      errorCode: "listing_not_found",
+      error: "Listing not found or no longer active.",
+    }, 404);
+  }
+
+  const vendorEagoh = listing.eagoh;
+  const vendorEffectiveDomain = vendorEagoh ? (vendorEagoh.domain ?? vendorEagoh.sport) : null;
+  if (!vendorEagoh || !vendorEagoh.id || vendorEagoh.status === "dormant" || !vendorEffectiveDomain) {
+    console.warn("[exchange/purchase] vendor EAGOH not eligible", {
+      userIdPrefix: userId.slice(0, 8),
+      reason: !vendorEagoh ? "missing" : vendorEagoh.status === "dormant" ? "dormant" : "no_domain",
+    });
+    return jsonResponse({
+      ok: false,
+      errorCode: "vendor_eagoh_not_eligible",
+      error: "This listing is not available for purchase.",
+    }, 403);
+  }
+
+  // ── Enforce identical domains ──
+  // Both values come exclusively from trusted service-role database rows and
+  // are normalized with the same canonical behavior as the client's
+  // normalizeDomainId(). A mismatch is rejected BEFORE the RPC is invoked:
+  // no Neurons deducted, no vendor credit, no purchase row, no retention,
+  // no notification.
+  const buyerDomain = normalizeExchangeDomain(eligibleBuyerEagoh.domain ?? eligibleBuyerEagoh.sport ?? "");
+  const vendorDomain = normalizeExchangeDomain(vendorEffectiveDomain);
+  if (buyerDomain !== vendorDomain) {
+    console.warn("[exchange/purchase] domain mismatch rejected", {
+      userIdPrefix: userId.slice(0, 8),
+      buyerDomain,
+      vendorDomain,
+    });
+    return jsonResponse({
+      ok: false,
+      errorCode: "domain_mismatch",
+      error: "This EAGOH can only purchase intelligence from another EAGOH in the same domain.",
+    }, 409);
+  }
+
+  // ── Worker-owned idempotency ──
+  // Derived exclusively from the authenticated user ID and validated request
+  // values. A client-supplied idempotency key is never accepted. Deterministic
+  // — retries produce the same key, so the RPC returns the original result.
+  // The unique index only applies to active purchases, so a new purchase
+  // after expiration is allowed.
+  const idempotencyKey = deriveExchangeIdempotencyKey(userId, buyerEagohId, listingId, syncLevel, days);
 
   // ── Call the atomic RPC ──
   // The RPC does everything in one PostgreSQL transaction:

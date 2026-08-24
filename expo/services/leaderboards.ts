@@ -93,12 +93,19 @@ export async function getLeaderboard(
   // eagohs, causing HTTP 400 from PostgREST.
   let query = supabase
     .from("eagoh_reputation")
-    .select(`*, eagohs!inner(id, name, user_id, domain, dna, image_thumb_url, created_at)`, {
+    .select(`*, eagohs!inner(id, name, user_id, domain, dna, status, image_thumb_url, created_at)`, {
       count: "exact",
     });
 
   // Exclude dormant
   query = query.neq("rank", "Dormant");
+
+  // Phase D2: dormant EAGOHs are also excluded server-side via their joined
+  // eagohs.status. Legacy NULL status rows remain eligible — the explicit
+  // IS NULL arm is required because `.neq` alone drops NULL rows under SQL
+  // three-valued logic. The rank-based exclusion above is retained as
+  // defense-in-depth; ranking calculations and sorting are unchanged.
+  query = query.or("status.is.null,status.neq.dormant", { referencedTable: "eagohs" });
 
   // ── Timeframe slicing ───────────────────────────────────────────────
   if (filters.timeframe && filters.timeframe !== "all_time") {

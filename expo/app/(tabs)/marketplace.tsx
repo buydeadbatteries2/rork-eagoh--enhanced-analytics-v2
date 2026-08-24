@@ -1823,10 +1823,13 @@ const MktSponsoredBanner = memo(function MktSponsoredBanner({ item, userId, repu
   );
 });
 
-const MktSponsoredCarousel = memo(function MktSponsoredCarousel({ userId, onPromote }: { userId: string | null; onPromote: () => void }): JSX.Element | null {
+const MktSponsoredCarousel = memo(function MktSponsoredCarousel({ userId, selectedDomain, onPromote }: { userId: string | null; selectedDomain: string; onPromote: () => void }): JSX.Element | null {
+  // Phase D2: Marketplace sponsors are scoped to the selected buyer-EAGOH
+  // domain. No request fires and nothing renders without a selection.
   const { data: banners, isLoading: loading } = useQuery<EnrichedBanner[]>({
-    queryKey: ["activeBanners", "marketplace"],
-    queryFn: () => getActiveBanners("marketplace"),
+    queryKey: ["activeBanners", "marketplace", selectedDomain],
+    queryFn: () => getActiveBanners("marketplace", selectedDomain),
+    enabled: selectedDomain.length > 0,
     staleTime: 60_000,
   });
   const [bannerRepMap, setBannerRepMap] = useState<Map<string, ReputationRow>>(new Map());
@@ -1840,6 +1843,7 @@ const MktSponsoredCarousel = memo(function MktSponsoredCarousel({ userId, onProm
   }, [banners]);
 
   if (loading) return null;
+  if (selectedDomain.length === 0) return null;
 
   return (
     <View style={{ marginTop: 16, gap: 10 }}>
@@ -2019,7 +2023,7 @@ export default function MarketplaceScreen(): JSX.Element {
   const h = useHaptics();
   const router = useRouter();
   const { user } = useAuth();
-  const { profile, effectiveSubscriptionTier } = useProfile();
+  const { effectiveSubscriptionTier } = useProfile();
   const { balances } = useEdge();
   const { palette: pal } = useAppTheme();
 
@@ -2394,8 +2398,29 @@ export default function MarketplaceScreen(): JSX.Element {
     }
   }, [listingsQuery.data]);
 
+  // Phase D2: if the selection disappears or changes domain while the
+  // purchase modal is open, close it safely without sending a request.
+  useEffect(() => {
+    if (!purchaseModal) return;
+    const modalDomain = purchaseModal.eagoh?.domain ?? purchaseModal.eagoh?.sport ?? "";
+    if (!selectedBuyerEagoh || modalDomain !== selectedBuyerDomain) {
+      setPurchaseModal(null);
+      setShowSourceInfo(false);
+    }
+  }, [purchaseModal, selectedBuyerEagoh, selectedBuyerDomain]);
+
   const handlePurchaseConfirm = useCallback(async (level: SyncLevel, days: number) => {
-    if (!user?.id || !profile || !purchaseModal) return;
+    if (!user?.id || !purchaseModal) return;
+    // ── Phase D2: purchase requires an eligible selected buyer EAGOH whose
+    // domain matches the listing. The Worker re-verifies authoritatively. ──
+    if (!selectedBuyerEagoh || !selectedBuyerDomain) {
+      setPurchaseModal(null);
+      return;
+    }
+    if ((purchaseModal.eagoh?.domain ?? purchaseModal.eagoh?.sport ?? "") !== selectedBuyerDomain) {
+      setPurchaseModal(null);
+      return;
+    }
     // ── Client-side self-purchase guard (defense-in-depth; backend also enforces) ──
     if (purchaseModal.vendor_id === user.id) {
       console.warn("[Exchange] self-purchase blocked at confirm — vendor_id matches user.id");
@@ -2405,7 +2430,7 @@ export default function MarketplaceScreen(): JSX.Element {
     }
     setPurchasing(true);
     try {
-      const result = await purchaseSync(user.id, profile, purchaseModal.id, level, days);
+      const result = await purchaseSync(purchaseModal.id, selectedBuyerEagoh.id, level, days);
       if (!result.ok) {
         Alert.alert("Purchase Failed", result.error);
       } else {
@@ -2423,7 +2448,7 @@ export default function MarketplaceScreen(): JSX.Element {
     } finally {
       setPurchasing(false);
     }
-  }, [user?.id, profile, purchaseModal, loadActiveSyncsData, loadPurchasesData]);
+  }, [user?.id, purchaseModal, selectedBuyerEagoh, selectedBuyerDomain, loadActiveSyncsData, loadPurchasesData]);
 
   const handleToggleListing = useCallback(async (id: string, active: boolean) => {
     // ── Re-entry guard: prevent duplicate requests from rapid taps ──
@@ -2477,9 +2502,14 @@ export default function MarketplaceScreen(): JSX.Element {
   }, [togglingId, myListings, listings, user?.id, h, queryClient]);
 
   // Stable callbacks for ListingCard — prevent re-creation on every render
+  // Phase D2: a purchase can only open when a selected buyer EAGOH exists and
+  // the listing belongs to the currently selected domain. Defense-in-depth —
+  // the Worker remains authoritative.
   const handlePurchasePress = useCallback((l: EnrichedListing) => {
+    if (!selectedBuyerEagoh || !selectedBuyerDomain) return;
+    if ((l.eagoh?.domain ?? l.eagoh?.sport ?? "") !== selectedBuyerDomain) return;
     setPurchaseModal(l);
-  }, []);
+  }, [selectedBuyerEagoh, selectedBuyerDomain]);
   const handleViewVendorProfile = useCallback((vendorId: string) => {
     setPublicProfileVendorId(vendorId);
   }, []);
@@ -2490,8 +2520,24 @@ export default function MarketplaceScreen(): JSX.Element {
         <Hero />
         <VendorStatsCard />
 
-        {/* Promoted Signals / Sponsored EAGOHs — below Vendor Dashboard, above tabs */}
-        <MktSponsoredCarousel userId={user?.id ?? null} onPromote={() => setBannerModalVisible(true)} />
+        {/* Phase D2: the buyer-EAGOH selector sits ABOVE the Marketplace
+            sponsored carousel so users establish their browsing identity
+            before seeing domain-scoped EAGOH content. */}
+        {(tab === "browse" || tab === "rankings") && selectedBuyerEagoh && (
+          <BuyerEagohSelector
+            selected={selectedBuyerEagoh}
+            eligible={eligibleBuyerEagohs}
+            onSelect={handleSelectBuyerEagoh}
+          />
+        )}
+
+        {/* Promoted Signals / Sponsored EAGOHs — domain-scoped (Phase D2),
+            below the selector, above tabs */}
+        <MktSponsoredCarousel
+          userId={user?.id ?? null}
+          selectedDomain={selectedBuyerDomain}
+          onPromote={() => setBannerModalVisible(true)}
+        />
 
         {/* Active Syncs (above filters, compact) */}
         {isPaid && activeSyncs.length > 0 && (
@@ -2549,16 +2595,6 @@ export default function MarketplaceScreen(): JSX.Element {
           </ScrollView>
         )}
 
-        {/* Phase D1: selected-EAGOH Exchange selector — the domain is locked
-            to this EAGOH; switching resets filters/search and reloads. */}
-        {(tab === "browse" || tab === "rankings") && selectedBuyerEagoh && (
-          <BuyerEagohSelector
-            selected={selectedBuyerEagoh}
-            eligible={eligibleBuyerEagohs}
-            onSelect={handleSelectBuyerEagoh}
-          />
-        )}
-
         {/* Filters (only in marketplace browse; domain locked to the selected EAGOH) */}
         {tab === "browse" && selectedBuyerEagoh && (
           <FilterPanel
@@ -2572,7 +2608,7 @@ export default function MarketplaceScreen(): JSX.Element {
         )}
       </View>
     ),
-    [filters, setFilters, filterMeta, tab, activeSyncs, isPaid, user?.id, searchInput, selectedBuyerEagoh, eligibleBuyerEagohs, handleSelectBuyerEagoh],
+    [filters, setFilters, filterMeta, tab, activeSyncs, isPaid, user?.id, searchInput, selectedBuyerEagoh, selectedBuyerDomain, eligibleBuyerEagohs, handleSelectBuyerEagoh],
   );
 
   // Defense-in-depth: only same-domain, non-dormant listings may render.
@@ -2920,6 +2956,11 @@ export default function MarketplaceScreen(): JSX.Element {
       <PurchaseSyncModal
         visible={!!purchaseModal}
         listing={purchaseModal}
+        buyerInfo={
+          purchaseModal && selectedBuyerEagoh
+            ? { name: selectedBuyerEagoh.name, domain: selectedBuyerDomain }
+            : null
+        }
         onClose={() => { setPurchaseModal(null); setShowSourceInfo(false); }}
         onConfirm={handlePurchaseConfirm}
         showSourceInfo={showSourceInfo}

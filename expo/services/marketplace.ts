@@ -1,5 +1,5 @@
 import { supabase } from "@/lib/supabase";
-import type { UserProfile, SubscriptionTier } from "@/services/profile";
+import type { SubscriptionTier } from "@/services/profile";
 import { hasProAccess } from "@/services/tiers";
 import type { EagohRecord } from "@/services/eagohs";
 import { getTeamById } from "@/data/teams";
@@ -1125,17 +1125,23 @@ export type PurchaseResult =
  * charged, zero vendor credits, zero purchase rows.
  *
  * The client NEVER directly deducts neurons, credits the vendor, or inserts
- * a purchase row. Idempotency: a deterministic key prevents duplicate
- * purchases from retries/double-taps.
+ * a purchase row. Idempotency: the WORKER derives a deterministic key from
+ * trusted/validated values (authenticated user + validated buyer EAGOH +
+ * listing + level + days) — the client never supplies one.
+ *
+ * Phase D2: the request identifies only the listing, the buyer EAGOH, the
+ * sync level, and the days. No client-selected domain, price, buyer user ID,
+ * tier, balance, or idempotency key is ever sent. The Worker verifies the
+ * buyer EAGOH and vendor listing server-side and enforces same-domain
+ * purchases before invoking the RPC.
  *
  * After the atomic transaction succeeds, best-effort post-purchase
  * operations (retention trigger, vendor sale notification) fire
  * non-fatally — their failure does NOT affect the completed transaction.
  */
 export async function purchaseSync(
-  buyerId: string,
-  buyerProfile: UserProfile,
   listingId: string,
+  buyerEagohId: string,
   syncLevel: SyncLevel,
   days: number,
 ): Promise<PurchaseResult> {
@@ -1143,10 +1149,8 @@ export async function purchaseSync(
     return { ok: false, error: "Duration must be between 1 and 5 days." };
   }
 
-  // ── Client-side balance pre-check (UX optimization; server-side check is authoritative) ──
-  const buyerTotal = (buyerProfile.edge_subscription ?? 0) + (buyerProfile.edge_purchased ?? 0);
-  if (buyerTotal <= 0) {
-    return { ok: false, error: "Insufficient Neurons. You need Neurons to make a purchase." };
+  if (!buyerEagohId) {
+    return { ok: false, error: "Select an active forged EAGOH to make this purchase." };
   }
 
   // ── Get JWT for worker authentication ──
@@ -1156,12 +1160,6 @@ export async function purchaseSync(
     return { ok: false, error: "Authentication required." };
   }
 
-  // ── Deterministic idempotency key ──
-  // Same key for the same purchase parameters prevents duplicate charges
-  // from retries/double-taps. The unique index only applies to active
-  // purchases, so a new purchase after expiration is allowed.
-  const idempotencyKey = `sync:${buyerId}:${listingId}:${syncLevel}:${days}`;
-
   try {
     const res = await fetch(`${FUNCTIONS_BASE_URL}/exchange/purchase`, {
       method: "POST",
@@ -1169,7 +1167,7 @@ export async function purchaseSync(
         "Content-Type": "application/json",
         Authorization: `Bearer ${jwt}`,
       },
-      body: JSON.stringify({ listingId, syncLevel, days, idempotencyKey }),
+      body: JSON.stringify({ listingId, buyerEagohId, syncLevel, days }),
     });
 
     const result = await res.json() as {

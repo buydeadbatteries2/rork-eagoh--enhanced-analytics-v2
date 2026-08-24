@@ -164,24 +164,64 @@ export function computeBannerCostForDates(
 // ── Active banners ─────────────────────────────────────────────────────
 
 /**
+ * Quotes a value inside a raw PostgREST `.or()` expression so domain IDs
+ * containing metacharacters are interpreted literally. Mirrors
+ * quotePostgrestValue() in marketplace.ts.
+ */
+function quotePostgrestValue(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+/**
  * Fetch currently active banners for a location. Banners are active when
  * `active = true` AND the current date falls between start_date and end_date.
+ *
+ * Phase D2 domain scoping:
+ *   - For location "marketplace", `selectedDomain` is REQUIRED and the query
+ *     is scoped to that domain (domain = selected, or domain IS NULL with
+ *     sport = selected — the legacy `domain ?? sport` fallback) BEFORE
+ *     `.limit(10)`. No domain → no marketplace banners, never all-domain data.
+ *   - Dormant vendor EAGOHs are excluded server-side; legacy NULL status
+ *     rows remain eligible (explicit IS NULL arm — `.neq` alone drops NULLs
+ *     under SQL three-valued logic).
+ *   - Home banners retain their current behavior unless a domain is
+ *     explicitly supplied.
  */
-export async function getActiveBanners(location: BannerLocation): Promise<EnrichedBanner[]> {
+export async function getActiveBanners(
+  location: BannerLocation,
+  selectedDomain?: string,
+): Promise<EnrichedBanner[]> {
   const today = new Date().toISOString().slice(0, 10);
+  const domain = selectedDomain?.trim() ?? "";
 
-  const { data: banners, error } = await supabase
+  // Marketplace sponsors are domain-scoped — no selection means no banners.
+  if (location === "marketplace" && !domain) return [];
+
+  let query = supabase
     .from("sponsored_banners")
     .select(`
       *,
       eagoh: eagohs!inner (
-        id, name, sport, image_url, image_thumb_url
+        id, name, domain, sport, status, image_url, image_thumb_url
       )
     `)
     .eq("location", location)
     .eq("active", true)
     .lte("start_date", today)
-    .gte("end_date", today)
+    .gte("end_date", today);
+
+  if (domain) {
+    const quotedDomain = quotePostgrestValue(domain);
+    query = query.or(
+      `domain.eq.${quotedDomain},and(domain.is.null,sport.eq.${quotedDomain})`,
+      { referencedTable: "eagoh" },
+    );
+  }
+
+  // Dormant vendor EAGOHs are never sponsored (legacy NULL status stays eligible).
+  query = query.or("status.is.null,status.neq.dormant", { referencedTable: "eagoh" });
+
+  const { data: banners, error } = await query
     .order("created_at", { ascending: false })
     .limit(10);
 
@@ -777,7 +817,12 @@ async function enrichBanners(banners: any[]): Promise<EnrichedBanner[]> {
     return {
       ...b,
       eagoh_name: (typeof eagoh.name === "string" ? eagoh.name : "Unnamed") || "Unnamed",
-      eagoh_domain: (typeof eagoh.sport === "string" ? eagoh.sport : "unknown") || "unknown",
+      // Phase D2: enrich from domain ?? sport (not sport alone) — legacy
+      // rows with a null domain fall back to their sport.
+      eagoh_domain:
+        typeof eagoh.domain === "string" && eagoh.domain
+          ? eagoh.domain
+          : typeof eagoh.sport === "string" ? eagoh.sport : "unknown",
       eagoh_image_url: resolveBannerEagohImage({
         image_url: typeof eagoh.image_url === "string" ? eagoh.image_url : null,
         image_thumb_url: typeof eagoh.image_thumb_url === "string" ? eagoh.image_thumb_url : null,

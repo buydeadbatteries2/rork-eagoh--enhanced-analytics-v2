@@ -183,6 +183,9 @@ function parseKnowledgeAttributes(
 export type PurchaseSyncModalProps = {
   visible: boolean;
   listing: EnrichedListing | null;
+  /** Informational only: the EAGOH the purchase will be attributed to. The
+   *  Worker remains authoritative on eligibility and domain. */
+  buyerInfo?: { name: string; domain: string } | null;
   onClose: () => void;
   onConfirm: (level: SyncLevel, days: number) => void;
   showSourceInfo: boolean;
@@ -197,6 +200,7 @@ export type PurchaseSyncModalProps = {
 export default function PurchaseSyncModal({
   visible,
   listing,
+  buyerInfo,
   onClose,
   onConfirm,
   showSourceInfo,
@@ -289,6 +293,16 @@ export default function PurchaseSyncModal({
               </Pressable>
             </View>
           </View>
+
+          {/* Phase D2: informational buyer line — the Worker is authoritative */}
+          {buyerInfo && (
+            <View style={styles.modalBuyerLine}>
+              <UserCheck color={palette.cyan} size={13} />
+              <Text style={styles.modalBuyerText} numberOfLines={1}>
+                Purchasing for: {buyerInfo.name} · {domainLabel(buyerInfo.domain)}
+              </Text>
+            </View>
+          )}
 
           {/* Sync level */}
           <Text style={styles.modalSectionLabel}>Sync Level</Text>
@@ -692,6 +706,19 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.08)",
   },
   modalSectionLabel: { color: palette.muted, fontSize: 11, fontWeight: "900", letterSpacing: 1, marginBottom: 4, marginTop: 12 },
+  modalBuyerLine: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: "rgba(34,211,238,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(34,211,238,0.25)",
+  },
+  modalBuyerText: { color: palette.cyan, fontSize: 11, fontWeight: "700", letterSpacing: 0.3, flexShrink: 1 },
   modalSectionDesc: { color: palette.text, fontSize: 12, fontWeight: "700", marginBottom: 8, lineHeight: 17 },
 
   sourceInfoOverlayAbsolute: {
