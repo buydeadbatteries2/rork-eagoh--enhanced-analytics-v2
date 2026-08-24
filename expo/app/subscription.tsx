@@ -1,10 +1,16 @@
 /**
  * Subscription / Paywall screen.
  *
- * Displays live RevenueCat subscription packages for Pro, Oracle Elite, and
- * Syndicate tiers. Each card shows tier name, localized App Store price,
- * billing period, monthly Neuron allocation, EAGOH limit, feature benefits
- * and a Subscribe button.
+ * Displays the EAGOH Pro subscription package — the single plan offered for
+ * new purchases. Legacy Oracle Elite and Syndicate packages remain mapped
+ * internally (never rendered as purchasable cards) so existing subscribers
+ * keep being recognized, Restore Purchases keeps working, and RevenueCat
+ * diagnostics stay accurate.
+ *
+ * The Pro card shows the localized App Store price, billing period, monthly
+ * Neuron allocation, included EAGOH count, and the unified Pro benefit list.
+ * Existing paid subscribers (Pro or legacy) see a disabled "Pro Access
+ * Active" button and never an enabled Subscribe button.
  *
  * States: Loading, Loaded, Configuration Error, No matching products,
  * Purchase in progress, Purchase cancelled, Purchase successful.
@@ -23,6 +29,7 @@ import {
   TIER_BENEFITS,
   SUBSCRIPTION_ENTITLEMENT_IDS,
   subscriptionTierFromPackageId,
+  hasProAccess,
   type SubscriptionTier,
 } from "@/services/tiers";
 import { getOfferings as getRcOfferings } from "@/services/revenuecat";
@@ -245,6 +252,20 @@ const styles = StyleSheet.create({
     borderColor: "rgba(0,200,130,0.30)",
   },
   successText: { color: palette.success, fontSize: 13, fontWeight: "800" as const, flex: 1 },
+
+  // Legacy subscriber banner (Oracle Elite / Syndicate)
+  legacyBanner: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 10,
+    padding: 12,
+    borderRadius: 5,
+    backgroundColor: "rgba(255,184,77,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(255,184,77,0.25)",
+  },
+  legacyBannerTitle: { color: palette.gold, fontSize: 12, fontWeight: "900" as const },
+  legacyBannerBody: { color: palette.muted, fontSize: 11, fontWeight: "600" as const, lineHeight: 16, marginTop: 2 },
 });
 
 // ── Sub-component: Preview Tier Card (Expo Go / preview) ──────────────────
@@ -279,7 +300,7 @@ function PreviewTierCard({ tier, onTestSubscribe, isSubscribing }: { tier: Exclu
           <View style={[styles.tierAllocationChip, { backgroundColor: c.soft, borderColor: c.border }]}>
             <BrainCircuit color={c.accent} size={13} />
             <View>
-              <Text style={[styles.tierAllocationLabel, { color: palette.muted }]}>MAX EAGOHS</Text>
+              <Text style={[styles.tierAllocationLabel, { color: palette.muted }]}>INCLUDED EAGOHS</Text>
               <Text style={[styles.tierAllocationValue, { color: c.accent }]}>{maxEagohs}</Text>
             </View>
           </View>
@@ -333,12 +354,16 @@ function TierCard({
   tier,
   rcPackage,
   isCurrent,
+  showCurrentBadge,
   onSubscribe,
   isPurchasing,
 }: {
   tier: Exclude<SubscriptionTier, "free">;
   rcPackage: PurchasesPackage | null;
+  /** True when ANY paid subscription (Pro or legacy) is active — disables the Subscribe button. */
   isCurrent: boolean;
+  /** True only when the user's actual tier is Pro — shows the "Current Plan" badge. */
+  showCurrentBadge: boolean;
   onSubscribe: (pkg: PurchasesPackage | null, t: Exclude<SubscriptionTier, "free">) => void;
   isPurchasing: boolean;
 }): JSX.Element {
@@ -373,7 +398,7 @@ function TierCard({
           </View>
         </View>
 
-        {isCurrent ? (
+        {showCurrentBadge ? (
           <View style={[styles.currentBadge, { backgroundColor: c.soft, borderColor: c.border, borderWidth: 1, alignSelf: "flex-start" as const }]}>
             <BadgeCheck color={c.accent} size={12} />
             <Text style={[styles.currentBadgeText, { color: c.accent }]}>Current Plan</Text>
@@ -394,7 +419,7 @@ function TierCard({
           <View style={[styles.tierAllocationChip, { backgroundColor: c.soft, borderColor: c.border }]}>
             <BrainCircuit color={c.accent} size={13} />
             <View>
-              <Text style={[styles.tierAllocationLabel, { color: palette.muted }]}>MAX EAGOHS</Text>
+              <Text style={[styles.tierAllocationLabel, { color: palette.muted }]}>INCLUDED EAGOHS</Text>
               <Text style={[styles.tierAllocationValue, { color: c.accent }]}>{maxEagohs}</Text>
             </View>
           </View>
@@ -410,24 +435,25 @@ function TierCard({
           ))}
         </View>
 
-        {/* Subscribe button — always rendered */}
+        {/* Subscribe button — disabled while any paid subscription is active,
+            or when the package has not loaded (never an enabled null-package button). */}
         {isCurrent ? (
           <Pressable
             disabled
             style={[styles.subscribeBtn, { backgroundColor: c.soft, borderColor: c.border }]}
           >
             <ShieldCheck color={c.accent} size={16} />
-            <Text style={[styles.subscribeBtnText, { color: c.accent }]}>Current Plan</Text>
+            <Text style={[styles.subscribeBtnText, { color: c.accent }]}>Pro Access Active</Text>
           </Pressable>
         ) : (
           <Pressable
             onPress={() => onSubscribe(rcPackage, tier)}
-            disabled={isPurchasing}
+            disabled={isPurchasing || !rcPackage}
             style={({ pressed }) => [
               styles.subscribeBtn,
               { backgroundColor: c.accent, borderColor: c.accent },
               pressed && { opacity: 0.8 },
-              isPurchasing && { opacity: 0.5 },
+              (isPurchasing || !rcPackage) && { opacity: 0.5 },
             ]}
           >
             {isPurchasing ? (
@@ -872,9 +898,9 @@ export default function SubscriptionScreen(): JSX.Element {
                 <View style={styles.heroIconWrap}>
                   <Crown color={palette.gold} size={28} />
                 </View>
-                <Text style={styles.heroTitle}>Choose Your Plan</Text>
+                <Text style={styles.heroTitle}>EAGOH Pro</Text>
                 <Text style={styles.heroSubtitle}>
-                  Store purchases require a development build or TestFlight. Previewing subscription tiers below.
+                  Unlock the complete EAGOH experience with one powerful subscription. Store purchases require a development build or TestFlight — previewing Pro below.
                 </Text>
               </View>
             </View>
@@ -897,23 +923,13 @@ export default function SubscriptionScreen(): JSX.Element {
               </View>
             ) : null}
 
-            {/* Preview tier cards */}
+            {/* Preview tier card — Pro only */}
             {!isTierLoading ? (
               <>
                 <PreviewTierCard
                   tier="pro"
                   onTestSubscribe={__DEV__ ? handleTestSubscribe : undefined}
                   isSubscribing={isPurchasing && purchasingTier === "pro"}
-                />
-                <PreviewTierCard
-                  tier="oracle_elite"
-                  onTestSubscribe={__DEV__ ? handleTestSubscribe : undefined}
-                  isSubscribing={isPurchasing && purchasingTier === "oracle_elite"}
-                />
-                <PreviewTierCard
-                  tier="syndicate"
-                  onTestSubscribe={__DEV__ ? handleTestSubscribe : undefined}
-                  isSubscribing={isPurchasing && purchasingTier === "syndicate"}
                 />
 
                 {/* Dev-only: Reset Test Subscription */}
@@ -946,7 +962,7 @@ export default function SubscriptionScreen(): JSX.Element {
     );
   }
 
-  // ── RevenueCat configured — always show tier cards ────────────────────
+  // ── RevenueCat configured — show the EAGOH Pro card ───────────────────
 
   return (
     <SafeAreaView edges={["top"]} style={styles.safe}>
@@ -966,9 +982,9 @@ export default function SubscriptionScreen(): JSX.Element {
             <View style={styles.heroIconWrap}>
               <Crown color={palette.gold} size={28} />
             </View>
-            <Text style={styles.heroTitle}>Choose Your Plan</Text>
+            <Text style={styles.heroTitle}>EAGOH Pro</Text>
             <Text style={styles.heroSubtitle}>
-              Unlock the full power of EAGOH intelligence. All plans include a monthly Neuron allocation, EAGOH slots, and exclusive features.
+              Unlock the complete EAGOH experience with one powerful subscription.
             </Text>
           </View>
         </View>
@@ -1001,8 +1017,10 @@ export default function SubscriptionScreen(): JSX.Element {
           </View>
         ) : null}
 
-        {/* No subscription products found or no current offering */}
-        {!stillLoading && rcSubPkgs.length === 0 ? (
+        {/* No Pro package found — subscriptions unavailable. Availability is
+            based on the PRO package specifically, not merely on any legacy
+            subscription package being returned. */}
+        {!stillLoading && !tierPackages.pro ? (
           <View style={styles.statusCenter}>
             <Coins color={palette.muted} size={36} />
             <Text style={styles.statusTitle}>Subscriptions Temporarily Unavailable</Text>
@@ -1016,27 +1034,31 @@ export default function SubscriptionScreen(): JSX.Element {
           </View>
         ) : null}
 
-        {/* Tier cards — always render, even if packages haven't loaded yet */}
+        {/* Legacy subscriber banner — existing Oracle Elite / Syndicate
+            subscribers keep their legacy billing and allocation; all EAGOH Pro
+            features are already included while that entitlement is active. */}
+        {currentTier === "oracle_elite" || currentTier === "syndicate" ? (
+          <View style={styles.legacyBanner}>
+            <ShieldCheck color={palette.gold} size={16} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.legacyBannerTitle}>
+                Legacy {TIER_LABELS[currentTier]} subscription active
+              </Text>
+              <Text style={styles.legacyBannerBody}>
+                Your existing subscription remains active and includes all EAGOH Pro features.
+              </Text>
+            </View>
+          </View>
+        ) : null}
+
+        {/* Pro card — the only plan offered for new purchases */}
         <TierCard
           tier="pro"
           rcPackage={tierPackages.pro}
-          isCurrent={currentTier === "pro" && !purchaseSuccess}
+          isCurrent={hasProAccess(currentTier) && !purchaseSuccess}
+          showCurrentBadge={currentTier === "pro" && !purchaseSuccess}
           onSubscribe={handleSubscribe}
           isPurchasing={isPurchasing && purchasingTier === "pro"}
-        />
-        <TierCard
-          tier="oracle_elite"
-          rcPackage={tierPackages.oracle_elite}
-          isCurrent={currentTier === "oracle_elite" && !purchaseSuccess}
-          onSubscribe={handleSubscribe}
-          isPurchasing={isPurchasing && purchasingTier === "oracle_elite"}
-        />
-        <TierCard
-          tier="syndicate"
-          rcPackage={tierPackages.syndicate}
-          isCurrent={currentTier === "syndicate" && !purchaseSuccess}
-          onSubscribe={handleSubscribe}
-          isPurchasing={isPurchasing && purchasingTier === "syndicate"}
         />
 
         {/* Restore purchases */}

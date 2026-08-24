@@ -22,6 +22,7 @@ import {
 import { ArrowLeft } from "lucide-react-native";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { subscriptionTierFromPackageId } from "@/services/tiers";
 
 type Status = "pass" | "fail" | "pending";
 
@@ -68,8 +69,8 @@ const STATIC_GROUPS: ChecklistGroup[] = [
     title: "Subscriptions (RevenueCat)",
     items: [
       { id: "sub-pro", label: "custom_pro_sub loads + purchasable", status: "pending", note: "Requires TestFlight" },
-      { id: "sub-oracle", label: "custom_oracle_elite_sub loads + purchasable", status: "pending", note: "Requires TestFlight" },
-      { id: "sub-syndicate", label: "custom_syndicate_sub loads + purchasable", status: "pending", note: "Requires TestFlight" },
+      { id: "sub-oracle-legacy", label: "Legacy Oracle Elite entitlement resolves and restores as Pro access", status: "pending", note: "Requires TestFlight" },
+      { id: "sub-syndicate-legacy", label: "Legacy Syndicate entitlement resolves and restores as Pro access", status: "pending", note: "Requires TestFlight" },
       { id: "sub-price-display", label: "Prices display (not 'Loading')", status: "pending", note: "Requires TestFlight" },
       { id: "sub-tier-update", label: "Tier updates after purchase", status: "pass", note: "Verified via RC listener" },
       { id: "sub-restore", label: "Entitlement restored after reinstall", status: "pending", note: "Requires TestFlight" },
@@ -243,8 +244,10 @@ function DynamicChecks(): ChecklistGroup {
     },
     {
       id: "dyn-sub-products",
-      label: "Subscription products loaded",
-      status: rc.subscriptionPackages.length >= 3 ? "pass" : rc.subscriptionPackages.length > 0 ? "pending" : "fail",
+      label: "Subscription products loaded (Pro package present)",
+      status: rc.subscriptionPackages.some((p) => subscriptionTierFromPackageId(p.identifier) === "pro")
+        ? "pass"
+        : rc.subscriptionPackages.length > 0 ? "pending" : "fail",
       note: `${rc.subscriptionPackages.length} packages`,
     },
     {

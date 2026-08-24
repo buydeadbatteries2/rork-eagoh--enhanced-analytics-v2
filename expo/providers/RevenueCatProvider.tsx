@@ -460,7 +460,13 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
     allOfferings,
     /** Available packages in the current offering. */
     packages,
-    /** Subscription packages only (custom_pro_sub, custom_oracle_elite_sub, custom_syndicate_sub). */
+    /**
+     * Subscription packages only (custom_pro_sub, custom_oracle_elite_sub,
+     * custom_syndicate_sub). Legacy Oracle Elite / Syndicate packages remain
+     * loaded internally for existing-subscriber recognition, Restore Purchases,
+     * and backend sync — only Pro is presented for new purchases on the
+     * subscription screen.
+     */
     subscriptionPackages,
     /** Consumable Neuron packages only (store_edge_*). @deprecated — use allNeuronPackages. */
     consumablePackages,
