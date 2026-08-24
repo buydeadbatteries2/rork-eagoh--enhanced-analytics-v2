@@ -759,6 +759,11 @@ export async function listActiveListings(
     );
   }
 
+  // 2b. Dormant vendor EAGOHs are never listed. Legacy NULL status rows
+  //     remain eligible (PostgREST .neq alone would drop NULL rows under
+  //     SQL three-valued logic, so the IS NULL arm is explicit).
+  query = query.or("status.is.null,status.neq.dormant", { referencedTable: "eagoh" });
+
   // 3. Generalist — team_focus_mode = "none" or null (missing is treated as "none")
   if (filters.generalist) {
     query = query.or(
@@ -820,10 +825,13 @@ export async function listActiveListings(
   const rawRows: (MarketplaceListingRow & { eagoh: EagohRecord | null })[] = (data ?? []) as any;
   if (rawRows.length === 0) return [];
 
-  // Filter out listings whose EAGOH has been deleted or is inaccessible due to RLS.
-  // With !inner this should already be handled by the database, but we keep
-  // this as defense-in-depth.
-  const rows = rawRows.filter((r) => r.eagoh && r.eagoh.id);
+  // Filter out listings whose EAGOH has been deleted, is inaccessible due to
+  // RLS, or is dormant. With !inner the first two are already handled by the
+  // database — every check here is defense-in-depth alongside the server-side
+  // domain + status filters applied before .range().
+  const rows = rawRows.filter(
+    (r) => r.eagoh && r.eagoh.id && r.eagoh.status !== "dormant",
+  );
   if (rows.length === 0) return [];
 
   const enriched = await bulkEnrichListings(rows);
@@ -1401,12 +1409,33 @@ export async function getListingById(listingId: string): Promise<EnrichedListing
   };
 }
 
-/** Get distinct domains and sports available in active listings (for filter chips). */
-export async function getActiveFilters(): Promise<{ domains: string[]; sports: string[]; ranks: string[] }> {
+/**
+ * Get distinct domains and sports available in active listings (for filter
+ * chips).
+ *
+ * Phase D1: metadata is scoped to the selected buyer-EAGOH domain. The query
+ * inner-joins active listings to their vendor EAGOH and filters to the
+ * selected domain BEFORE returning sport metadata, using the same legacy
+ * null-domain fallback (domain ?? sport) as the listing query. Dormant
+ * EAGOHs are excluded server-side; legacy NULL status rows stay eligible.
+ * Rank metadata is vendor-level and unaffected by the domain scope.
+ *
+ * Returns empty metadata when no domain is selected — never all-domain data.
+ */
+export async function getActiveFilters(
+  selectedDomain: string,
+): Promise<{ domains: string[]; sports: string[]; ranks: string[] }> {
+  if (!selectedDomain) return { domains: [], sports: [], ranks: [] };
+
+  const quotedDomain = quotePostgrestValue(selectedDomain);
   const { data, error } = await supabase
     .from("marketplace_listings")
-    .select("eagoh:eagoh_id(domain, sport)")
-    .eq("active", true);
+    .select("eagoh:eagoh_id!inner(domain, sport)")
+    .eq("active", true)
+    .or(
+      `and(or(domain.eq.${quotedDomain},and(domain.is.null,sport.eq.${quotedDomain})),or(status.is.null,status.neq.dormant))`,
+      { referencedTable: "eagoh" },
+    );
   if (error) return { domains: [], sports: [], ranks: [] };
 
   const domains = new Set<string>();

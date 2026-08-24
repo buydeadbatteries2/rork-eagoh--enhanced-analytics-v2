@@ -377,7 +377,6 @@ const VendorStatsCard = memo(function VendorStatsCard(): JSX.Element | null {
 function FilterPanel({
   filters,
   setFilters,
-  domains,
   sports,
   ranks,
   searchInput,
@@ -385,7 +384,6 @@ function FilterPanel({
 }: {
   filters: ListingFilters;
   setFilters: (f: ListingFilters) => void;
-  domains: string[];
   sports: string[];
   ranks: string[];
   searchInput: string;
@@ -425,12 +423,9 @@ function FilterPanel({
           </Pressable>
         )}
       </View>
-      {domains.length > 0 && (
-        <View>
-          <Text style={styles.filterLabel}>Domain</Text>
-          {renderChips(domains, filters.domain, (v) => setFilters({ ...filters, domain: v || undefined }))}
-        </View>
-      )}
+      {/* Phase D1: no Domain rail — the domain is controlled exclusively by
+          the selected buyer EAGOH and can never be cleared or switched via
+          these optional filters. "Clear" resets optional filters only. */}
       {sports.length > 0 && (
         <View>
           <Text style={styles.filterLabel}>Sport</Text>
@@ -1959,6 +1954,67 @@ const DomainListingSection = memo(function DomainListingSection({
 
 // ── Main Screen ────────────────────────────────────────────────────────
 
+// ── Phase D1: Selected Buyer-EAGOH Selector ──────────────────────────
+
+const BuyerEagohSelector = memo(function BuyerEagohSelector({
+  selected,
+  eligible,
+  onSelect,
+}: {
+  selected: EagohRecord;
+  eligible: EagohRecord[];
+  onSelect: (id: string) => void;
+}): JSX.Element {
+  const domain = selected.domain ?? selected.sport ?? "";
+  const showSwitcher = eligible.length > 1;
+
+  return (
+    <View style={styles.buyerSelectorCard}>
+      <View style={styles.buyerSelectorRow}>
+        <View style={styles.buyerSelectorImage}>
+          <OptimizedEagohImage
+            tone="cyan"
+            label={selected.name}
+            size="compact"
+            imageUrl={resolveMarketplaceEagohImage(selected)}
+          />
+        </View>
+        <View style={styles.buyerSelectorInfo}>
+          <Text style={styles.buyerSelectorLabel}>Browsing as</Text>
+          <Text style={styles.buyerSelectorName} numberOfLines={1}>{selected.name}</Text>
+          <Text style={styles.buyerSelectorDomain}>{domainLabel(domain)}</Text>
+        </View>
+        {showSwitcher && (
+          <View style={styles.buyerSelectorSwitchBadge}>
+            <ChevronDown color={palette.cyan} size={13} />
+            <Text style={styles.buyerSelectorSwitchText}>Switch</Text>
+          </View>
+        )}
+      </View>
+      {showSwitcher && (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRail}>
+          {eligible.map((e) => {
+            const isActive = e.id === selected.id;
+            return (
+              <Pressable
+                key={e.id}
+                onPress={() => onSelect(e.id)}
+                accessibilityRole="button"
+                accessibilityLabel={`Browse the Exchange as ${e.name}`}
+                style={[styles.chip, isActive && styles.activeChip]}
+              >
+                <Text style={[styles.chipText, isActive && styles.activeChipText]} numberOfLines={1}>
+                  {e.name}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+      )}
+    </View>
+  );
+});
+
 export default function MarketplaceScreen(): JSX.Element {
   const h = useHaptics();
   const router = useRouter();
@@ -1968,6 +2024,50 @@ export default function MarketplaceScreen(): JSX.Element {
   const { palette: pal } = useAppTheme();
 
   const queryClient = useQueryClient();
+
+  // ── Phase D1: selected-EAGOH Exchange browsing ─────────────────────
+  // The Exchange is browsed through one of the user's eligible EAGOHs. Only
+  // listings and rankings from that EAGOH's domain may be loaded or shown.
+  const { eagohs, isLoading: eagohsLoading } = useEagohs();
+  const [selectedBuyerEagohId, setSelectedBuyerEagohId] = useState<string | null>(null);
+
+  // Eligible buyer EAGOHs — same forged-EAGOH null semantics as EagohProvider:
+  // exclude default shells (is_default_shell === true, or null when not
+  // user-forged), exclude dormant EAGOHs (never mutated or deleted here), and
+  // require a usable domain via domain ?? sport.
+  const eligibleBuyerEagohs = useMemo<EagohRecord[]>(
+    () =>
+      (eagohs ?? []).filter((e) => {
+        if (e.is_default_shell === true) return false;
+        if (e.is_default_shell === null && e.is_user_forged === false) return false;
+        if (e.status === "dormant") return false;
+        return !!(e.domain ?? e.sport);
+      }),
+    [eagohs],
+  );
+
+  // Effective selection: the explicitly chosen EAGOH while it stays eligible,
+  // otherwise the first eligible EAGOH (auto-select when exactly one exists),
+  // and null when none exist. Derived — never mutates or deletes EAGOHs.
+  const selectedBuyerEagoh = useMemo<EagohRecord | null>(
+    () =>
+      eligibleBuyerEagohs.find((e) => e.id === selectedBuyerEagohId) ??
+      eligibleBuyerEagohs[0] ??
+      null,
+    [eligibleBuyerEagohs, selectedBuyerEagohId],
+  );
+  const selectedBuyerDomain = selectedBuyerEagoh?.domain ?? selectedBuyerEagoh?.sport ?? "";
+  // No listing/metadata/rankings request fires without a signed-in user, an
+  // eligible EAGOH, and a non-empty domain.
+  const canLoadBrowse = !!user?.id && !!selectedBuyerEagoh && selectedBuyerDomain.length > 0;
+
+  const handleSelectBuyerEagoh = useCallback(
+    (id: string) => {
+      h.selection();
+      setSelectedBuyerEagohId(id);
+    },
+    [h],
+  );
 
   const [filters, setFilters] = useState<ListingFilters>({});
   const [listings, setListings] = useState<EnrichedListing[]>([]);
@@ -2018,13 +2118,23 @@ export default function MarketplaceScreen(): JSX.Element {
 
   // ── React Query: cached marketplace listings ──────────────────────────
   // Keeps previous data visible while refetching after filter changes.
+  // ── Effective Browse filter: the selected EAGOH's domain is mandatory and
+  // always overrides any domain value inside the optional filter state ──
+  const browseFilters = useMemo<ListingFilters>(
+    () => ({ ...filters, domain: selectedBuyerDomain || undefined }),
+    [filters, selectedBuyerDomain],
+  );
+
   const listingsQuery = useQuery<EnrichedListing[]>({
-    queryKey: ["marketplace-listings", filters],
-    queryFn: () => listActiveListings(filters),
+    // Key includes the selected EAGOH + domain so results for different
+    // EAGOHs/domains can never share the wrong cache entry.
+    queryKey: ["marketplace-listings", selectedBuyerEagoh?.id ?? "none", selectedBuyerDomain, filters],
+    queryFn: () => listActiveListings(browseFilters),
     staleTime: 60_000,
     gcTime: 5 * 60_000,
-    placeholderData: (prev) => prev,
-    enabled: !!user?.id,
+    // No placeholderData: previous-domain data must never render as a
+    // placeholder while another domain loads.
+    enabled: canLoadBrowse,
   });
 
   // ── React Query: cached filter metadata ───────────────────────────────
@@ -2032,11 +2142,11 @@ export default function MarketplaceScreen(): JSX.Element {
   // a filter does NOT re-fetch filter metadata. Stale for 5 minutes, cached
   // for 30 minutes. A metadata failure does not prevent listings from rendering.
   const filterMetaQuery = useQuery<{ domains: string[]; sports: string[]; ranks: string[] }>({
-    queryKey: ["marketplace-filter-meta"],
-    queryFn: () => getActiveFilters(),
+    queryKey: ["marketplace-filter-meta", selectedBuyerDomain],
+    queryFn: () => getActiveFilters(selectedBuyerDomain),
     staleTime: 5 * 60_000,
     gcTime: 30 * 60_000,
-    enabled: !!user?.id,
+    enabled: canLoadBrowse,
   });
 
   // Sync React Query metadata into existing state so FilterPanel receives updates.
@@ -2052,11 +2162,40 @@ export default function MarketplaceScreen(): JSX.Element {
   const hasPriorDataRef = useRef(false);
   hasPriorDataRef.current = listings.length > 0;
 
+  // ── Phase D1: selected-EAGOH switch — hard reset of domain-scoped state ──
+  // Immediately prevents the previous EAGOH's listings from rendering, clears
+  // domain-specific enrichment maps, resets optional filters + search text, and
+  // drops rankings so they reload for the new domain. My Listings, Active
+  // Syncs, and Purchase History are account-wide and deliberately untouched.
+  const renderedSelectionRef = useRef<string>("");
+  useEffect(() => {
+    const key = selectedBuyerEagoh?.id ?? "";
+    if (renderedSelectionRef.current === key) return;
+    renderedSelectionRef.current = key;
+    setListings([]);
+    setRepMap(new Map());
+    setVendorMetricsMap(new Map());
+    setVendorRepMap(new Map());
+    setRankingsData([]);
+    setFilters({});
+    setSearchInput("");
+    setInitialLoading(!!selectedBuyerEagoh);
+    setFiltering(false);
+    setLoadError(false);
+  }, [selectedBuyerEagoh?.id]);
+
   // ── Browse-only load (listings only) ──
   // Filter metadata is loaded separately via the filterMetaQuery React Query.
   // This function fetches listing results only — no getActiveFilters() call.
   const loadBrowseData = useCallback(async () => {
-    if (!user?.id) { setInitialLoading(false); return; }
+    if (!user?.id || !selectedBuyerEagoh || !selectedBuyerDomain) {
+      // No eligible EAGOH → no listing request, no all-domain fallback.
+      setListings([]);
+      setInitialLoading(false);
+      setFiltering(false);
+      setLoadError(false);
+      return;
+    }
     const reqId = ++loadRequestId.current;
     const hasPriorData = hasPriorDataRef.current;
     if (!hasPriorData) {
@@ -2067,21 +2206,26 @@ export default function MarketplaceScreen(): JSX.Element {
     }
     try {
       const l = await queryClient.fetchQuery({
-        queryKey: ["marketplace-listings", filters],
-        queryFn: () => listActiveListings(filters),
+        queryKey: ["marketplace-listings", selectedBuyerEagoh.id, selectedBuyerDomain, filters],
+        queryFn: () => listActiveListings(browseFilters),
         staleTime: 60_000,
       });
       if (reqId !== loadRequestId.current) return;
-      setListings(l);
+      // Defense-in-depth: a card from another domain must never render, even
+      // if a stale previous-domain request somehow resolved.
+      const domainScoped = l.filter(
+        (li) => (li.eagoh?.domain ?? li.eagoh?.sport) === selectedBuyerDomain,
+      );
+      setListings(domainScoped);
       setLoadError(false);
       // Secondary data loads after cards are rendered (non-blocking)
-      const allEagohIds = [...new Set(l.map((li) => li.eagoh_id))];
+      const allEagohIds = [...new Set(domainScoped.map((li) => li.eagoh_id))];
       if (allEagohIds.length > 0) {
         getBulkReputations(allEagohIds)
           .then((m) => { if (reqId === loadRequestId.current) setRepMap(m); })
           .catch(() => undefined);
       }
-      const allVendorIds = [...new Set(l.map((li) => li.vendor_id))];
+      const allVendorIds = [...new Set(domainScoped.map((li) => li.vendor_id))];
       if (allVendorIds.length > 0) {
         fetchBulkPublicReputations(allVendorIds)
           .then((m) => { if (reqId === loadRequestId.current) setVendorRepMap(m); })
@@ -2100,7 +2244,7 @@ export default function MarketplaceScreen(): JSX.Element {
         setFiltering(false);
       }
     }
-  }, [user?.id, filters, queryClient]);
+  }, [user?.id, selectedBuyerEagoh, selectedBuyerDomain, filters, browseFilters, queryClient]);
 
   // ── Lazy tab loaders ──
   const loadMyListingsData = useCallback(async () => {
@@ -2177,6 +2321,46 @@ export default function MarketplaceScreen(): JSX.Element {
   useEffect(() => {
     loadBrowseData();
   }, [loadBrowseData]);
+
+  // ── Phase D1: Rankings are always scoped to the selected EAGOH's domain ──
+  // Loads lazily when the Rankings tab opens and reloads whenever the domain
+  // changes. A stale previous-domain response can never populate state.
+  const rankingsReqId = useRef(0);
+  const rankingsDomainRef = useRef<string>("");
+  useEffect(() => {
+    if (tab !== "rankings") return;
+    if (!selectedBuyerDomain) {
+      setRankingsData([]);
+      setRankingsLoading(false);
+      rankingsDomainRef.current = "";
+      return;
+    }
+    if (rankingsDomainRef.current === selectedBuyerDomain && rankingsData.length > 0) return;
+    const domain = selectedBuyerDomain;
+    const reqId = ++rankingsReqId.current;
+    setRankingsLoading(true);
+    getLeaderboard("top_vendors", { domain }, 10, 0)
+      .then((r) => {
+        if (reqId !== rankingsReqId.current) return;
+        rankingsDomainRef.current = domain;
+        setRankingsData(r.entries.map((e) => ({
+          rank: e.rank,
+          eagoh_id: e.eagoh_id,
+          eagoh_name: e.eagoh_name,
+          reputation_score: e.reputation_score,
+          rank_tier: e.rank_tier,
+          marketplace_trust: e.marketplace_trust,
+          sync_success: e.sync_success,
+          marketplace_sales: e.marketplace_sales,
+          owner_username: e.owner_username,
+        })));
+        setRankingsLoading(false);
+      })
+      .catch(() => {
+        if (reqId !== rankingsReqId.current) return;
+        setRankingsLoading(false);
+      });
+  }, [tab, selectedBuyerDomain, rankingsData.length]);
 
   // ── Debounced search: apply search term 400ms after typing stops ──
   useEffect(() => {
@@ -2350,25 +2534,6 @@ export default function MarketplaceScreen(): JSX.Element {
                       loadFn().finally(() => { loadingTabsRef.current.delete(newTab); });
                     }
                   }
-                  if (t.key === "rankings" && rankingsData.length === 0) {
-                    setRankingsLoading(true);
-                    getLeaderboard("top_vendors", {}, 10, 0)
-                      .then((r) => {
-                        setRankingsData(r.entries.map((e) => ({
-                          rank: e.rank,
-                          eagoh_id: e.eagoh_id,
-                          eagoh_name: e.eagoh_name,
-                          reputation_score: e.reputation_score,
-                          rank_tier: e.rank_tier,
-                          marketplace_trust: e.marketplace_trust,
-                          sync_success: e.sync_success,
-                          marketplace_sales: e.marketplace_sales,
-                          owner_username: e.owner_username,
-                        })));
-                        setRankingsLoading(false);
-                      })
-                      .catch(() => setRankingsLoading(false));
-                  }
                 }}
                 style={[styles.tabChip, tab === t.key && styles.tabChipActive]}
               >
@@ -2384,12 +2549,21 @@ export default function MarketplaceScreen(): JSX.Element {
           </ScrollView>
         )}
 
-        {/* Filters (only in marketplace browse) */}
-        {tab === "browse" && (
+        {/* Phase D1: selected-EAGOH Exchange selector — the domain is locked
+            to this EAGOH; switching resets filters/search and reloads. */}
+        {(tab === "browse" || tab === "rankings") && selectedBuyerEagoh && (
+          <BuyerEagohSelector
+            selected={selectedBuyerEagoh}
+            eligible={eligibleBuyerEagohs}
+            onSelect={handleSelectBuyerEagoh}
+          />
+        )}
+
+        {/* Filters (only in marketplace browse; domain locked to the selected EAGOH) */}
+        {tab === "browse" && selectedBuyerEagoh && (
           <FilterPanel
             filters={filters}
             setFilters={setFilters}
-            domains={filterMeta.domains}
             sports={filterMeta.sports}
             ranks={filterMeta.ranks}
             searchInput={searchInput}
@@ -2398,22 +2572,60 @@ export default function MarketplaceScreen(): JSX.Element {
         )}
       </View>
     ),
-    [filters, setFilters, filterMeta, tab, activeSyncs, isPaid, user?.id, searchInput],
+    [filters, setFilters, filterMeta, tab, activeSyncs, isPaid, user?.id, searchInput, selectedBuyerEagoh, eligibleBuyerEagohs, handleSelectBuyerEagoh],
+  );
+
+  // Defense-in-depth: only same-domain, non-dormant listings may render.
+  const domainListings = useMemo(
+    () =>
+      selectedBuyerDomain
+        ? listings.filter(
+            (l) =>
+              (l.eagoh?.domain ?? l.eagoh?.sport) === selectedBuyerDomain &&
+              l.eagoh?.status !== "dormant",
+          )
+        : [],
+    [listings, selectedBuyerDomain],
   );
 
   // Group listings by domain, sorted by most listings first
   const domainGroups = useMemo(() => {
     const groups = new Map<string, EnrichedListing[]>();
-    for (const l of listings) {
+    for (const l of domainListings) {
       const dom = l.eagoh?.domain ?? l.eagoh?.sport ?? "other";
       if (!groups.has(dom)) groups.set(dom, []);
       groups.get(dom)!.push(l);
     }
     return [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
-  }, [listings]);
+  }, [domainListings]);
 
   const renderListings = () => {
+    // ── Phase D1: an eligible non-dormant forged EAGOH is required to browse
+    // domain-matched listings and rankings. No request fires in this state
+    // and there is no all-domain fallback. Account tabs stay functional. ──
+    const noEagohState = !selectedBuyerEagoh || !selectedBuyerDomain ? (
+      eagohsLoading ? (
+        <View style={styles.loadingWrap}>
+          <ActivityIndicator color={palette.cyan} size="large" />
+          <Text style={styles.loadingTitle}>Loading your EAGOHs...</Text>
+        </View>
+      ) : (
+        <View style={styles.emptyWrap}>
+          <PackageOpen color={palette.muted} size={40} />
+          <Text style={styles.emptyTitle}>An Active EAGOH Is Required</Text>
+          <Text style={styles.emptyBody}>
+            You need an active forged EAGOH to browse its domain-matched listings and rankings on the Exchange.
+          </Text>
+          <Pressable onPress={() => router.push("/(tabs)/forge" as never)} style={({ pressed }) => [styles.emptyActionBtn, pressed && { opacity: 0.8 }]}>
+            <PlusCircle color={palette.void} size={16} />
+            <Text style={styles.emptyActionText}>Forge an EAGOH</Text>
+          </Pressable>
+        </View>
+      )
+    ) : null;
+
     if (tab === "browse") {
+      if (noEagohState) return noEagohState;
       // ── Initial load: loading text + skeleton placeholders ──
       if (initialLoading && listings.length === 0) {
         if (loadError) {
@@ -2591,6 +2803,7 @@ export default function MarketplaceScreen(): JSX.Element {
     }
 
     if (tab === "rankings") {
+      if (noEagohState) return noEagohState;
       if (rankingsLoading) {
         return (
           <View style={styles.loadingWrap}>
@@ -2910,6 +3123,42 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   promoteCtaBtnText: { color: palette.void, fontSize: 12, fontWeight: "900" },
+
+  // Phase D1: selected buyer-EAGOH Exchange selector
+  buyerSelectorCard: {
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "rgba(54,245,255,0.22)",
+    backgroundColor: "rgba(10,22,40,0.60)",
+    padding: 12,
+    gap: 10,
+  },
+  buyerSelectorRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  buyerSelectorImage: {
+    width: 44,
+    height: 54,
+    borderRadius: 5,
+    overflow: "hidden",
+    borderWidth: 1,
+    borderColor: palette.line,
+    backgroundColor: "#03060B",
+  },
+  buyerSelectorInfo: { flex: 1, gap: 1 },
+  buyerSelectorLabel: { color: palette.muted, fontSize: 10, fontWeight: "800", letterSpacing: 0.4 },
+  buyerSelectorName: { color: palette.text, fontSize: 15, fontWeight: "900" },
+  buyerSelectorDomain: { color: palette.cyan, fontSize: 11, fontWeight: "800" },
+  buyerSelectorSwitchBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    borderWidth: 1,
+    borderColor: "rgba(54,245,255,0.28)",
+    borderRadius: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: "rgba(54,245,255,0.08)",
+  },
+  buyerSelectorSwitchText: { color: palette.cyan, fontSize: 10, fontWeight: "900" },
 
   // Filters
   filterPanel: {
