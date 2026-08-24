@@ -11122,30 +11122,63 @@ function entitlementToTier(entId: string): string | null {
 const REVENUECAT_SUBSCRIBERS_URL = "https://api.revenuecat.com/v1/subscribers";
 const REVENUECAT_REQUEST_TIMEOUT_MS = 8000;
 
-/** Subset of RevenueCat entitlement info needed for tier resolution. */
-type RevenueCatEntitlementInfo = {
-  expires_date?: string | null;
-  grace_period_expires_date?: string | null;
-};
+/** Strict evaluation verdict for a RECOGNIZED RevenueCat entitlement. */
+type RevenueCatEntitlementEvaluation =
+  | { ok: true; active: boolean }
+  | { ok: false };
 
 type RevenueCatTierVerification =
   | { ok: true; tier: string; recognizedEntitlementId: string | null }
   | { ok: false; failure: string; status?: number };
 
-/** An entitlement is active when it has no expiry, a future expiry, or a
- *  future billing-grace-period expiry. */
-function isRevenueCatEntitlementActive(ent: RevenueCatEntitlementInfo): boolean {
+/** Strictly validate a RECOGNIZED RevenueCat entitlement entry and decide
+ *  whether it is active.
+ *
+ *  expires_date: explicit `null` → lifetime (active). A missing key, wrong
+ *  type, or unparseable date string → malformed (entire verification fails).
+ *  `undefined` is NEVER interpreted as lifetime.
+ *
+ *  grace_period_expires_date: optional. When present and non-null it must be
+ *  a valid date string; anything else → malformed.
+ *
+ *  Active = lifetime, future expires_date, or future grace period. A valid
+ *  past expiration without an active grace period → expired. */
+function evaluateRevenueCatEntitlement(raw: unknown): RevenueCatEntitlementEvaluation {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false };
+
+  const ent = raw as Record<string, unknown>;
+
+  if (!("expires_date" in ent)) return { ok: false };
+  const expiresRaw = ent.expires_date;
+  let expiresMs: number | null; // null = explicit lifetime
+  if (expiresRaw === null) {
+    expiresMs = null;
+  } else if (typeof expiresRaw === "string") {
+    const parsed = Date.parse(expiresRaw);
+    if (Number.isNaN(parsed)) return { ok: false };
+    expiresMs = parsed;
+  } else {
+    return { ok: false };
+  }
+
+  let graceMs: number | null = null; // null = no grace period in effect
+  if ("grace_period_expires_date" in ent) {
+    const graceRaw = ent.grace_period_expires_date;
+    if (graceRaw === null) {
+      graceMs = null;
+    } else if (typeof graceRaw === "string") {
+      const parsed = Date.parse(graceRaw);
+      if (Number.isNaN(parsed)) return { ok: false };
+      graceMs = parsed;
+    } else {
+      return { ok: false };
+    }
+  }
+
   const now = Date.now();
-  if (ent.expires_date == null) return true; // lifetime / no expiry
-  if (typeof ent.expires_date === "string") {
-    const expires = Date.parse(ent.expires_date);
-    if (!Number.isNaN(expires) && expires > now) return true;
-  }
-  if (typeof ent.grace_period_expires_date === "string") {
-    const grace = Date.parse(ent.grace_period_expires_date);
-    if (!Number.isNaN(grace) && grace > now) return true;
-  }
-  return false;
+  if (expiresMs === null || expiresMs > now) return { ok: true, active: true };
+  if (graceMs !== null && graceMs > now) return { ok: true, active: true };
+  return { ok: true, active: false };
 }
 
 /** Query RevenueCat for the subscriber and resolve the verified tier.
@@ -11183,10 +11216,18 @@ async function fetchVerifiedRevenueCatTier(
     let tier = "free";
     let recognizedEntitlementId: string | null = null;
     for (const [entId, raw] of Object.entries(entitlements as Record<string, unknown>)) {
-      if (!raw || typeof raw !== "object") continue;
-      if (!isRevenueCatEntitlementActive(raw as RevenueCatEntitlementInfo)) continue;
       const mapped = entitlementToTier(entId);
-      if (mapped && (TIER_PRIORITY_SERVER[mapped] ?? 0) > (TIER_PRIORITY_SERVER[tier] ?? 0)) {
+      // Unrecognized entitlement identifiers are ignored without parsing their
+      // contents — only RECOGNIZED entitlements undergo strict validation.
+      if (!mapped) continue;
+      const verdict = evaluateRevenueCatEntitlement(raw);
+      if (!verdict.ok) {
+        // A malformed recognized entitlement — refuse to guess. The caller
+        // returns a temporary error and makes ZERO database changes.
+        return { ok: false, failure: "malformed_response" };
+      }
+      if (!verdict.active) continue;
+      if ((TIER_PRIORITY_SERVER[mapped] ?? 0) > (TIER_PRIORITY_SERVER[tier] ?? 0)) {
         tier = mapped;
         recognizedEntitlementId = entId;
       }
