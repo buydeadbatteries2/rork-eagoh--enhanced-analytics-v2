@@ -185,11 +185,12 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
   }, [invalidateOfferings, invalidateCustomerInfo]);
 
   // ── Backend subscription sync (trusted) ─────────────────────────────
-  // The client NEVER writes subscription_tier to Supabase directly.
-  // All tier changes and neuron grants go through the /subscription/sync
-  // backend endpoint which verifies the RevenueCat entitlements.
+  // The client NEVER writes subscription_tier to Supabase directly, and it
+  // sends NO entitlement data — the backend independently verifies the
+  // user's RevenueCat entitlements via RevenueCat's server API and grants
+  // neurons idempotently. The only client input is the Supabase JWT.
   const syncSubscription = useCallback(
-    async (customerInfo: CustomerInfo | null): Promise<void> => {
+    async (): Promise<void> => {
       if (!user?.id || !configured) return;
       // ── Coordination lock: skip if a sync is already in flight ──
       // This prevents duplicate execution when both the purchase handler
@@ -201,10 +202,7 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
       }
       syncInProgressRef.current = true;
       try {
-        const activeEnts = customerInfo?.entitlements?.active
-          ? Object.keys(customerInfo.entitlements.active)
-          : [];
-        const result = await syncSubscriptionWithBackend(activeEnts);
+        const result = await syncSubscriptionWithBackend();
         if (result.ok && (result.tierChanged || result.allocationGranted > 0)) {
           // Invalidate the profile cache so the UI refreshes immediately.
           // Use null-safe handling — the profile query may not be mounted.
@@ -234,10 +232,11 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
       // transaction IDs, tokens, or full user IDs.
       logEntitlementDiagnostics(newInfo, "CustomerInfoListener");
       queryClient.setQueryData(customerInfoKey, newInfo);
-      // Trigger backend sync — the backend verifies entitlements and grants
-      // neurons idempotently. The listener is NOT permission to grant neurons
-      // without backend idempotency.
-      void syncSubscription(newInfo);
+      // Trigger backend sync — the backend independently verifies
+      // entitlements with RevenueCat and grants neurons idempotently. The
+      // listener is NOT permission to grant neurons without backend
+      // idempotency.
+      void syncSubscription();
     });
 
     return () => {
@@ -264,7 +263,7 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
           queryClient.setQueryData(customerInfoKey, info);
           queryClient.invalidateQueries({ queryKey: offeringsKey });
           // Sync the subscription state with the backend after login
-          void syncSubscription(info);
+          void syncSubscription();
           if (__DEV__) {
             const tier = getRevenueCatSubscriptionTier(info);
             console.log("[RevenueCat] Logged in — tier:", tier);
@@ -296,7 +295,7 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
       // Sync with backend — verifies entitlement and grants neurons.
       // The syncSubscription lock prevents duplicate execution when the
       // CustomerInfoUpdateListener also fires for this same purchase.
-      void syncSubscription(result.customerInfo);
+      void syncSubscription();
     },
   });
 
@@ -322,7 +321,7 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
     onSuccess: (info) => {
       queryClient.setQueryData(customerInfoKey, info);
       // Sync with backend — verifies entitlement and grants missing neurons
-      void syncSubscription(info);
+      void syncSubscription();
     },
   });
 
@@ -343,7 +342,7 @@ export const [RevenueCatProvider, useRevenueCat] = createContextHook(() => {
       }
       return logInRevenueCat(uid).then((info) => {
         queryClient.setQueryData(customerInfoKey, info);
-        void syncSubscription(info);
+        void syncSubscription();
         return info;
       });
     },

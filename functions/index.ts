@@ -76,6 +76,8 @@ type Env = {
   SUPABASE_URL?: string;
   SUPABASE_ANON_KEY?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string;
+  /** RevenueCat SECRET API key for server-side entitlement verification. Server-only — never expose to clients or logs. */
+  REVENUECAT_SECRET_API_KEY?: string;
   /** When "true", the worker honours dev_test_subscriptions rows for Expo Go/Rork testing. Never set in production. */
   ENABLE_DEV_TEST_SUBSCRIPTIONS?: string;
 };
@@ -11078,8 +11080,9 @@ export default {
 };
 
 // ── Subscription Sync: trusted backend endpoint ─────────────────────────────
-// Verifies RevenueCat entitlements server-side, updates the Supabase tier,
-// and grants the billing-period neuron allocation with an idempotency key.
+// Independently verifies RevenueCat entitlements via RevenueCat's REST API
+// (never client-supplied claims), updates the Supabase tier, and grants the
+// billing-period neuron allocation with an idempotency key.
 // The client never grants subscription neurons directly.
 
 const TIER_MONTHLY_ALLOCATION_SERVER: Record<string, number> = {
@@ -11108,6 +11111,95 @@ function entitlementToTier(entId: string): string | null {
   return null;
 }
 
+// ── Server-side RevenueCat verification (Phase S1) ─────────────────────────
+// /subscription/sync must NEVER trust client-supplied entitlement identifiers
+// or tiers. The Worker queries RevenueCat's REST API directly using the
+// authenticated Supabase user ID as the RevenueCat App User ID (the app calls
+// Purchases.logIn(user.id), so the identifiers match). The secret API key is
+// used only for this HTTPS request to RevenueCat and is never logged,
+// returned to clients, or sent anywhere else.
+
+const REVENUECAT_SUBSCRIBERS_URL = "https://api.revenuecat.com/v1/subscribers";
+const REVENUECAT_REQUEST_TIMEOUT_MS = 8000;
+
+/** Subset of RevenueCat entitlement info needed for tier resolution. */
+type RevenueCatEntitlementInfo = {
+  expires_date?: string | null;
+  grace_period_expires_date?: string | null;
+};
+
+type RevenueCatTierVerification =
+  | { ok: true; tier: string; recognizedEntitlementId: string | null }
+  | { ok: false; failure: string; status?: number };
+
+/** An entitlement is active when it has no expiry, a future expiry, or a
+ *  future billing-grace-period expiry. */
+function isRevenueCatEntitlementActive(ent: RevenueCatEntitlementInfo): boolean {
+  const now = Date.now();
+  if (ent.expires_date == null) return true; // lifetime / no expiry
+  if (typeof ent.expires_date === "string") {
+    const expires = Date.parse(ent.expires_date);
+    if (!Number.isNaN(expires) && expires > now) return true;
+  }
+  if (typeof ent.grace_period_expires_date === "string") {
+    const grace = Date.parse(ent.grace_period_expires_date);
+    if (!Number.isNaN(grace) && grace > now) return true;
+  }
+  return false;
+}
+
+/** Query RevenueCat for the subscriber and resolve the verified tier.
+ *  Highest-tier-wins across all active recognized entitlements. Legacy tiers
+ *  and Test Store aliases are honored only when RevenueCat itself reports
+ *  them in the verified server response. */
+async function fetchVerifiedRevenueCatTier(
+  userId: string,
+  secretApiKey: string,
+): Promise<RevenueCatTierVerification> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REVENUECAT_REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${REVENUECAT_SUBSCRIBERS_URL}/${encodeURIComponent(userId)}`, {
+      headers: { Authorization: `Bearer ${secretApiKey}` },
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      return { ok: false, failure: "revenuecat_http_error", status: res.status };
+    }
+
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      return { ok: false, failure: "malformed_response" };
+    }
+
+    const subscriber = (body as { subscriber?: unknown } | null)?.subscriber;
+    const entitlements = (subscriber as { entitlements?: unknown } | null)?.entitlements;
+    if (!entitlements || typeof entitlements !== "object" || Array.isArray(entitlements)) {
+      return { ok: false, failure: "malformed_response" };
+    }
+
+    let tier = "free";
+    let recognizedEntitlementId: string | null = null;
+    for (const [entId, raw] of Object.entries(entitlements as Record<string, unknown>)) {
+      if (!raw || typeof raw !== "object") continue;
+      if (!isRevenueCatEntitlementActive(raw as RevenueCatEntitlementInfo)) continue;
+      const mapped = entitlementToTier(entId);
+      if (mapped && (TIER_PRIORITY_SERVER[mapped] ?? 0) > (TIER_PRIORITY_SERVER[tier] ?? 0)) {
+        tier = mapped;
+        recognizedEntitlementId = entId;
+      }
+    }
+    return { ok: true, tier, recognizedEntitlementId };
+  } catch (err) {
+    const aborted = err instanceof Error && err.name === "AbortError";
+    return { ok: false, failure: aborted ? "timeout" : "network_error" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function handleSubscriptionSync(request: Request, env: Env): Promise<Response> {
   if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
     return jsonResponse({ ok: false, error: "Backend not configured." }, 503);
@@ -11126,44 +11218,53 @@ async function handleSubscriptionSync(request: Request, env: Env): Promise<Respo
     return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
   }
 
-  // ── Parse optional body (client sends entitlements from CustomerInfo) ──
-  let payload: { entitlements?: string[] } = {};
-  try {
-    const body = await request.json();
-    if (body && typeof body === "object") {
-      payload = body as { entitlements?: string[] };
-    }
-  } catch {
-    // Body is optional — sync can be triggered without it
+  // ── Server-side RevenueCat verification (Phase S1) ──
+  // The ONLY client input used is the authenticated Supabase JWT. Any request
+  // body is ignored — client-supplied entitlement identifiers, tiers, or
+  // balances are never a source of authority.
+  const rcSecret = env.REVENUECAT_SECRET_API_KEY;
+  if (!rcSecret) {
+    // Verification impossible — refuse with ZERO database changes.
+    return jsonResponse(
+      { ok: false, error: "Subscription verification unavailable. Please try again later." },
+      503,
+    );
   }
 
-  // ── Derive the verified tier from the client-supplied entitlement list ──
-  // The client sends the active entitlement IDs from result.customerInfo.
-  // We do NOT trust a raw tier name — we derive it from the entitlement IDs.
-  //
-  // IMPORTANT: This handles temporary entitlements correctly. RevenueCat may
-  // grant short-lived temporary entitlements during Apple receipt-server
-  // outages. The entitlement IDENTIFIER is still pro_subscription,
-  // oracle_elite_subscription, or syndicate_subscription — we resolve the tier
-  // from that exact identifier regardless of whether the entitlement is
-  // temporary or permanent. We NEVER convert a higher tier to Pro.
-  //
-  // If the entitlement identifier is not recognized, we do NOT default to Pro.
-  // We preserve the user's current tier and let the client show a verification
-  // pending message. Apple/RevenueCat will replay the receipt later.
-  const activeEntitlements: string[] = Array.isArray(payload.entitlements) ? payload.entitlements : [];
-
-  let resolvedTier = "free";
-  let recognizedEntitlementId: string | null = null;
-  for (const entId of activeEntitlements) {
-    const tier = entitlementToTier(entId);
-    if (tier && (TIER_PRIORITY_SERVER[tier] ?? 0) > (TIER_PRIORITY_SERVER[resolvedTier] ?? 0)) {
-      resolvedTier = tier;
-      recognizedEntitlementId = entId;
-    }
+  // The app calls Purchases.logIn(user.id), so the authenticated Supabase
+  // user ID IS the RevenueCat App User ID.
+  const verification = await fetchVerifiedRevenueCatTier(userId, rcSecret);
+  if (!verification.ok) {
+    // RevenueCat timed out, errored, or returned malformed data — make ZERO
+    // database changes and never downgrade an existing subscriber. No
+    // fallback to client entitlements, dev test subscriptions, or the stored
+    // profile tier.
+    console.warn("[subscription-sync] RevenueCat verification failed", {
+      userIdPrefix: userId.slice(0, 8),
+      failure: verification.failure,
+      status: verification.status,
+    });
+    return jsonResponse(
+      { ok: false, error: "Subscription verification unavailable. Please try again later." },
+      503,
+    );
   }
 
-  // ── Fetch current profile (BEFORE tier preservation logic) ──
+  // Verified tier — derived ONLY from RevenueCat's server response. If
+  // RevenueCat responds successfully but reports no recognized active paid
+  // entitlement, the verified tier is free; a paid tier already stored in
+  // profiles is NOT preserved on its own. Active admin overrides live on the
+  // profile and are resolved separately — this endpoint never touches them.
+  const verifiedTier = verification.tier;
+  const recognizedEntitlementId = verification.recognizedEntitlementId;
+
+  console.log("[subscription-sync]", {
+    userIdPrefix: userId.slice(0, 8),
+    resolvedTier: verifiedTier,
+    recognizedEntitlementId,
+  });
+
+  // ── Fetch current profile ──
   const { data: profileRow, error: profileErr } = await serviceClient
     .from("profiles")
     .select("subscription_tier, edge_subscription, edge_purchased, last_rollover_at, last_allocation")
@@ -11179,31 +11280,6 @@ async function handleSubscriptionSync(request: Request, env: Env): Promise<Respo
   const currentSub = (profileRow as { edge_subscription: number | null }).edge_subscription ?? 0;
   const currentPurch = (profileRow as { edge_purchased: number | null }).edge_purchased ?? 0;
   const currentLastAllocation = (profileRow as { last_allocation: number | null }).last_allocation ?? 0;
-
-  // If no recognized entitlement was found but the user previously had a paid
-  // tier, PRESERVE the existing tier temporarily (receipt replay in progress).
-  // Do NOT downgrade to free or force-grant Pro. The idempotency check below
-  // prevents duplicate neuron grants when the replayed receipt arrives.
-  let verifiedTier = resolvedTier;
-  if (resolvedTier === "free" && currentTier !== "free") {
-    const hasUnrecognizedEnt = activeEntitlements.length > 0 && !recognizedEntitlementId;
-    if (hasUnrecognizedEnt) {
-      verifiedTier = currentTier;
-      console.log("[subscription-sync] unrecognized entitlement — preserving current tier", {
-        userIdPrefix: userId.slice(0, 8),
-        currentTier,
-        entitlements: activeEntitlements,
-      });
-    }
-  }
-
-  console.log("[subscription-sync]", {
-    userIdPrefix: userId.slice(0, 8),
-    entitlements: activeEntitlements,
-    recognizedEntitlementId,
-    resolvedTier,
-    verifiedTier,
-  });
 
   // ── Determine if a tier change occurred ──
   const tierChanged = currentTier !== verifiedTier;

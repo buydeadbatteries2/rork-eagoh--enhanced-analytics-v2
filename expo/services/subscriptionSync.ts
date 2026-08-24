@@ -1,10 +1,12 @@
 /**
  * Subscription sync service — calls the trusted backend /subscription/sync
- * endpoint which verifies RevenueCat entitlements, updates the Supabase tier,
- * and grants billing-period neuron allocations with idempotency.
+ * endpoint which independently verifies RevenueCat entitlements via
+ * RevenueCat's server API, updates the Supabase tier, and grants
+ * billing-period neuron allocations with idempotency.
  *
- * The mobile client NEVER grants subscription neurons directly. All tier
- * changes and neuron grants go through this backend endpoint.
+ * The mobile client NEVER grants subscription neurons directly, and it
+ * NEVER sends entitlement identifiers, tiers, or balances. The only client
+ * input the backend accepts is the authenticated Supabase JWT.
  */
 
 import { supabase } from "@/lib/supabase";
@@ -28,16 +30,13 @@ export type SubscriptionSyncResult = {
 /**
  * Sync the user's subscription state with the backend.
  *
- * Sends the active RevenueCat entitlement IDs (from CustomerInfo) to the
- * backend, which derives the tier, updates Supabase, and grants neurons
- * idempotently. Returns the updated tier and balance so the client can
- * refresh immediately without a restart.
- *
- * @param activeEntitlements - The keys of customerInfo.entitlements.active
+ * Sends ONLY the authenticated Supabase JWT — no entitlement identifiers,
+ * tiers, or balances. The backend independently verifies the user's
+ * RevenueCat entitlements via RevenueCat's server API, derives the tier,
+ * updates Supabase, and grants neurons idempotently. Returns the updated
+ * tier and balance so the client can refresh immediately without a restart.
  */
-export async function syncSubscriptionWithBackend(
-  activeEntitlements: string[],
-): Promise<SubscriptionSyncResult> {
+export async function syncSubscriptionWithBackend(): Promise<SubscriptionSyncResult> {
   if (!FUNCTIONS_BASE_URL) {
     return {
       ok: false,
@@ -68,10 +67,8 @@ export async function syncSubscriptionWithBackend(
     const res = await fetch(`${FUNCTIONS_BASE_URL}/subscription/sync`, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
-      body: JSON.stringify({ entitlements: activeEntitlements }),
     });
 
     const data = (await res.json()) as SubscriptionSyncResult;
