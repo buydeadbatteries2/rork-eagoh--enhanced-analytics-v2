@@ -44,6 +44,7 @@ export type EdgeReason =
   | "purchase"
   | "faction_slot_expansion"
   | "sponsored_banner"
+  | "eagoh_slot_purchase"
   | "manual";
 
 export type EdgeTransactionKind = "deduction" | "addition" | "rollover" | "purchase";

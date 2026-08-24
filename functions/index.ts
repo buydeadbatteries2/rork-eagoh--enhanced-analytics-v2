@@ -11062,6 +11062,17 @@ export default {
       return handleExchangeSaleNotify(request, env);
     }
 
+    // Atomic EAGOH slot purchase: calls the purchase_eagoh_slot_atomic
+    // PostgreSQL RPC which does everything in one transaction — profile lock,
+    // idempotency check, trusted tier resolution, entitlement lock, capacity
+    // + balance checks, Neuron deduction (subscription first), slot increment,
+    // and audit/ledger rows. The price (750) is hardcoded server-side; the
+    // client supplies only an idempotency key. The RPC is service_role-only,
+    // so this route is the single permitted path.
+    if (url.pathname === "/eagoh-slots/purchase" && request.method === "POST") {
+      return handleEagohSlotPurchase(request, env);
+    }
+
     return jsonResponse({ ok: false, error: "Not found" }, 404);
   },
 };
@@ -11721,6 +11732,114 @@ async function handleExchangePurchase(request: Request, env: Env): Promise<Respo
     ok: true,
     duplicate: result.duplicate === true,
     purchase: result.purchase,
+    newBalance: result.new_balance,
+  });
+}
+
+// ── Atomic EAGOH Slot Purchase ───────────────────────────────────────────
+// Calls the purchase_eagoh_slot_atomic PostgreSQL RPC which does EVERYTHING
+// in one transaction: profile lock → idempotency check → trusted tier
+// resolution → entitlement lock → capacity check → balance check → Neuron
+// deduction (subscription first, purchased second) → slot increment → audit
+// + ledger rows. If any step fails, the entire transaction rolls back — zero
+// Neurons charged, zero slots granted.
+//
+// Security: userId comes ONLY from the verified JWT. The client never
+// supplies the price (750, hardcoded server-side), the slot quantity (always
+// exactly 1), or the tier. The RPC is executable only by service_role, so
+// this route is the single permitted path to it.
+
+async function handleEagohSlotPurchase(request: Request, env: Env): Promise<Response> {
+  if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
+    return jsonResponse({ ok: false, error: "Backend not configured." }, 503);
+  }
+
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const jwt = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+  if (!jwt) return jsonResponse({ ok: false, error: "Authentication required." }, 401);
+
+  const supabase = createAuthedClient(env, jwt);
+  const userId = await verifyAuth(supabase, jwt);
+  if (!userId) return jsonResponse({ ok: false, error: "Invalid auth." }, 401);
+
+  const serviceClient = getServiceRoleClient(env);
+  if (!serviceClient) return jsonResponse({ ok: false, error: "Server configuration error." }, 503);
+
+  let payload: { idempotencyKey?: unknown };
+  try {
+    payload = (await request.json()) as typeof payload;
+  } catch {
+    return jsonResponse({ ok: false, error: "Invalid request." }, 400);
+  }
+
+  // Require a client-supplied idempotency key so app retries reuse the same
+  // key and the RPC returns the original result instead of double-charging.
+  // Never accept userId, tier, slot count, or price from the request body.
+  const idempotencyKey = typeof payload.idempotencyKey === "string"
+    ? payload.idempotencyKey.trim()
+    : "";
+  if (!idempotencyKey) {
+    return jsonResponse({ ok: false, error: "Idempotency key required." }, 400);
+  }
+  if (idempotencyKey.length > 200) {
+    return jsonResponse({ ok: false, error: "Invalid idempotency key." }, 400);
+  }
+
+  // ── Call the atomic RPC (service_role only) ──
+  // The RPC does everything in one PostgreSQL transaction:
+  //   profile lock → idempotency check → trusted tier resolution →
+  //   entitlement lock → capacity check → balance check → deduct →
+  //   increment slots → audit + ledger rows
+  // If ANY step fails, the entire transaction rolls back.
+  const { data: rpcResult, error: rpcErr } = await serviceClient.rpc(
+    "purchase_eagoh_slot_atomic",
+    {
+      p_user_id: userId,
+      p_idempotency_key: idempotencyKey,
+    },
+  );
+
+  if (rpcErr) {
+    console.warn("[eagoh-slots/purchase] RPC error", {
+      userIdPrefix: userId.slice(0, 8),
+      error: rpcErr.message,
+      code: rpcErr.code,
+    });
+    return jsonResponse({
+      ok: false,
+      error: "Purchase failed. No neurons were charged.",
+    }, 500);
+  }
+
+  const result = rpcResult as {
+    ok?: boolean;
+    error?: string;
+    duplicate?: boolean;
+    entitlement?: Record<string, unknown>;
+    new_balance?: { subscription: number; purchased: number; total: number };
+    detail?: string;
+    sqlstate?: string;
+  };
+
+  if (!result || result.ok !== true) {
+    const errorMsg = result?.error ?? "Purchase failed. No neurons were charged.";
+    console.warn("[eagoh-slots/purchase] RPC returned error", {
+      userIdPrefix: userId.slice(0, 8),
+      error: errorMsg,
+      detail: result?.detail,
+      sqlstate: result?.sqlstate,
+    });
+    const status = errorMsg.includes("PRO_REQUIRED") ? 403
+      : errorMsg.includes("MAX_SLOTS_REACHED") ? 409
+      : errorMsg.includes("Insufficient") ? 400
+      : 400;
+    return jsonResponse({ ok: false, error: errorMsg }, status);
+  }
+
+  return jsonResponse({
+    ok: true,
+    duplicate: result.duplicate === true,
+    entitlement: result.entitlement,
     newBalance: result.new_balance,
   });
 }

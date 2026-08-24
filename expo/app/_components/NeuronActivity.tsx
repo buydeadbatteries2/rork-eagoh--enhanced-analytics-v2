@@ -67,6 +67,7 @@ const REASON_TITLES: Record<string, string> = {
   purchase: "Neuron Pack Purchase",
   faction_slot_expansion: "Faction Slot Expansion",
   sponsored_banner: "Banner Promotion",
+  eagoh_slot_purchase: "EAGOH Slot Purchase",
   manual: "Manual Adjustment",
   social_share_reward: "Social Share Reward",
   arena_refund: "Arena Refund",
