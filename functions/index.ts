@@ -12367,10 +12367,7 @@ const EXCHANGE_GENERIC_RPC_FAILURE = "Purchase failed. No neurons were charged."
  * preserved.
  */
 export function mapExchangePurchaseRpcError(rawError: string): ExchangeRpcErrorMapping {
-  if (
-    rawError === "domain_mismatch" ||
-    (rawError.startsWith("domain_mismatch") && rawError.endsWith("domain_mismatch"))
-  ) {
+  if (rawError === "domain_mismatch") {
     return {
       status: 409,
       errorCode: "domain_mismatch",
@@ -12404,7 +12401,7 @@ export function mapExchangePurchaseRpcError(rawError: string): ExchangeRpcErrorM
   if (rawError.includes("SELF_PURCHASE")) {
     return {
       status: 403,
-      error: "SELF_PURCHASE_NOT_ALLOWED: You cannot purchase your own EAGOH listing.",
+      error: "You cannot purchase your own EAGOH listing.",
     };
   }
   if (rawError.includes("not found") || rawError.includes("no longer active")) {
