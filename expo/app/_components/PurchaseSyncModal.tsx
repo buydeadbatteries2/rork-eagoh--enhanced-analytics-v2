@@ -186,6 +186,12 @@ export type PurchaseSyncModalProps = {
   /** Informational only: the EAGOH the purchase will be attributed to. The
    *  Worker remains authoritative on eligibility and domain. */
   buyerInfo?: { name: string; domain: string } | null;
+  /** Compact buyer-EAGOH selector options — shown only when multiple
+   *  same-domain EAGOHs are eligible, so the user chooses which one is
+   *  purchasing before confirmation. */
+  buyerOptions?: Array<{ id: string; name: string }>;
+  selectedBuyerEagohId?: string | null;
+  onSelectBuyerEagoh?: (id: string) => void;
   onClose: () => void;
   onConfirm: (level: SyncLevel, days: number) => void;
   showSourceInfo: boolean;
@@ -201,6 +207,9 @@ export default function PurchaseSyncModal({
   visible,
   listing,
   buyerInfo,
+  buyerOptions,
+  selectedBuyerEagohId,
+  onSelectBuyerEagoh,
   onClose,
   onConfirm,
   showSourceInfo,
@@ -301,6 +310,46 @@ export default function PurchaseSyncModal({
               <Text style={styles.modalBuyerText} numberOfLines={1}>
                 Purchasing for: {buyerInfo.name} · {domainLabel(buyerInfo.domain)}
               </Text>
+            </View>
+          )}
+
+          {/* Phase D2.1: compact buyer selector when multiple same-domain
+              EAGOHs are eligible — the user must choose which one purchases. */}
+          {buyerOptions && buyerOptions.length > 1 && onSelectBuyerEagoh && (
+            <View style={styles.modalBuyerSelectWrap}>
+              <Text style={styles.modalBuyerSelectLabel}>
+                {selectedBuyerEagohId ? "Purchasing as" : "Which EAGOH is purchasing?"}
+              </Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.modalBuyerChipRail}
+              >
+                {buyerOptions.map((option) => {
+                  const active = option.id === (selectedBuyerEagohId ?? "");
+                  return (
+                    <Pressable
+                      key={option.id}
+                      onPress={() => onSelectBuyerEagoh(option.id)}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Purchase as ${option.name}`}
+                      accessibilityState={{ selected: active }}
+                      style={({ pressed }) => [
+                        styles.modalBuyerChip,
+                        active && styles.modalBuyerChipActive,
+                        pressed && { opacity: 0.8 },
+                      ]}
+                    >
+                      <Text
+                        style={[styles.modalBuyerChipText, active && styles.modalBuyerChipTextActive]}
+                        numberOfLines={1}
+                      >
+                        {option.name}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
             </View>
           )}
 
@@ -719,6 +768,24 @@ const styles = StyleSheet.create({
     borderColor: "rgba(34,211,238,0.25)",
   },
   modalBuyerText: { color: palette.cyan, fontSize: 11, fontWeight: "700", letterSpacing: 0.3, flexShrink: 1 },
+  modalBuyerSelectWrap: { marginTop: 8 },
+  modalBuyerSelectLabel: { color: palette.muted, fontSize: 10, fontWeight: "900", letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 6 },
+  modalBuyerChipRail: { gap: 6, paddingRight: 12 },
+  modalBuyerChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(148,163,184,0.35)",
+    backgroundColor: "rgba(148,163,184,0.08)",
+    maxWidth: 160,
+  },
+  modalBuyerChipActive: {
+    borderColor: palette.cyan,
+    backgroundColor: "rgba(34,211,238,0.16)",
+  },
+  modalBuyerChipText: { color: palette.text, fontSize: 11, fontWeight: "700" },
+  modalBuyerChipTextActive: { color: palette.cyan },
   modalSectionDesc: { color: palette.text, fontSize: 12, fontWeight: "700", marginBottom: 8, lineHeight: 17 },
 
   sourceInfoOverlayAbsolute: {

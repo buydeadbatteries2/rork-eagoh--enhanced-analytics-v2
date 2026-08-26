@@ -1,6 +1,7 @@
 import { palette } from "@/constants/colors";
 import { useAppTheme } from "@/providers/ThemeProvider";
 import { getTeamById } from "@/data/teams";
+import { isSameExchangeDomain, normalizeDomainId } from "@/services/domains";
 import { HORIZONTAL_LIST_PERFORMANCE_PROPS, LIST_PERFORMANCE_PROPS, OptimizedEagohImage, type RenderTone } from "@/app/_components/PerformancePrimitives";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
@@ -2060,7 +2061,12 @@ export default function MarketplaceScreen(): JSX.Element {
       null,
     [eligibleBuyerEagohs, selectedBuyerEagohId],
   );
-  const selectedBuyerDomain = selectedBuyerEagoh?.domain ?? selectedBuyerEagoh?.sport ?? "";
+  // Phase D2.1: the selected domain is normalized (domain ?? sport) so every
+  // comparison and query input uses the canonical form — legacy values like
+  // "health_fitness" or "sport" behave identically to their canonical ids.
+  const selectedBuyerDomain = selectedBuyerEagoh
+    ? normalizeDomainId(selectedBuyerEagoh.domain ?? selectedBuyerEagoh.sport ?? "")
+    : "";
   // No listing/metadata/rankings request fires without a signed-in user, an
   // eligible EAGOH, and a non-empty domain.
   const canLoadBrowse = !!user?.id && !!selectedBuyerEagoh && selectedBuyerDomain.length > 0;
@@ -2402,8 +2408,7 @@ export default function MarketplaceScreen(): JSX.Element {
   // purchase modal is open, close it safely without sending a request.
   useEffect(() => {
     if (!purchaseModal) return;
-    const modalDomain = purchaseModal.eagoh?.domain ?? purchaseModal.eagoh?.sport ?? "";
-    if (!selectedBuyerEagoh || modalDomain !== selectedBuyerDomain) {
+    if (!selectedBuyerEagoh || !isSameExchangeDomain(purchaseModal.eagoh?.domain ?? purchaseModal.eagoh?.sport, selectedBuyerDomain)) {
       setPurchaseModal(null);
       setShowSourceInfo(false);
     }
@@ -2417,7 +2422,7 @@ export default function MarketplaceScreen(): JSX.Element {
       setPurchaseModal(null);
       return;
     }
-    if ((purchaseModal.eagoh?.domain ?? purchaseModal.eagoh?.sport ?? "") !== selectedBuyerDomain) {
+    if (!isSameExchangeDomain(purchaseModal.eagoh?.domain ?? purchaseModal.eagoh?.sport, selectedBuyerDomain)) {
       setPurchaseModal(null);
       return;
     }
@@ -2507,7 +2512,7 @@ export default function MarketplaceScreen(): JSX.Element {
   // the Worker remains authoritative.
   const handlePurchasePress = useCallback((l: EnrichedListing) => {
     if (!selectedBuyerEagoh || !selectedBuyerDomain) return;
-    if ((l.eagoh?.domain ?? l.eagoh?.sport ?? "") !== selectedBuyerDomain) return;
+    if (!isSameExchangeDomain(l.eagoh?.domain ?? l.eagoh?.sport, selectedBuyerDomain)) return;
     setPurchaseModal(l);
   }, [selectedBuyerEagoh, selectedBuyerDomain]);
   const handleViewVendorProfile = useCallback((vendorId: string) => {
@@ -2617,18 +2622,20 @@ export default function MarketplaceScreen(): JSX.Element {
       selectedBuyerDomain
         ? listings.filter(
             (l) =>
-              (l.eagoh?.domain ?? l.eagoh?.sport) === selectedBuyerDomain &&
+              isSameExchangeDomain(l.eagoh?.domain ?? l.eagoh?.sport, selectedBuyerDomain) &&
               l.eagoh?.status !== "dormant",
           )
         : [],
     [listings, selectedBuyerDomain],
   );
 
-  // Group listings by domain, sorted by most listings first
+  // Group listings by domain, sorted by most listings first.
+  // Phase D2.1: group keys are normalized so legacy values ("health_fitness",
+  // "sport") group under their canonical domain instead of splitting.
   const domainGroups = useMemo(() => {
     const groups = new Map<string, EnrichedListing[]>();
     for (const l of domainListings) {
-      const dom = l.eagoh?.domain ?? l.eagoh?.sport ?? "other";
+      const dom = normalizeDomainId(l.eagoh?.domain ?? l.eagoh?.sport ?? "other");
       if (!groups.has(dom)) groups.set(dom, []);
       groups.get(dom)!.push(l);
     }

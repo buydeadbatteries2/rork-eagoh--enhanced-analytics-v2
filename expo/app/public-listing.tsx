@@ -40,7 +40,7 @@ import { supabase } from "@/lib/supabase";
 import { useHaptics } from "@/hooks/useHaptics";
 import type { EagohRecord } from "@/services/eagohs";
 import { resolveMarketplaceEagohImage } from "@/services/marketplace";
-import { INTELLIGENCE_DOMAINS } from "@/services/domains";
+import { INTELLIGENCE_DOMAINS, isSameExchangeDomain, normalizeDomainId } from "@/services/domains";
 import { getBulkReputations, rankColor as repRankColor, type RankTier } from "@/services/reputation";
 import type { ReputationRow } from "@/services/reputation";
 import SocialVerifiedBadge from "@/app/_components/SocialVerifiedBadge";
@@ -87,7 +87,7 @@ export default function PublicListingScreen(): JSX.Element {
   const { listingId } = useLocalSearchParams<{ listingId: string }>();
   const router = useRouter();
   const { user, isAuthenticated } = useAuth();
-  const { eagohs } = useEagohs();
+  const { eagohs, isLoading: eagohsLoading } = useEagohs();
   const h = useHaptics();
   const queryClient = useQueryClient();
 
@@ -99,23 +99,60 @@ export default function PublicListingScreen(): JSX.Element {
   const [purchasing, setPurchasing] = useState<boolean>(false);
   const [showSourceInfo, setShowSourceInfo] = useState<boolean>(false);
   const [publicProfileVendorId, setPublicProfileVendorId] = useState<string | null>(null);
+  // ── Phase D2.1: explicit buyer-EAGOH choice when multiple same-domain
+  // EAGOHs are eligible. Null = no user choice yet. ──
+  const [chosenBuyerEagohId, setChosenBuyerEagohId] = useState<string | null>(null);
 
-  // ── Phase D2: purchases require an eligible buyer EAGOH in the listing's
-  // domain. Same forged-EAGOH null semantics as the Exchange selector; the
-  // Worker re-verifies authoritatively. ──
-  const purchaseDomain =
-    purchaseListing?.eagoh?.domain ?? purchaseListing?.eagoh?.sport ?? "";
-  const eligiblePurchaseEagoh = useMemo<EagohRecord | null>(() => {
-    if (!purchaseDomain) return null;
-    const eligible = (eagohs ?? []).filter(
+  // ── Phase D2.1: purchases require an eligible buyer EAGOH in the listing's
+  // domain. The listing domain and every candidate EAGOH domain are
+  // NORMALIZED before comparison (legacy values like "health_fitness" or
+  // "sport" match their canonical ids). Same forged-EAGOH null semantics as
+  // the Exchange selector; the Worker re-verifies authoritatively. ──
+  const purchaseDomain = purchaseListing
+    ? normalizeDomainId(purchaseListing.eagoh?.domain ?? purchaseListing.eagoh?.sport ?? "")
+    : "";
+  const eligiblePurchaseEagohs = useMemo<EagohRecord[]>(() => {
+    if (!purchaseDomain) return [];
+    return (eagohs ?? []).filter(
       (e) =>
         e.is_default_shell !== true &&
         !(e.is_default_shell === null && e.is_user_forged === false) &&
         e.status !== "dormant" &&
-        (e.domain ?? e.sport) === purchaseDomain,
+        isSameExchangeDomain(e.domain ?? e.sport, purchaseDomain),
     );
-    return eligible[0] ?? null;
   }, [eagohs, purchaseDomain]);
+
+  // Exactly one eligible EAGOH is auto-selected. With multiple, the user must
+  // choose which EAGOH is purchasing before confirmation — the first eligible
+  // EAGOH is never silently selected.
+  const chosenBuyerEagoh = useMemo<EagohRecord | null>(() => {
+    if (eligiblePurchaseEagohs.length === 1) return eligiblePurchaseEagohs[0];
+    return eligiblePurchaseEagohs.find((e) => e.id === chosenBuyerEagohId) ?? null;
+  }, [eligiblePurchaseEagohs, chosenBuyerEagohId]);
+
+  // While the modal is open (and EAGOHs have finished loading):
+  //   - no eligible EAGOHs → close safely and show the Domain Requirement
+  //     message (never a dead purchase flow, never a false error while loading)
+  //   - the chosen EAGOH became dormant/deleted/ineligible → close safely
+  //     WITHOUT making a purchase request.
+  useEffect(() => {
+    if (!purchaseListing || eagohsLoading) return;
+    if (eligiblePurchaseEagohs.length === 0) {
+      setPurchaseListing(null);
+      setShowSourceInfo(false);
+      setChosenBuyerEagohId(null);
+      Alert.alert(
+        "Domain Requirement",
+        "You need an active forged EAGOH in this listing's domain to purchase.",
+      );
+      return;
+    }
+    if (chosenBuyerEagohId && !eligiblePurchaseEagohs.some((e) => e.id === chosenBuyerEagohId)) {
+      setPurchaseListing(null);
+      setShowSourceInfo(false);
+      setChosenBuyerEagohId(null);
+    }
+  }, [purchaseListing, eagohsLoading, eligiblePurchaseEagohs, chosenBuyerEagohId]);
 
   useEffect(() => {
     if (!listingId) {
@@ -239,10 +276,11 @@ export default function PublicListingScreen(): JSX.Element {
         return;
       }
       // Fast feedback: block the modal when the user has no eligible EAGOH in
-      // the listing's domain (only when the EAGOH list has loaded — the
-      // confirm guard remains authoritative as defense-in-depth).
-      if (eagohs) {
-        const listingDomain = enriched.eagoh?.domain ?? enriched.eagoh?.sport ?? "";
+      // the listing's domain — ONLY once the EAGOH list has finished loading,
+      // so a tap during loading never shows a false Domain Requirement error.
+      // The modal-open effect and confirm guard remain authoritative.
+      if (!eagohsLoading && eagohs) {
+        const listingDomain = normalizeDomainId(enriched.eagoh?.domain ?? enriched.eagoh?.sport ?? "");
         const hasEligible =
           listingDomain.length > 0 &&
           eagohs.some(
@@ -250,7 +288,7 @@ export default function PublicListingScreen(): JSX.Element {
               e.is_default_shell !== true &&
               !(e.is_default_shell === null && e.is_user_forged === false) &&
               e.status !== "dormant" &&
-              (e.domain ?? e.sport) === listingDomain,
+              isSameExchangeDomain(e.domain ?? e.sport, listingDomain),
           );
         if (!hasEligible) {
           Alert.alert(
@@ -261,16 +299,23 @@ export default function PublicListingScreen(): JSX.Element {
         }
       }
       setPurchaseListing(enriched);
+      setChosenBuyerEagohId(null);
     } catch {
       Alert.alert("Error", "Could not load listing details.");
     }
-  }, [isAuthenticated, listingId, router, eagohs]);
+  }, [isAuthenticated, listingId, router, eagohs, eagohsLoading]);
 
   const handlePurchaseConfirm = useCallback(async (level: SyncLevel, days: number): Promise<void> => {
     if (!user?.id || !purchaseListing) return;
-    // ── Phase D2: an eligible same-domain buyer EAGOH is required. The
-    // Worker re-verifies ownership, eligibility, and domain authoritatively. ──
-    if (!eligiblePurchaseEagoh || !purchaseDomain) {
+    // ── Phase D2.1: an eligible same-domain buyer EAGOH is required. With
+    // multiple candidates the user must explicitly choose which EAGOH is
+    // purchasing before the request is sent. The Worker re-verifies
+    // ownership, eligibility, and domain authoritatively. ──
+    if (eligiblePurchaseEagohs.length > 1 && !chosenBuyerEagoh) {
+      Alert.alert("Select EAGOH", "Choose which EAGOH is making this purchase.");
+      return;
+    }
+    if (!chosenBuyerEagoh || !purchaseDomain) {
       Alert.alert(
         "Domain Requirement",
         "You need an active forged EAGOH in this listing's domain to purchase.",
@@ -285,7 +330,7 @@ export default function PublicListingScreen(): JSX.Element {
     }
     setPurchasing(true);
     try {
-      const result = await purchaseSync(purchaseListing.id, eligiblePurchaseEagoh.id, level, days);
+      const result = await purchaseSync(purchaseListing.id, chosenBuyerEagoh.id, level, days);
       if (!result.ok) {
         Alert.alert("Purchase Failed", result.error);
       } else {
@@ -299,7 +344,7 @@ export default function PublicListingScreen(): JSX.Element {
     } finally {
       setPurchasing(false);
     }
-  }, [user?.id, purchaseListing, eligiblePurchaseEagoh, purchaseDomain, h, queryClient]);
+  }, [user?.id, purchaseListing, chosenBuyerEagoh, eligiblePurchaseEagohs, purchaseDomain, h, queryClient]);
 
   // ── Loading state ──────────────────────────────────────────────────
 
@@ -550,10 +595,17 @@ export default function PublicListingScreen(): JSX.Element {
         visible={!!purchaseListing}
         listing={purchaseListing}
         buyerInfo={
-          purchaseListing && eligiblePurchaseEagoh
-            ? { name: eligiblePurchaseEagoh.name, domain: purchaseDomain }
+          purchaseListing && chosenBuyerEagoh
+            ? { name: chosenBuyerEagoh.name, domain: purchaseDomain }
             : null
         }
+        buyerOptions={
+          eligiblePurchaseEagohs.length > 1
+            ? eligiblePurchaseEagohs.map((e) => ({ id: e.id, name: e.name }))
+            : undefined
+        }
+        selectedBuyerEagohId={chosenBuyerEagoh?.id ?? null}
+        onSelectBuyerEagoh={setChosenBuyerEagohId}
         onClose={() => { setPurchaseListing(null); setShowSourceInfo(false); }}
         onConfirm={handlePurchaseConfirm}
         showSourceInfo={showSourceInfo}

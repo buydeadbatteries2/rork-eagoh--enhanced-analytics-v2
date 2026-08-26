@@ -1,4 +1,5 @@
 import { supabase } from "@/lib/supabase";
+import { normalizeDomainId } from "./domains";
 import type { UserProfile, SubscriptionTier } from "@/services/profile";
 
 // ── Image Resolution ───────────────────────────────────────────────────
@@ -186,13 +187,19 @@ function quotePostgrestValue(value: string): string {
  *     under SQL three-valued logic).
  *   - Home banners retain their current behavior unless a domain is
  *     explicitly supplied.
+ *
+ * Phase D2.1: `selectedDomain` is normalized (normalizeDomainId) before the
+ * PostgREST domain filter is constructed, so legacy raw values behave the
+ * same as canonical ids. All other behavior above is preserved.
  */
 export async function getActiveBanners(
   location: BannerLocation,
   selectedDomain?: string,
 ): Promise<EnrichedBanner[]> {
   const today = new Date().toISOString().slice(0, 10);
-  const domain = selectedDomain?.trim() ?? "";
+  // Phase D2.1: normalize before building the filter (and before the
+  // mandatory-domain check) so comparisons use the canonical form.
+  const domain = selectedDomain ? normalizeDomainId(selectedDomain.trim()) : "";
 
   // Marketplace sponsors are domain-scoped — no selection means no banners.
   if (location === "marketplace" && !domain) return [];

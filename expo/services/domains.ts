@@ -110,6 +110,23 @@ export function getDomain(domainId: string): IntelligenceDomain | undefined {
   return INTELLIGENCE_DOMAINS.find((d) => d.id === normalized);
 }
 
+/**
+ * Compare two Exchange domain values (each may be a `domain` or a legacy
+ * `sport`) using canonical normalization. Empty/missing values never match,
+ * so an all-domain fallback is impossible.
+ *
+ * Matching pairs: "health_fitness" ≡ "health-fitness", "sport" ≡ "sports",
+ * "SPORTS" ≡ "Sports". Genuinely different domains never match.
+ */
+export function isSameExchangeDomain(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
+  const na = normalizeDomainId((a ?? "").trim());
+  const nb = normalizeDomainId((b ?? "").trim());
+  return na.length > 0 && nb.length > 0 && na === nb;
+}
+
 // ── Keyword‑based domain detection ───────────────────────────────────
 
 /**
