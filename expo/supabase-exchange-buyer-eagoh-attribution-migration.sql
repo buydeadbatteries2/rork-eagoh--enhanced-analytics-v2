@@ -369,6 +369,19 @@ begin
     );
   end if;
 
+  -- Ownership: the listing vendor must own the listed EAGOH. NULL-safe
+  -- comparison (IS DISTINCT FROM) so NULL/missing ownership also fails.
+  -- Checked before dormancy, domain, any balance deduction, vendor credit,
+  -- ledger insertion, or purchase insertion. Raw user IDs are never
+  -- returned in this error.
+  if v_vendor_eagoh.user_id is distinct from v_listing.vendor_id then
+    return jsonb_build_object(
+      'ok', false,
+      'error', 'vendor_eagoh_owner_mismatch',
+      'message', 'The listing vendor does not own the listed EAGOH.'
+    );
+  end if;
+
   if v_vendor_eagoh.status = 'dormant' then
     return jsonb_build_object(
       'ok', false,
@@ -604,7 +617,7 @@ grant execute on function public.purchase_marketplace_sync_atomic(
 --     uniqueness for attributed rows. The `active = true` predicate is kept
 --     so refund/reversal semantics are unchanged: deactivation frees the
 --     source entry for re-retention by a later successful purchase.
-drop index if exists retained_exchange_buyer_eagoh_entry_uniq;
+drop index if exists public.retained_exchange_buyer_eagoh_entry_uniq;
 
 create unique index if not exists retained_exchange_buyer_eagoh_attrib_uniq
   on public.retained_exchange_intelligence(buyer_eagoh_id, vendor_eagoh_id, source_entry_id)
@@ -710,7 +723,8 @@ begin
     return jsonb_build_object('ok', false, 'error', 'eagoh_not_found');
   end if;
 
-  if v_vendor_eagoh.user_id != v_purchase.vendor_id then
+  -- NULL-safe ownership check — `!=` would silently pass when user_id IS NULL.
+  if v_vendor_eagoh.user_id is distinct from v_purchase.vendor_id then
     return jsonb_build_object('ok', false, 'error', 'eagoh_owner_mismatch');
   end if;
 
