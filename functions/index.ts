@@ -12149,6 +12149,17 @@ async function handleExchangeSaleNotify(request: Request, env: Env): Promise<Res
 //      no vendor credit, no purchase row, no retention, no notification.
 //   5. The idempotency key is derived inside the Worker from trusted values:
 //      sync:<authenticatedUserId>:<buyerEagohId>:<listingId>:<syncLevel>:<days>
+//
+// Phase D2.2A/D2.2B — buyer-EAGOH attribution:
+//   6. The validated buyerEagohId is forwarded to the six-parameter
+//      purchase_marketplace_sync_atomic overload as p_buyer_eagoh_id. The
+//      database remains the FINAL authority against races.
+//   7. Success payloads (normal AND duplicate) are strictly verified against
+//      the request (buyer_id, buyer_eagoh_id, listing_id, sync_level, days).
+//      Any malformed/inconsistent success → HTTP 500
+//      "purchase_verification_failed" with NO retention/notification work.
+//   8. Structured database rejections map to stable HTTP codes/errorCodes;
+//      raw IDs, domains, detail, and sqlstate never leave the Worker.
 
 // ── Phase D2: Exchange purchase validation helpers (pure, exported for tests) ──
 
@@ -12261,7 +12272,153 @@ export function isEligibleBuyerEagohRow(row: BuyerEagohRow | null, userId: strin
   return !!(row.domain ?? row.sport);
 }
 
-async function handleExchangePurchase(request: Request, env: Env): Promise<Response> {
+// ── Phase D2.2B: pure helpers for old-client handling, structured RPC error
+//    mapping, and strict success validation (exported for focused tests) ──
+
+/**
+ * Detect an otherwise-valid purchase request whose ONLY problem is a missing
+ * (absent/null/blank) buyerEagohId — i.e. an old client that predates
+ * buyer-EAGOH selection. Everything else (listingId UUID, sync level, integer
+ * days 1–5) must already validate for this to be considered an update issue.
+ * A present-but-garbage buyerEagohId stays a malformed 400, not a 426.
+ */
+export function isExchangeRequestMissingBuyerEagoh(body: unknown): boolean {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return false;
+  const raw = body as Record<string, unknown>;
+  const listingId = typeof raw.listingId === "string" ? raw.listingId.trim().toLowerCase() : "";
+  if (!EXCHANGE_UUID_RE.test(listingId)) return false;
+  const syncLevel = typeof raw.syncLevel === "string" ? raw.syncLevel.trim() : "";
+  if (!EXCHANGE_SYNC_LEVELS.includes(syncLevel)) return false;
+  const days = typeof raw.days === "number" ? raw.days : Number.NaN;
+  if (!Number.isInteger(days) || days < 1 || days > 5) return false;
+  const v = raw.buyerEagohId;
+  if (v === undefined || v === null) return true;
+  if (typeof v === "string") return v.trim() === "";
+  return false;
+}
+
+/** Trusted expected values for strict success verification. */
+export type ExchangeSuccessExpectation = {
+  userId: string;
+  buyerEagohId: string;
+  listingId: string;
+  syncLevel: string;
+  days: number;
+};
+
+/**
+ * Strictly verify an atomic-RPC SUCCESS payload (normal or duplicate):
+ * ok === true, purchase must be a non-null object matching every expected
+ * attribution field exactly. Missing/malformed/inconsistent fields fail —
+ * nothing is defaulted or coerced.
+ */
+export function isValidExchangePurchaseSuccess(
+  result: unknown,
+  expected: ExchangeSuccessExpectation,
+): boolean {
+  if (typeof result !== "object" || result === null || Array.isArray(result)) return false;
+  const r = result as Record<string, unknown>;
+  if (r.ok !== true) return false;
+  const p = r.purchase;
+  if (typeof p !== "object" || p === null || Array.isArray(p)) return false;
+  const pu = p as Record<string, unknown>;
+  return (
+    pu.buyer_id === expected.userId &&
+    pu.buyer_eagoh_id === expected.buyerEagohId &&
+    pu.listing_id === expected.listingId &&
+    pu.sync_level === expected.syncLevel &&
+    pu.days === expected.days
+  );
+}
+
+/** Client-facing mapping for an atomic-RPC rejection. */
+export type ExchangeRpcErrorMapping = {
+  status: number;
+  errorCode?: string;
+  /** Friendly, ID-free message safe to show to the user. */
+  error: string;
+};
+
+/** Database buyer-EAGOH rejection codes (→ 403 buyer_eagoh_not_eligible). */
+const EXCHANGE_BUYER_REJECTION_CODES: ReadonlySet<string> = new Set([
+  "buyer_eagoh_required",
+  "buyer_eagoh_not_found",
+  "buyer_eagoh_not_owned",
+  "buyer_eagoh_not_eligible",
+  "buyer_eagoh_no_domain",
+]);
+
+/** Database vendor-EAGOH rejection codes (→ 403 vendor_eagoh_not_eligible). */
+const EXCHANGE_VENDOR_REJECTION_CODES: ReadonlySet<string> = new Set([
+  "vendor_eagoh_not_found",
+  "vendor_eagoh_dormant",
+  "vendor_eagoh_owner_mismatch",
+  "vendor_eagoh_no_domain",
+]);
+
+/** Friendly fallback for unexpected database failures — no internals leaked. */
+const EXCHANGE_GENERIC_RPC_FAILURE = "Purchase failed. No neurons were charged.";
+
+/**
+ * Map an atomic-RPC rejection (result.error) onto a stable HTTP status,
+ * errorCode, and FRIENDLY message. Raw database text, IDs, domains, detail,
+ * and sqlstate are never echoed back to the client. Legacy substring rules
+ * for insufficient balance, self-purchase, and missing/inactive listings are
+ * preserved.
+ */
+export function mapExchangePurchaseRpcError(rawError: string): ExchangeRpcErrorMapping {
+  if (
+    rawError === "domain_mismatch" ||
+    (rawError.startsWith("domain_mismatch") && rawError.endsWith("domain_mismatch"))
+  ) {
+    return {
+      status: 409,
+      errorCode: "domain_mismatch",
+      error: "This EAGOH can only purchase intelligence from another EAGOH in the same domain.",
+    };
+  }
+
+  if (EXCHANGE_BUYER_REJECTION_CODES.has(rawError)) {
+    return {
+      status: 403,
+      errorCode: "buyer_eagoh_not_eligible",
+      error: "Select an active forged EAGOH in this listing's domain to make this purchase.",
+    };
+  }
+
+  if (EXCHANGE_VENDOR_REJECTION_CODES.has(rawError)) {
+    return {
+      status: 403,
+      errorCode: "vendor_eagoh_not_eligible",
+      error: "This listing is not available for purchase.",
+    };
+  }
+
+  // Legacy non-structured database messages — preserved from D2 semantics.
+  if (rawError.includes("Insufficient")) {
+    return {
+      status: 400,
+      error: "You don't have enough Neurons for this purchase.",
+    };
+  }
+  if (rawError.includes("SELF_PURCHASE")) {
+    return {
+      status: 403,
+      error: "SELF_PURCHASE_NOT_ALLOWED: You cannot purchase your own EAGOH listing.",
+    };
+  }
+  if (rawError.includes("not found") || rawError.includes("no longer active")) {
+    return {
+      status: 404,
+      error: "Listing not found or no longer active.",
+    };
+  }
+
+  // Unknown/unexpected database failure — never forward raw text.
+  return { status: 500, error: EXCHANGE_GENERIC_RPC_FAILURE };
+}
+
+export async function handleExchangePurchase(request: Request, env: Env): Promise<Response> {
   if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
     return jsonResponse({ ok: false, error: "Backend not configured." }, 503);
   }
@@ -12289,6 +12446,16 @@ async function handleExchangePurchase(request: Request, env: Env): Promise<Respo
   // idempotencyKey…) is ignored and never forwarded to the RPC.
   const parsed = parseExchangePurchasePayload(body);
   if (!parsed) {
+    // Old-client handling: an otherwise-valid request with NO buyerEagohId
+    // means the app predates buyer-EAGOH selection. We NEVER pick an EAGOH
+    // on the client's behalf — the user must update.
+    if (isExchangeRequestMissingBuyerEagoh(body)) {
+      return jsonResponse({
+        ok: false,
+        errorCode: "client_update_required",
+        error: "Update EAGOH to select which EAGOH is making this purchase.",
+      }, 426);
+    }
     return jsonResponse({ ok: false, errorCode: "invalid_request", error: "Invalid purchase request." }, 400);
   }
   const { listingId, buyerEagohId, syncLevel, days } = parsed;
@@ -12400,13 +12567,15 @@ async function handleExchangePurchase(request: Request, env: Env): Promise<Respo
   const idempotencyKey = deriveExchangeIdempotencyKey(userId, buyerEagohId, listingId, syncLevel, days);
 
   // ── Call the atomic RPC ──
-  // The RPC does everything in one PostgreSQL transaction:
-  //   idempotency check → validate → lock listing → lock buyer → deduct →
-  //   credit vendor → insert purchase → log transactions → update stats
-  // If ANY step fails, the entire transaction rolls back.
+  // Six-parameter D2.2A overload: EVERY argument derives exclusively from
+  // trusted/validated values — userId from the verified JWT, the rest from
+  // the strict parser and the Worker-owned idempotency derivation. Buyer
+  // user ID, domain, price, balance, tier, and idempotency key are NEVER
+  // accepted from the client.
   const { data: rpcResult, error: rpcErr } = await serviceClient
     .rpc("purchase_marketplace_sync_atomic", {
       p_buyer_id: userId,
+      p_buyer_eagoh_id: buyerEagohId,
       p_listing_id: listingId,
       p_sync_level: syncLevel,
       p_days: days,
@@ -12414,10 +12583,10 @@ async function handleExchangePurchase(request: Request, env: Env): Promise<Respo
     });
 
   if (rpcErr) {
-    console.warn("[exchange/purchase] RPC error", {
+    // Transport/SDK failure — sanitized log only: no messages or SQL state.
+    console.warn("[exchange/purchase] RPC transport failure", {
       userIdPrefix: userId.slice(0, 8),
-      error: rpcErr.message,
-      code: rpcErr.code,
+      hasErrorCode: typeof rpcErr.code === "string" && rpcErr.code.length > 0,
     });
     return jsonResponse({
       ok: false,
@@ -12436,18 +12605,45 @@ async function handleExchangePurchase(request: Request, env: Env): Promise<Respo
   };
 
   if (!result || result.ok !== true) {
-    const errorMsg = result?.error ?? "Purchase failed. No neurons were charged.";
-    console.warn("[exchange/purchase] RPC returned error", {
+    const rawError = typeof result?.error === "string" ? result.error : "";
+    const mapped = mapExchangePurchaseRpcError(rawError);
+    // Sanitized log: reject kinds only — never detail, sqlstate, IDs, or
+    // database text.
+    console.warn("[exchange/purchase] RPC rejected", {
       userIdPrefix: userId.slice(0, 8),
-      error: errorMsg,
-      detail: result?.detail,
-      sqlstate: result?.sqlstate,
+      status: mapped.status,
+      errorCode: mapped.errorCode ?? null,
+      hadDetail: result?.detail != null,
+      hadSqlstate: result?.sqlstate != null,
     });
-    const status = errorMsg.includes("Insufficient") ? 400
-      : errorMsg.includes("SELF_PURCHASE") ? 403
-      : errorMsg.includes("not found") || errorMsg.includes("no longer active") ? 404
-      : 400;
-    return jsonResponse({ ok: false, error: errorMsg }, status);
+    return jsonResponse({
+      ok: false,
+      ...(mapped.errorCode !== undefined ? { errorCode: mapped.errorCode } : {}),
+      error: mapped.error,
+    }, mapped.status);
+  }
+
+  // ── Strict success verification (normal AND duplicate) ──
+  // Success must carry the exact trusted attribution back. Anything missing,
+  // malformed, or inconsistent fails hard: HTTP 500, no defaults, no
+  // retention, no notifications, no balances exposed.
+  const verified = isValidExchangePurchaseSuccess(result, {
+    userId,
+    buyerEagohId,
+    listingId,
+    syncLevel,
+    days,
+  });
+  if (!verified) {
+    console.warn("[exchange/purchase] success verification failed", {
+      userIdPrefix: userId.slice(0, 8),
+      duplicate: result.duplicate === true,
+    });
+    return jsonResponse({
+      ok: false,
+      errorCode: "purchase_verification_failed",
+      error: "Purchase verification failed. Please check your purchase history before trying again.",
+    }, 500);
   }
 
   return jsonResponse({
