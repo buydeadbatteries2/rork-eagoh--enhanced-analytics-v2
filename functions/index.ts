@@ -11241,7 +11241,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/ping") {
-      return jsonResponse({ ok: true, now: new Date().toISOString(), service: "eagoh-analyst-worker", version: "6b-ui" });
+      return jsonResponse({ ok: true, now: new Date().toISOString(), service: "eagoh-analyst-worker", version: "d2.2b-buyer-attribution" });
     }
 
     if (url.pathname === "/analyst/chat" && request.method === "POST") {
