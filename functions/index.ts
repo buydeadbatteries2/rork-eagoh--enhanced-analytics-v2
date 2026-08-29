@@ -11241,7 +11241,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/ping") {
-      return jsonResponse({ ok: true, now: new Date().toISOString(), service: "eagoh-analyst-worker", version: "d2.3f-branch-diagnostics" });
+      return jsonResponse({ ok: true, now: new Date().toISOString(), service: "eagoh-analyst-worker", version: "d2.3h-rpc-split" });
     }
 
     if (url.pathname === "/analyst/chat" && request.method === "POST") {
@@ -12405,6 +12405,25 @@ export function mapExchangePurchaseRpcError(rawError: string): ExchangeRpcErrorM
     return {
       status: 404,
       error: "Listing not found or no longer active.",
+    };
+  }
+
+  // Exact structured literals from the RPC (Phase D2.3H) — exact equality
+  // only; near-matches fall through to PX-RPC-01. The RPC's exception-handler
+  // result carries detail/sqlstate keys that are never read, logged, or
+  // forwarded.
+  if (rawError === "This sync level has no price set.") {
+    return {
+      status: 409,
+      errorCode: "listing_price_unavailable",
+      error: "This listing does not offer the selected sync level. Reference: PX-PRICE-01.",
+    };
+  }
+  if (rawError === "Purchase failed. No neurons were charged.") {
+    return {
+      status: 500,
+      errorCode: "purchase_database_error",
+      error: "Purchase failed safely. No Neurons were charged. Reference: PX-RPC-02.",
     };
   }
 
