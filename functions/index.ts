@@ -11241,7 +11241,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/ping") {
-      return jsonResponse({ ok: true, now: new Date().toISOString(), service: "eagoh-analyst-worker", version: "d2.2b-buyer-attribution" });
+      return jsonResponse({ ok: true, now: new Date().toISOString(), service: "eagoh-analyst-worker", version: "d2.3d-safe-diagnostics" });
     }
 
     if (url.pathname === "/analyst/chat" && request.method === "POST") {
@@ -12415,6 +12415,29 @@ export function mapExchangePurchaseRpcError(rawError: string): ExchangeRpcErrorM
   return { status: 500, error: EXCHANGE_GENERIC_RPC_FAILURE };
 }
 
+/**
+ * Opaque, support-facing reference for an Exchange RPC transport failure.
+ * PURE mapping over the error's `code` field only — message, details, hint,
+ * SQLSTATE, identifiers, domains, and balances are never inspected or
+ * returned. Missing or unrecognized codes collapse to PX-DB-99.
+ */
+export function mapExchangeTransportDbRef(code: unknown): string {
+  switch (typeof code === "string" ? code : "") {
+    case "PGRST202": return "PX-DB-01";
+    case "42501": return "PX-DB-02";
+    case "42702": return "PX-DB-03";
+    case "42703": return "PX-DB-04";
+    case "42883": return "PX-DB-05";
+    case "23502": return "PX-DB-06";
+    case "23503": return "PX-DB-07";
+    case "23505": return "PX-DB-08";
+    case "P0001": return "PX-DB-09";
+    case "PGRST203": return "PX-DB-10";
+    case "22P02": return "PX-DB-11";
+    default: return "PX-DB-99";
+  }
+}
+
 export async function handleExchangePurchase(request: Request, env: Env): Promise<Response> {
   if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
     return jsonResponse({ ok: false, error: "Backend not configured." }, 503);
@@ -12580,14 +12603,22 @@ export async function handleExchangePurchase(request: Request, env: Env): Promis
     });
 
   if (rpcErr) {
-    // Transport/SDK failure — sanitized log only: no messages or SQL state.
+    // Transport/SDK failure — opaque diagnostics only: the response and the
+    // log carry the support reference and pre-existing boolean metadata. Raw
+    // code, text, SQL state, identifiers, domains, and balances never leave
+    // this branch.
+    const dbRef = mapExchangeTransportDbRef(
+      typeof rpcErr.code === "string" ? rpcErr.code : undefined,
+    );
     console.warn("[exchange/purchase] RPC transport failure", {
       userIdPrefix: userId.slice(0, 8),
       hasErrorCode: typeof rpcErr.code === "string" && rpcErr.code.length > 0,
+      dbRef,
     });
     return jsonResponse({
       ok: false,
-      error: "Purchase failed. No neurons were charged.",
+      errorCode: "purchase_database_error",
+      error: `Purchase failed safely. No Neurons were charged. Reference: ${dbRef}.`,
     }, 500);
   }
 
