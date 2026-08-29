@@ -11241,7 +11241,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/ping") {
-      return jsonResponse({ ok: true, now: new Date().toISOString(), service: "eagoh-analyst-worker", version: "d2.3d-safe-diagnostics" });
+      return jsonResponse({ ok: true, now: new Date().toISOString(), service: "eagoh-analyst-worker", version: "d2.3f-branch-diagnostics" });
     }
 
     if (url.pathname === "/analyst/chat" && request.method === "POST") {
@@ -12356,9 +12356,6 @@ const EXCHANGE_VENDOR_REJECTION_CODES: ReadonlySet<string> = new Set([
   "vendor_eagoh_no_domain",
 ]);
 
-/** Friendly fallback for unexpected database failures — no internals leaked. */
-const EXCHANGE_GENERIC_RPC_FAILURE = "Purchase failed. No neurons were charged.";
-
 /**
  * Map an atomic-RPC rejection (result.error) onto a stable HTTP status,
  * errorCode, and FRIENDLY message. Raw database text, IDs, domains, detail,
@@ -12411,8 +12408,14 @@ export function mapExchangePurchaseRpcError(rawError: string): ExchangeRpcErrorM
     };
   }
 
-  // Unknown/unexpected database failure — never forward raw text.
-  return { status: 500, error: EXCHANGE_GENERIC_RPC_FAILURE };
+  // Unknown/unexpected database failure — opaque static reference only.
+  // Raw database text, codes, detail, sqlstate, IDs, domains, and balances
+  // are never forwarded or logged.
+  return {
+    status: 500,
+    errorCode: "purchase_database_error",
+    error: "Purchase failed safely. No Neurons were charged. Reference: PX-RPC-01.",
+  };
 }
 
 /**
@@ -12491,11 +12494,17 @@ export async function handleExchangePurchase(request: Request, env: Env): Promis
     .maybeSingle();
 
   if (buyerEagohErr) {
+    // Sanitized log: static reference + prefix only — the raw error message,
+    // code, details, hint, and sqlstate are never logged.
     console.warn("[exchange/purchase] buyer EAGOH lookup failed", {
       userIdPrefix: userId.slice(0, 8),
-      error: buyerEagohErr.message,
+      ref: "PX-PRE-01",
     });
-    return jsonResponse({ ok: false, error: "Purchase failed. No neurons were charged." }, 500);
+    return jsonResponse({
+      ok: false,
+      errorCode: "purchase_database_error",
+      error: "Purchase failed safely. No Neurons were charged. Reference: PX-PRE-01.",
+    }, 500);
   }
 
   const buyerEagoh = (buyerEagohRow ?? null) as BuyerEagohRow | null;
@@ -12522,11 +12531,17 @@ export async function handleExchangePurchase(request: Request, env: Env): Promis
     .maybeSingle();
 
   if (listingErr) {
+    // Sanitized log: static reference + prefix only — the raw error message,
+    // code, details, hint, and sqlstate are never logged.
     console.warn("[exchange/purchase] listing lookup failed", {
       userIdPrefix: userId.slice(0, 8),
-      error: listingErr.message,
+      ref: "PX-PRE-02",
     });
-    return jsonResponse({ ok: false, error: "Purchase failed. No neurons were charged." }, 500);
+    return jsonResponse({
+      ok: false,
+      errorCode: "purchase_database_error",
+      error: "Purchase failed safely. No Neurons were charged. Reference: PX-PRE-02.",
+    }, 500);
   }
 
   const listing = (listingRow ?? null) as {
