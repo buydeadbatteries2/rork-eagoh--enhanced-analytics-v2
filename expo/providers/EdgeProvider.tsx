@@ -226,5 +226,4 @@ export const [EdgeProvider, useEdge] = createContextHook(() => {
       grantMutation.isPending ||
       rolloverMutation.isPending,
   };
-  startupLog("EdgeProvider", "success");
 });

@@ -276,5 +276,4 @@ export const [ProfileProvider, useProfile] = createContextHook(() => {
     applyMonthlyRollover: (capPct?: number) => rolloverMutation.mutateAsync(capPct ?? 0.1),
     _edgeReason: undefined as EdgeReason | undefined,
   };
-  startupLog("ProfileProvider", "success");
 });

@@ -1706,7 +1706,7 @@ export default function SessionsScreen(): JSX.Element {
   const h = useHaptics();
   const router = useRouter();
   const { eagohs } = useEagohs();
-  const { profile, effectiveSubscriptionTier: userTier, isTierLoading } = useProfile();
+  const { profile, effectiveSubscriptionTier: userTier, testTier, isTierLoading } = useProfile();
   const { palette: pal } = useAppTheme();
   const queryClient = useQueryClient();
   const [selectedEagohId, setSelectedEagohId] = useState<string>(eagohs[0]?.id ?? "");
@@ -1741,8 +1741,25 @@ export default function SessionsScreen(): JSX.Element {
   const handleSessionPress = useCallback((session: SessionType): void => {
     h.selection();
 
-    // Check tier permissions first
-    if (userTier === "free" && !canUseSessionType(userTier, session.id as "quick-check" | "quick-analysis" | "standard" | "oracle" | "premium-event" | "open-intelligence" | "faction-network" | "my-rankings")) {
+    // Check tier permissions first — ALWAYS from the effective tier
+    // (dev test tier override included), never from profile.subscription_tier.
+    const isFreeBlocked = userTier === "free" && !canUseSessionType(userTier, session.id as "quick-check" | "quick-analysis" | "standard" | "oracle" | "premium-event" | "open-intelligence" | "faction-network" | "my-rankings");
+
+    // Dev-only diagnostic — tiers and the access decision only. Never user
+    // IDs, tokens, balances, prompts, or any other personal data. The DB tier
+    // is surfaced here for diagnostics ONLY; permission decisions above use
+    // the effective tier exclusively.
+    if (__DEV__) {
+      console.log("[sessions] access check", {
+        sessionType: session.id,
+        effectiveTier: userTier,
+        testTier: testTier ?? "none",
+        dbTier: profile?.subscription_tier ?? "unknown",
+        allowed: !isFreeBlocked,
+      });
+    }
+
+    if (isFreeBlocked) {
       Alert.alert(
         "Upgrade Required",
         `"${session.name}" requires a paid plan. Quick Check is always available on the Free tier.`,
@@ -1774,7 +1791,7 @@ export default function SessionsScreen(): JSX.Element {
     }
 
     setActiveSession(session);
-  }, [eagohs, h, userTier, router, selectedEagohId]);
+  }, [eagohs, h, userTier, router, selectedEagohId, profile, testTier]);
 
   const handleBack = useCallback((): void => {
     setActiveSession(null);

@@ -154,13 +154,6 @@ export async function spendEdge(
   const cost = Math.max(0, Math.floor(amount));
   if (cost === 0) return profile;
 
-  // Use the provided effective tier (which may include a dev test override),
-  // otherwise fall back to computing from the raw DB profile.
-  const tier = effectiveTier ?? getEffectiveSubscriptionTier(profile);
-  if (tier === "free" && reason !== "quick_check") {
-    throw new Error("Upgrade to Pro or higher to use this feature.");
-  }
-
   // ── Refetch fresh balances from DB to avoid stale-cache races ──
   // The cached `profile` may be outdated if a concurrent operation modified
   // the balance. Fetching the authoritative row here ensures the balance
@@ -173,6 +166,24 @@ export async function spendEdge(
     // If the refetch fails, fall back to the cached profile — the UPDATE
     // below will still work if the cache is approximately correct.
     console.warn("[edge] failed to refetch profile before deduction, using cached values", fetchErr instanceof Error ? fetchErr.message : fetchErr);
+  }
+
+  // ── Tier resolution AFTER the refetch ──
+  // A caller-provided effective tier (which may include a dev test override)
+  // ALWAYS wins and is never replaced by the raw database tier after the
+  // refetch. Only when the caller did not pass one do we fall back to the DB
+  // tier — computed from the FRESH profile, never the stale cached snapshot.
+  const tier: SubscriptionTier = effectiveTier ?? getEffectiveSubscriptionTier(freshProfile);
+  if (tier === "free" && reason !== "quick_check") {
+    if (__DEV__) {
+      console.log("[edge] spend blocked", { reason, resolvedTier: tier, hadEffectiveTier: effectiveTier !== undefined });
+    }
+    throw new Error("Upgrade to Pro or higher to use this feature.");
+  }
+  if (__DEV__) {
+    // Safe diagnostic — reason + resolved tier only. Never user IDs,
+    // balances, notes, or any other payload content.
+    console.log("[edge] spend allowed", { reason, resolvedTier: tier, hadEffectiveTier: effectiveTier !== undefined });
   }
 
   const { total, subscription, purchased } = getBalances(freshProfile);
@@ -221,6 +232,11 @@ export const deductForQuickCheck = (
   note?: string,
   effectiveTier?: SubscriptionTier,
 ) => spendEdge(userId, profile, getQuickCheckCost(prompt), "quick_check", note, effectiveTier);
+
+// NOTE: advanced-session (analyst) deductions are charged server-side by the
+// Worker via deduct_neurons_atomic — this client wallet path only covers
+// non-analyst surfaces. The Worker recognises dev test tiers through the
+// server-side dev_test_subscriptions table (see services/testSubscription.ts).
 
 export const deductForObservation = (
   userId: string,

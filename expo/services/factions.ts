@@ -647,6 +647,8 @@ export async function purchaseFactionSlots(
   userId: string,
   profile: UserProfile,
   slotsToBuy: number,
+  /** Caller-resolved effective tier (may include a dev test override). When omitted, the raw DB tier is used. */
+  effectiveTier?: SubscriptionTier,
 ): Promise<PurchaseSlotsResult> {
   const costEntry = SLOT_EXPANSION_COSTS.find((s) => s.slots === slotsToBuy);
   if (!costEntry) {
@@ -676,6 +678,7 @@ export async function purchaseFactionSlots(
       costEntry.cost,
       "faction_slot_expansion",
       `+${slotsToBuy} slots for ${f.name}`,
+      effectiveTier,
     );
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);

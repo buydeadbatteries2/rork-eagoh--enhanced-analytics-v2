@@ -494,7 +494,7 @@ function FactionDetail({
   onClose: () => void;
 }): JSX.Element {
   const { user } = useAuth();
-  const { profile } = useProfile();
+  const { profile, effectiveSubscriptionTier } = useProfile();
   const edge = useEdge();
   const queryClient = useQueryClient();
   const h = useHaptics();
@@ -778,7 +778,7 @@ function FactionDetail({
       }
 
       try {
-        const result = await purchaseFactionSlots(faction.id, userId, profile, slots);
+        const result = await purchaseFactionSlots(faction.id, userId, profile, slots, effectiveSubscriptionTier);
         if (result.ok) {
           Alert.alert("Slots Expanded", `Added +${slots} slots. New max: ${result.faction.max_members}`);
           queryClient.invalidateQueries({ queryKey: ["faction", faction.id] });
@@ -790,7 +790,7 @@ function FactionDetail({
         Alert.alert("Error", "Slot expansion failed.");
       }
     },
-    [userId, profile, faction.id, edge, queryClient],
+    [userId, profile, faction.id, edge, queryClient, effectiveSubscriptionTier],
   );
 
   const handlePromote = useCallback(
