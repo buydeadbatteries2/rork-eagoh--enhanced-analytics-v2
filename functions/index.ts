@@ -5463,7 +5463,13 @@ async function resolveAnalystAccess(
   }
 
   // Dev test tiers are honored ONLY when the worker flag is explicitly
-  // enabled — never in production.
+  // enabled — never in production. A row is valid when it belongs to the
+  // authenticated user (query-scoped to the JWT-derived userId), carries a
+  // paid test tier, and is not expired (expires_at NULL or strictly in the
+  // future). A client-supplied tier is never read — the request body is never
+  // consulted here. Resolution order: real DB subscription / active admin
+  // override first, then a valid dev test row (only when it outranks the
+  // resolved tier), otherwise Free.
   if (env.ENABLE_DEV_TEST_SUBSCRIPTIONS === "true") {
     const { data: devRow } = await serviceClient
       .from("dev_test_subscriptions")
@@ -5472,10 +5478,15 @@ async function resolveAnalystAccess(
       .maybeSingle();
     if (devRow) {
       const d = devRow as { test_tier: string | null; expires_at: string | null };
+      const paidTestTier: string | null =
+        d.test_tier === "pro" || d.test_tier === "oracle_elite" || d.test_tier === "syndicate"
+          ? d.test_tier
+          : null;
       const expiresMs = d.expires_at ? new Date(d.expires_at).getTime() : null;
-      const devActive = expiresMs === null || (Number.isFinite(expiresMs) && Date.now() <= expiresMs);
-      if (devActive && d.test_tier && (tierPriority[d.test_tier] ?? 0) > (tierPriority[effectiveTier] ?? 0)) {
-        effectiveTier = d.test_tier;
+      const devActive = expiresMs === null || (Number.isFinite(expiresMs) && expiresMs > Date.now());
+      if (paidTestTier && devActive && (tierPriority[paidTestTier] ?? 0) > (tierPriority[effectiveTier] ?? 0)) {
+        effectiveTier = paidTestTier;
+        console.log("[analyst] dev test tier applied", { userIdPrefix: userId.slice(0, 8) });
       }
     }
   }
@@ -5614,7 +5625,7 @@ async function handleAnalystChat(request: Request, env: Env): Promise<Response> 
   }
   if (!access.allowed) {
     return jsonResponse(
-      { ok: false, errorCode: "subscription_required", error: "This session requires a paid subscription." },
+      { ok: false, errorCode: "paid_subscription_required", error: "This session requires a paid subscription." },
       403,
     );
   }
@@ -11241,7 +11252,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/ping") {
-      return jsonResponse({ ok: true, now: new Date().toISOString(), service: "eagoh-analyst-worker", version: "d2.3h-rpc-split" });
+      return jsonResponse({ ok: true, now: new Date().toISOString(), service: "eagoh-analyst-worker", version: "d2.3i-paid-sub-code" });
     }
 
     if (url.pathname === "/analyst/chat" && request.method === "POST") {

@@ -115,6 +115,7 @@ export type AnalystErrorCode =
   | "eagoh_not_found"
   | "insufficient_neurons"
   | "subscription_required"
+  | "paid_subscription_required"
   | "charge_failed"
   | "server_error"
   | "openai_error"
@@ -221,6 +222,7 @@ const ERROR_MESSAGES: Record<AnalystErrorCode, string> = {
   eagoh_not_found: "Selected EAGOH not found or access denied.",
   insufficient_neurons: "Insufficient Neurons for this session. Top up your balance to continue.",
   subscription_required: "This session requires a paid subscription.",
+  paid_subscription_required: "This session requires a paid subscription.",
   charge_failed: "The charge for this session could not be completed. Please try again.",
   server_error: "The analyst service could not complete your request. Please try again.",
   openai_error: "Analysis could not be completed. Please try again.",
@@ -343,6 +345,7 @@ function classifyWorkerError(
   if (errorCode === "unauthorized") return "unauthorized";
   if (errorCode === "eagoh_not_found") return "eagoh_not_found";
   if (errorCode === "insufficient_neurons") return "insufficient_neurons";
+  if (errorCode === "paid_subscription_required") return "paid_subscription_required";
   if (errorCode === "subscription_required") return "subscription_required";
   if (errorCode === "charge_failed") return "charge_failed";
   if (errorCode === "server_error") return "server_error";
