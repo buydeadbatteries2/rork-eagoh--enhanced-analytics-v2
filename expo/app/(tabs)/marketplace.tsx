@@ -10,6 +10,7 @@ import { captureRef } from "react-native-view-shot";
 import * as Sharing from "expo-sharing";
 import PremiumShareCard, { type PremiumShareCardData } from "@/app/_components/PremiumShareCard";
 import {
+  Activity,
   ArrowRightLeft,
   Award,
   BookOpen,
@@ -18,6 +19,7 @@ import {
   Coins,
   Crown,
   Dna,
+  Fingerprint,
   Filter,
   Info,
   Link2,
@@ -243,6 +245,16 @@ function timeLeft(expiresAt: string): string {
   const days = Math.floor(hours / 24);
   const remainHours = hours % 24;
   return `${days}d ${remainHours}h left`;
+}
+
+/** Human-readable absolute expiration label, e.g. "Expires Aug 30, 14:32". */
+function formatExpiresLabel(expiresAt: string): string {
+  const d = new Date(expiresAt);
+  if (Number.isNaN(d.getTime())) return "";
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const hh = d.getHours().toString().padStart(2, "0");
+  const mm = d.getMinutes().toString().padStart(2, "0");
+  return `Expires ${months[d.getMonth()]} ${d.getDate()}, ${hh}:${mm}`;
 }
 
 function rankEmoji(rank: string): string {
@@ -1267,6 +1279,12 @@ const ActiveSyncCard = memo(function ActiveSyncCard({
   }, [h]);
 
   const hasExpiredForRender = new Date(item.expires_at).getTime() <= Date.now();
+  const expiresLabel = formatExpiresLabel(item.expires_at);
+  // Fraction of the sync window still available (0–100) for the progress bar.
+  const startedMs = new Date(item.started_at).getTime();
+  const expiresMs = new Date(item.expires_at).getTime();
+  const syncWindowMs = Math.max(expiresMs - startedMs, 1);
+  const remainingPercent = Math.min(100, Math.max(0, Math.round(((expiresMs - Date.now()) / syncWindowMs) * 100)));
 
   return (
     <View>
@@ -1281,41 +1299,79 @@ const ActiveSyncCard = memo(function ActiveSyncCard({
         style={({ pressed }) => [pressed && styles.pressed]}
       >
         <View style={styles.activeSyncCard}>
-          <View style={styles.activeSyncLeft}>
+          <View style={styles.activeSyncTop}>
             <View style={styles.activeSyncImage}>
               <OptimizedEagohImage tone="cyan" label={item.eagoh_name} size="banner" imageUrl={item.eagoh_image_url} />
             </View>
             <View style={styles.activeSyncInfo}>
               <Text style={styles.activeSyncName} numberOfLines={1}>{item.eagoh_name}</Text>
-              <Text style={styles.activeSyncVendor}>by {item.vendor_username ?? "Anonymous"}</Text>
-              <Text style={styles.activeSyncLevel}>{item.sync_level} Sync · {item.days} day(s)</Text>
+              <Text style={styles.activeSyncVendor} numberOfLines={1}>by {item.vendor_username ?? "Anonymous"}</Text>
+              <View style={styles.activeSyncBadgeRow}>
+                <View style={styles.activeSyncAccessBadge}>
+                  <Text style={styles.activeSyncAccessText} numberOfLines={1}>{item.sync_level} ACCESS</Text>
+                </View>
+                <Text style={styles.activeSyncDays}>{item.days} day(s)</Text>
+                <View style={[styles.activeSyncStatus, isExpiring && styles.activeSyncStatusWarn]}>
+                  <Power color={isExpiring ? palette.ember : palette.success} size={12} />
+                  <Text style={[styles.activeSyncStatusText, isExpiring && styles.activeSyncStatusTextWarn]}>
+                    {isExpiring ? "Expiring" : "Active"}
+                  </Text>
+                </View>
+              </View>
+            </View>
+            <View style={styles.activeSyncCostBadge}>
+              <Coins color={palette.gold} size={10} />
+              <Text style={styles.activeSyncCostText}>{item.edge_cost} EC</Text>
             </View>
           </View>
-          <View style={styles.activeSyncRight}>
-            <View style={[styles.activeSyncStatus, isExpiring && styles.activeSyncStatusWarn]}>
-              <Power color={isExpiring ? palette.ember : palette.success} size={12} />
-              <Text style={[styles.activeSyncStatusText, isExpiring && styles.activeSyncStatusTextWarn]}>
-                {isExpiring ? "Expiring" : "Active"}
+
+          <View style={styles.activeSyncProgressBlock}>
+            <View style={styles.activeSyncTimeRow}>
+              <Clock color={isExpiring ? palette.ember : palette.cyan} size={12} />
+              <Text style={[styles.activeSyncTime, isExpiring && styles.activeSyncTimeWarn]}>
+                {remaining === "Expired" ? "Expired" : `${remaining.replace(" left", "")} remaining`}
               </Text>
             </View>
-            <Text style={[styles.activeSyncTime, isExpiring && styles.activeSyncTimeWarn]}>{remaining}</Text>
-            <Text style={styles.activeSyncCost}>{item.edge_cost} EC</Text>
-            {canAccessExchange && (
-              <View style={styles.exchangeExpandHint}>
-                <ChevronDown
-                  color={palette.cyan}
-                  size={14}
-                  style={{ transform: [{ rotate: expanded ? "180deg" : "0deg" }] }}
-                />
-                <Text style={styles.exchangeExpandText}>{expanded ? "Hide" : "Rate"}</Text>
-              </View>
-            )}
-            {hasExpiredForRender && (
-              <View style={styles.exchangeExpiredBadge}>
-                <Text style={styles.exchangeExpiredText}>EXPIRED</Text>
-              </View>
+            <View style={[styles.activeSyncTrack, isExpiring && styles.activeSyncTrackWarn]}>
+              <LinearGradient
+                colors={isExpiring ? [palette.ember, palette.gold] : [palette.cyan, palette.success]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={[styles.activeSyncFill, { width: `${remainingPercent}%` }]}
+              />
+            </View>
+            {expiresLabel.length > 0 && (
+              <Text style={styles.activeSyncExpires} numberOfLines={1}>{expiresLabel}</Text>
             )}
           </View>
+
+          {(canAccessExchange || hasExpiredForRender) && (
+            <View style={styles.activeSyncActions}>
+              {canAccessExchange && (
+                <Pressable
+                  onPress={() => {
+                    h.light();
+                    setExpanded((prev) => !prev);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={expanded ? "Hide purchased intelligence" : "Rate this sync"}
+                  style={({ pressed }) => [styles.rateSyncBtn, pressed && styles.pressed]}
+                >
+                  <ChevronDown
+                    color={palette.cyan}
+                    size={14}
+                    style={{ transform: [{ rotate: expanded ? "180deg" : "0deg" }] }}
+                  />
+                  <Text style={styles.rateSyncBtnText}>{expanded ? "Hide Intelligence" : "Rate Sync"}</Text>
+                </Pressable>
+              )}
+              {hasExpiredForRender && (
+                <View style={styles.exchangeExpiredBadge}>
+                  <Text style={styles.exchangeExpiredText}>EXPIRED</Text>
+                </View>
+              )}
+            </View>
+          )}
         </View>
       </Pressable>
 
@@ -1970,34 +2026,73 @@ const BuyerEagohSelector = memo(function BuyerEagohSelector({
   eligible: EagohRecord[];
   onSelect: (id: string) => void;
 }): JSX.Element {
+  const h = useHaptics();
   const domain = selected.domain ?? selected.sport ?? "";
   const showSwitcher = eligible.length > 1;
+  const chipRailRef = useRef<ScrollView | null>(null);
 
   return (
     <View style={styles.buyerSelectorCard}>
-      <View style={styles.buyerSelectorRow}>
-        <View style={styles.buyerSelectorImage}>
-          <OptimizedEagohImage
-            tone="cyan"
-            label={selected.name}
-            size="compact"
-            imageUrl={resolveMarketplaceEagohImage(selected)}
-          />
-        </View>
-        <View style={styles.buyerSelectorInfo}>
-          <Text style={styles.buyerSelectorLabel}>Browsing as</Text>
-          <Text style={styles.buyerSelectorName} numberOfLines={1}>{selected.name}</Text>
-          <Text style={styles.buyerSelectorDomain}>{domainLabel(domain)}</Text>
-        </View>
-        {showSwitcher && (
-          <View style={styles.buyerSelectorSwitchBadge}>
-            <ChevronDown color={palette.cyan} size={13} />
-            <Text style={styles.buyerSelectorSwitchText}>Switch</Text>
-          </View>
-        )}
+      <View style={styles.identityHeader}>
+        <Fingerprint color={palette.cyan} size={13} />
+        <Text style={styles.identityEyebrow}>MARKETPLACE IDENTITY</Text>
       </View>
+      <Text style={styles.identitySubtitle}>
+        Your selected EAGOH determines what you can browse and purchase.
+      </Text>
+
+      <View style={styles.identityHeroWrap}>
+        <LinearGradient
+          colors={["#0A1E33", "#07251F"]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.identityHero}
+        >
+          <View style={styles.identityPortrait}>
+            <OptimizedEagohImage
+              tone="cyan"
+              label={selected.name}
+              size="banner"
+              imageUrl={resolveMarketplaceEagohImage(selected)}
+            />
+          </View>
+          <View style={styles.identityInfo}>
+            <Text style={styles.identityPurchasingLabel}>Purchasing as</Text>
+            <Text style={styles.identityName} numberOfLines={1}>{selected.name}</Text>
+            <View style={styles.identityDomainBadge}>
+              <Text style={styles.identityDomainText} numberOfLines={1}>{domainLabel(domain)}</Text>
+            </View>
+            <View style={styles.identityStatusRow}>
+              <View style={styles.identityStatusDot} />
+              <Text style={styles.identityStatusText}>Active Marketplace Identity</Text>
+            </View>
+          </View>
+          {showSwitcher && (
+            <Pressable
+              onPress={() => {
+                h.light();
+                chipRailRef.current?.flashScrollIndicators();
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="Switch EAGOH"
+              style={({ pressed }) => [styles.identitySwitchBtn, pressed && styles.pressed]}
+            >
+              <ArrowRightLeft color={palette.cyan} size={12} />
+              <Text style={styles.identitySwitchText}>
+                Switch{"\n"}EAGOH
+              </Text>
+            </Pressable>
+          )}
+        </LinearGradient>
+      </View>
+
       {showSwitcher && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRail}>
+        <ScrollView
+          ref={chipRailRef}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.chipRail}
+        >
           {eligible.map((e) => {
             const isActive = e.id === selected.id;
             return (
@@ -2006,9 +2101,16 @@ const BuyerEagohSelector = memo(function BuyerEagohSelector({
                 onPress={() => onSelect(e.id)}
                 accessibilityRole="button"
                 accessibilityLabel={`Browse the Exchange as ${e.name}`}
-                style={[styles.chip, isActive && styles.activeChip]}
+                style={({ pressed }) => [
+                  styles.identityChip,
+                  isActive && styles.identityChipActive,
+                  pressed && styles.pressed,
+                ]}
               >
-                <Text style={[styles.chipText, isActive && styles.activeChipText]} numberOfLines={1}>
+                <Text
+                  style={[styles.identityChipText, isActive && styles.identityChipTextActive]}
+                  numberOfLines={1}
+                >
                   {e.name}
                 </Text>
               </Pressable>
@@ -2544,16 +2646,30 @@ export default function MarketplaceScreen(): JSX.Element {
           onPromote={() => setBannerModalVisible(true)}
         />
 
-        {/* Active Syncs (above filters, compact) */}
+        {/* Live Intelligence — active syncs (above filters) */}
         {isPaid && activeSyncs.length > 0 && (
-          <View style={styles.activeSyncsSection}>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Your Active Syncs</Text>
-              <Text style={styles.sectionCount}>{activeSyncs.length}</Text>
-            </View>
-            {activeSyncs.map((s) => (
-              <ActiveSyncCard key={s.id} item={s} userId={user?.id} />
-            ))}
+          <View style={styles.activeSyncsSectionGlow}>
+            <LinearGradient
+              colors={["rgba(3,22,24,0.95)", "rgba(5,12,26,0.95)"]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 0, y: 1 }}
+              style={styles.activeSyncsSection}
+            >
+              <View style={styles.liveHeaderRow}>
+                <View style={styles.livePulseWrap}>
+                  <Activity color={palette.success} size={12} />
+                </View>
+                <Text style={styles.liveEyebrow}>LIVE INTELLIGENCE</Text>
+                <View style={styles.liveCountBadge}>
+                  <Text style={styles.liveCountText}>{activeSyncs.length}</Text>
+                </View>
+              </View>
+              <Text style={styles.liveTitle}>Your Active Syncs</Text>
+              <Text style={styles.liveSub}>Intelligence currently available to your selected EAGOH.</Text>
+              {activeSyncs.map((s) => (
+                <ActiveSyncCard key={s.id} item={s} userId={user?.id} />
+              ))}
+            </LinearGradient>
           </View>
         )}
 
@@ -2802,10 +2918,14 @@ export default function MarketplaceScreen(): JSX.Element {
       }
       if (allActive.length === 0) {
         return (
-          <View style={styles.emptyWrap}>
-            <Clock color={palette.muted} size={40} />
-            <Text style={styles.emptyTitle}>No Active Syncs</Text>
-            <Text style={styles.emptyBody}>Purchase sync access from the Browse tab.</Text>
+          <View style={styles.syncsEmptyCard}>
+            <View style={styles.syncsEmptyPulse}>
+              <Activity color={palette.success} size={16} />
+            </View>
+            <Text style={styles.syncsEmptyTitle}>No active intelligence syncs</Text>
+            <Text style={styles.syncsEmptyBody}>
+              Purchase intelligence from a same-domain EAGOH to see it here.
+            </Text>
           </View>
         );
       }
@@ -3121,8 +3241,48 @@ const styles = StyleSheet.create({
   },
   salesOrdersBtnText: { color: palette.gold, fontSize: 12, fontWeight: "900", flex: 1 },
 
-  // Active Syncs section
-  activeSyncsSection: { gap: 8 },
+  // Live Intelligence — active syncs section
+  activeSyncsSectionGlow: {
+    borderRadius: 10,
+    shadowColor: palette.success,
+    shadowOpacity: 0.16,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  activeSyncsSection: {
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(108,230,255,0.30)",
+    padding: 14,
+    paddingTop: 16,
+    paddingBottom: 16,
+    gap: 6,
+    overflow: "hidden",
+  },
+  liveHeaderRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  livePulseWrap: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: palette.successSoft,
+    borderWidth: 1,
+    borderColor: "rgba(0,255,178,0.35)",
+  },
+  liveEyebrow: { color: palette.success, fontSize: 10, fontWeight: "900", letterSpacing: 2 },
+  liveCountBadge: {
+    minWidth: 22,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: palette.cyan,
+    borderRadius: 5,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  liveCountText: { color: palette.void, fontSize: 11, fontWeight: "900" },
+  liveTitle: { color: palette.text, fontSize: 17, fontWeight: "900", letterSpacing: -0.3 },
+  liveSub: { color: palette.muted, fontSize: 11, fontWeight: "700", lineHeight: 15, marginBottom: 4 },
   sectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 4 },
   sectionTitle: { color: palette.text, fontSize: 16, fontWeight: "900" },
   sectionCount: {
@@ -3172,41 +3332,89 @@ const styles = StyleSheet.create({
   },
   promoteCtaBtnText: { color: palette.void, fontSize: 12, fontWeight: "900" },
 
-  // Phase D1: selected buyer-EAGOH Exchange selector
+  // Phase D1 / D2.3P UI: Marketplace Identity — selected buyer-EAGOH selector
   buyerSelectorCard: {
     borderRadius: 5,
     borderWidth: 1,
     borderColor: "rgba(54,245,255,0.22)",
     backgroundColor: "rgba(10,22,40,0.60)",
     padding: 12,
-    gap: 10,
+    gap: 8,
   },
-  buyerSelectorRow: { flexDirection: "row", alignItems: "center", gap: 10 },
-  buyerSelectorImage: {
-    width: 44,
-    height: 54,
-    borderRadius: 5,
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: palette.line,
-    backgroundColor: "#03060B",
+  identityHeader: { flexDirection: "row", alignItems: "center", gap: 6 },
+  identityEyebrow: { color: palette.cyan, fontSize: 10, fontWeight: "900", letterSpacing: 2 },
+  identitySubtitle: { color: palette.muted, fontSize: 11, fontWeight: "700", lineHeight: 15 },
+  identityHeroWrap: {
+    borderRadius: 10,
+    shadowColor: palette.cyan,
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 0 },
   },
-  buyerSelectorInfo: { flex: 1, gap: 1 },
-  buyerSelectorLabel: { color: palette.muted, fontSize: 10, fontWeight: "800", letterSpacing: 0.4 },
-  buyerSelectorName: { color: palette.text, fontSize: 15, fontWeight: "900" },
-  buyerSelectorDomain: { color: palette.cyan, fontSize: 11, fontWeight: "800" },
-  buyerSelectorSwitchBadge: {
+  identityHero: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 3,
+    gap: 12,
+    borderRadius: 10,
     borderWidth: 1,
-    borderColor: "rgba(54,245,255,0.28)",
+    borderColor: "rgba(108,230,255,0.40)",
+    padding: 12,
+    overflow: "hidden",
+  },
+  identityPortrait: {
+    width: 62,
+    height: 76,
+    borderRadius: 8,
+    overflow: "hidden",
+    borderWidth: 1.5,
+    borderColor: "rgba(108,230,255,0.45)",
+    backgroundColor: "#03060B",
+  },
+  identityInfo: { flex: 1, gap: 4 },
+  identityPurchasingLabel: { color: palette.muted, fontSize: 10, fontWeight: "800", letterSpacing: 0.6 },
+  identityName: { color: palette.text, fontSize: 17, fontWeight: "900", letterSpacing: -0.2 },
+  identityDomainBadge: {
+    alignSelf: "flex-start",
+    backgroundColor: palette.cyanSoft,
+    borderWidth: 1,
+    borderColor: "rgba(108,230,255,0.35)",
     borderRadius: 5,
     paddingHorizontal: 8,
-    paddingVertical: 4,
-    backgroundColor: "rgba(54,245,255,0.08)",
+    paddingVertical: 3,
   },
-  buyerSelectorSwitchText: { color: palette.cyan, fontSize: 10, fontWeight: "900" },
+  identityDomainText: { color: palette.cyan, fontSize: 10, fontWeight: "900", letterSpacing: 1 },
+  identityStatusRow: { flexDirection: "row", alignItems: "center", gap: 5, marginTop: 2 },
+  identityStatusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: palette.success,
+  },
+  identityStatusText: { color: palette.muted, fontSize: 10, fontWeight: "800" },
+  identitySwitchBtn: {
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
+    minHeight: 52,
+    borderWidth: 1,
+    borderColor: "rgba(108,230,255,0.45)",
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    backgroundColor: "rgba(108,230,255,0.08)",
+  },
+  identitySwitchText: { color: palette.cyan, fontSize: 10, fontWeight: "900", textAlign: "center", lineHeight: 13 },
+  identityChip: {
+    minHeight: 34,
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "rgba(120,180,255,0.16)",
+    borderRadius: 5,
+    paddingHorizontal: 12,
+    backgroundColor: "rgba(10,20,40,0.65)",
+  },
+  identityChipActive: { backgroundColor: palette.cyan, borderColor: palette.cyan },
+  identityChipText: { color: palette.muted, fontSize: 11, fontWeight: "900" },
+  identityChipTextActive: { color: palette.void },
 
   // Filters
   filterPanel: {
@@ -3520,30 +3728,38 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
 
-  // Active Sync Card
+  // Active Sync Card — live-access redesign (D2.3P UI)
   activeSyncCard: {
-    flexDirection: "row",
     borderRadius: 5,
-    padding: 10,
-    backgroundColor: "rgba(14,24,37,0.76)",
+    padding: 12,
+    gap: 10,
+    backgroundColor: "rgba(10,24,30,0.82)",
     borderWidth: 1,
-    borderColor: palette.line,
-    justifyContent: "space-between",
+    borderColor: "rgba(108,230,255,0.22)",
   },
-  activeSyncLeft: { flexDirection: "row", gap: 10, flex: 1 },
+  activeSyncTop: { flexDirection: "row", gap: 10, alignItems: "center" },
   activeSyncImage: {
-    width: 48,
-    height: 58,
+    width: 60,
+    height: 72,
     borderRadius: 5,
     overflow: "hidden",
     borderWidth: 1,
-    borderColor: palette.line,
+    borderColor: "rgba(108,230,255,0.30)",
   },
-  activeSyncInfo: { flex: 1, justifyContent: "center", gap: 2 },
-  activeSyncName: { color: palette.text, fontSize: 14, fontWeight: "900" },
+  activeSyncInfo: { flex: 1, justifyContent: "center", gap: 4 },
+  activeSyncName: { color: palette.text, fontSize: 15, fontWeight: "900" },
   activeSyncVendor: { color: palette.muted, fontSize: 11, fontWeight: "800" },
-  activeSyncLevel: { color: palette.cyan, fontSize: 11, fontWeight: "800" },
-  activeSyncRight: { alignItems: "flex-end", justifyContent: "center", gap: 4 },
+  activeSyncBadgeRow: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" },
+  activeSyncAccessBadge: {
+    backgroundColor: palette.cyanSoft,
+    borderWidth: 1,
+    borderColor: "rgba(108,230,255,0.40)",
+    borderRadius: 5,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  activeSyncAccessText: { color: palette.cyan, fontSize: 9, fontWeight: "900", letterSpacing: 1 },
+  activeSyncDays: { color: palette.muted, fontSize: 10, fontWeight: "800" },
   activeSyncStatus: {
     flexDirection: "row",
     alignItems: "center",
@@ -3556,13 +3772,54 @@ const styles = StyleSheet.create({
   activeSyncStatusWarn: { backgroundColor: palette.emberSoft },
   activeSyncStatusText: { color: palette.success, fontSize: 10, fontWeight: "900" },
   activeSyncStatusTextWarn: { color: palette.ember },
+  activeSyncCostBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: palette.goldSoft,
+    borderWidth: 1,
+    borderColor: "rgba(255,181,71,0.35)",
+    borderRadius: 5,
+    paddingHorizontal: 7,
+    paddingVertical: 4,
+  },
+  activeSyncCostText: { color: palette.gold, fontSize: 11, fontWeight: "900" },
+  activeSyncProgressBlock: { gap: 5 },
+  activeSyncTimeRow: { flexDirection: "row", alignItems: "center", gap: 5 },
   activeSyncTime: { color: palette.text, fontSize: 12, fontWeight: "900" },
   activeSyncTimeWarn: { color: palette.ember },
-  activeSyncCost: { color: palette.gold, fontSize: 11, fontWeight: "900" },
+  activeSyncTrack: {
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: "rgba(3,6,11,0.80)",
+    borderWidth: 1,
+    borderColor: "rgba(120,180,255,0.14)",
+    overflow: "hidden",
+  },
+  activeSyncTrackWarn: { borderColor: "rgba(255,77,109,0.30)" },
+  activeSyncFill: { height: "100%", borderRadius: 3 },
+  activeSyncExpires: { color: palette.muted, fontSize: 10, fontWeight: "700" },
+  activeSyncActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  rateSyncBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    minHeight: 36,
+    flex: 1,
+    borderWidth: 1,
+    borderColor: "rgba(108,230,255,0.45)",
+    borderRadius: 5,
+    backgroundColor: "rgba(108,230,255,0.08)",
+  },
+  rateSyncBtnText: { color: palette.cyan, fontSize: 11, fontWeight: "900", letterSpacing: 0.5 },
 
   // Exchange buyer feedback expand section
-  exchangeExpandHint: { flexDirection: "row", alignItems: "center", gap: 3, marginTop: 4 },
-  exchangeExpandText: { color: palette.cyan, fontSize: 9, fontWeight: "900" as const, letterSpacing: 0.5 },
   exchangeOISection: {
     marginTop: 8,
     padding: 12,
@@ -3621,6 +3878,28 @@ const styles = StyleSheet.create({
   emptyWrap: { alignItems: "center", paddingVertical: 40, gap: 10 },
   emptyTitle: { color: palette.text, fontSize: 18, fontWeight: "900" },
   emptyBody: { color: palette.muted, fontSize: 13, fontWeight: "700", textAlign: "center", lineHeight: 19, paddingHorizontal: 20 },
+  syncsEmptyCard: {
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 28,
+    paddingHorizontal: 20,
+    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: "rgba(108,230,255,0.18)",
+    backgroundColor: "rgba(10,24,30,0.55)",
+  },
+  syncsEmptyPulse: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: palette.successSoft,
+    borderWidth: 1,
+    borderColor: "rgba(0,255,178,0.30)",
+  },
+  syncsEmptyTitle: { color: palette.text, fontSize: 15, fontWeight: "900", textAlign: "center" },
+  syncsEmptyBody: { color: palette.muted, fontSize: 12, fontWeight: "700", textAlign: "center", lineHeight: 17 },
   emptyHint: { color: palette.muted, fontSize: 13, fontWeight: "700", paddingVertical: 8 },
   emptyActionBtn: {
     flexDirection: "row",
