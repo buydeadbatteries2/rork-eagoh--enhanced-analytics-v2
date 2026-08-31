@@ -59,6 +59,11 @@
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 1. Column-level UPDATE privileges (defense in depth, layer 1)
 -- ─────────────────────────────────────────────────────────────────────────────
+
+-- Single transaction: every mutation below commits atomically — any failure
+-- before COMMIT rolls back the entire migration.
+begin;
+
 do $$
 declare
   v_cols text;
@@ -239,6 +244,8 @@ join pg_proc p on p.oid = t.tgfoid
 where t.tgrelid = 'public.profiles'::regclass
   and not t.tgisinternal
 order by t.tgname;
+
+commit;
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 5. Manual behavior verification (run manually after applying; do NOT ship as
