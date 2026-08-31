@@ -236,7 +236,7 @@ order by policyname;
 select
   t.tgname  as trigger_name,
   p.proname as function_name,
-  case when p.prosec
+  case when p.prosecdef
        then 'SECURITY DEFINER (UNSAFE — must not appear)'
        else 'SECURITY INVOKER' end as security_mode
 from pg_trigger t
