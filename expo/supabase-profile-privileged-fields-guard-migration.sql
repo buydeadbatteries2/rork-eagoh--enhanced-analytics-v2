@@ -10,7 +10,8 @@
 --   admin_tier_note, is_admin
 --
 -- What this does:
---   1. Revokes table-level UPDATE from anon/authenticated on public.profiles
+--   1. Revokes table-level UPDATE from PUBLIC, anon, and authenticated on
+--      public.profiles
 --      (Supabase default privileges grant ALL, including UPDATE) and re-grants
 --      UPDATE column-by-column on every column EXCEPT the protected five.
 --      A REST PATCH touching any protected column then fails at the privilege
@@ -25,10 +26,16 @@
 --      defaults for non-privileged roles (closes the profiles_self_insert
 --      hole where a fresh row could be created with is_admin = true).
 --
--- Role check security: the trigger inspects `current_user` — the database role
--- established by PostgREST via SET ROLE after JWT verification. It cannot be
--- spoofed by JWT claims, request bodies, stored is_admin values, or any
--- client-supplied field.
+-- Role check security: both trigger functions explicitly declare SECURITY
+-- INVOKER (never SECURITY DEFINER). Under SECURITY INVOKER, `current_user` is
+-- the post-SET-ROLE database role established server-side by PostgREST after
+-- JWT verification — it cannot be spoofed by JWT claims, request bodies,
+-- stored is_admin values, or any client-supplied field. (Under SECURITY
+-- DEFINER the functions would execute as their owner, so current_user would
+-- always be the owner and the check would be silently voided — hence the
+-- explicit declaration.) Allowed roles: service_role, postgres,
+-- supabase_admin. Every other role — known or future — is rejected
+-- (fail-closed).
 --
 -- Preserved behavior:
 --   - Authenticated users keep editing their own normal profile fields
@@ -73,12 +80,15 @@ begin
     raise exception 'public.profiles not found or has no grantable columns — aborting, nothing changed.';
   end if;
 
-  -- Revoke table-level UPDATE first (default privileges grant ALL).
-  -- service_role is intentionally untouched.
+  -- Revoke table-level UPDATE from PUBLIC, anon, and authenticated
+  -- (Supabase default privileges grant ALL). service_role privileges are
+  -- intentionally untouched — the Worker depends on them.
   execute 'revoke update on table public.profiles from anon, authenticated, public';
 
-  -- Re-grant UPDATE on every non-protected column to authenticated.
-  -- anon has no legitimate profiles update path and gets none.
+  -- Re-grant UPDATE on every non-protected column — to authenticated ONLY.
+  -- anon and PUBLIC deliberately receive no UPDATE grant: no verified runtime
+  -- flow performs anonymous profile updates, and profile onboarding uses
+  -- INSERT (profiles_self_insert, unaffected by this change).
   execute format('grant update (%s) on table public.profiles to authenticated', v_cols);
 
   raise notice 'profiles UPDATE grants rebuilt: authenticated keeps % column(s), protected columns excluded.', array_length(string_to_array(v_cols, ','), 1);
@@ -90,12 +100,15 @@ end $$;
 create or replace function public.enforce_profiles_privileged_fields()
 returns trigger
 language plpgsql
+security invoker
 set search_path = public
 as $$
 begin
-  -- current_user is the post-SET-ROLE database role. Server-established,
-  -- not client-controllable. SECURITY DEFINER RPCs run as their owner
-  -- (postgres) and therefore pass.
+  -- SECURITY INVOKER (declared explicitly above): current_user is the
+  -- post-SET-ROLE database role — server-established, not
+  -- client-controllable. SECURITY DEFINER RPCs run as their owner
+  -- (postgres) and therefore pass. Every other role — known or future —
+  -- falls through to the rejection below (fail-closed).
   if current_user in ('service_role', 'postgres', 'supabase_admin') then
     return new;
   end if;
@@ -127,15 +140,28 @@ create trigger profiles_privileged_fields_guard
 create or replace function public.guard_profiles_privileged_insert()
 returns trigger
 language plpgsql
+security invoker
 set search_path = public
 as $$
 begin
+  -- Privileged inserts pass through with NEW untouched: the Worker's
+  -- service-role writes, SQL-editor/postgres administration, and
+  -- handle_new_user() (SECURITY DEFINER owned by postgres, so current_user
+  -- inside it is postgres) keep exactly the values they provide — never
+  -- overwritten by this guard.
   if current_user in ('service_role', 'postgres', 'supabase_admin') then
     return new;
   end if;
 
-  -- Coerce to safe defaults; identical to what ensureProfile inserts, so the
-  -- client onboarding path behaves exactly as before.
+  -- Every other role (authenticated, anon, or any other role) is coerced to
+  -- safe defaults regardless of what NEW carried — identical to what
+  -- ensureProfile inserts, so client onboarding behaves exactly as before.
+  -- Forced values:
+  --   subscription_tier     = 'free'
+  --   admin_tier_override   = null
+  --   admin_tier_expires_at = null
+  --   admin_tier_note       = null
+  --   is_admin              = false
   new.subscription_tier     := 'free';
   new.admin_tier_override   := null;
   new.admin_tier_expires_at := null;
@@ -153,23 +179,83 @@ create trigger profiles_privileged_insert_guard
   execute function public.guard_profiles_privileged_insert();
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 4. Verification (run manually after applying; do NOT ship as part of a
---    batch — each check prints PASS/FAIL via notice and the final raise
---    rolls every change back, leaving data untouched).
+-- 4. OPERATIVE PREFLIGHT — live catalog queries (read-only; safe to run in the
+--    same batch as the migration). These display the actual database state,
+--    not repository inference. Expected results are annotated inline.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- 4.1 Table-level UPDATE grants on public.profiles:
+--     expect ONLY service_role (postgres/supabase_admin hold superuser rights
+--     and do not appear as explicit grantees; anon/authenticated must be
+--     absent entirely).
+select grantee, privilege_type
+from information_schema.table_privileges
+where table_schema = 'public'
+  and table_name   = 'profiles'
+  and privilege_type = 'UPDATE'
+order by grantee;
+
+-- 4.2 Column-level UPDATE grants:
+--     expect authenticated rows for every non-protected column only — no row
+--     for anon or PUBLIC, and none of the five protected columns for any
+--     client-facing grantee.
+select grantee, column_name
+from information_schema.column_privileges
+where table_schema = 'public'
+  and table_name   = 'profiles'
+  and privilege_type = 'UPDATE'
+order by grantee, column_name;
+
+-- 4.3 Boolean privilege assertions (authoritative check):
+select
+  has_table_privilege('anon',          'public.profiles', 'UPDATE') as anon_table_update,                            -- expect false
+  has_table_privilege('authenticated', 'public.profiles', 'UPDATE') as authenticated_table_update,                   -- expect false
+  has_table_privilege('service_role',  'public.profiles', 'UPDATE') as service_role_table_update,                    -- expect true
+  has_column_privilege('authenticated', 'public.profiles', 'username', 'UPDATE')            as auth_upd_username,                  -- expect true
+  has_column_privilege('authenticated', 'public.profiles', 'subscription_tier', 'UPDATE')   as auth_upd_subscription_tier,         -- expect false
+  has_column_privilege('authenticated', 'public.profiles', 'admin_tier_override', 'UPDATE') as auth_upd_admin_tier_override,       -- expect false
+  has_column_privilege('authenticated', 'public.profiles', 'admin_tier_expires_at', 'UPDATE') as auth_upd_admin_tier_expires_at,   -- expect false
+  has_column_privilege('authenticated', 'public.profiles', 'admin_tier_note', 'UPDATE')     as auth_upd_admin_tier_note,           -- expect false
+  has_column_privilege('authenticated', 'public.profiles', 'is_admin', 'UPDATE')            as auth_upd_is_admin;                  -- expect false;
+
+-- 4.4 RLS policies on public.profiles (expect the five existing policies,
+--     unchanged by this migration):
+select policyname, cmd, roles, qual, with_check
+from pg_policies
+where schemaname = 'public'
+  and tablename  = 'profiles'
+order by policyname;
+
+-- 4.5 Trigger security mode (expect SECURITY INVOKER for both guard
+--     triggers; internal triggers are excluded):
+select
+  t.tgname  as trigger_name,
+  p.proname as function_name,
+  case when p.prosec
+       then 'SECURITY DEFINER (UNSAFE — must not appear)'
+       else 'SECURITY INVOKER' end as security_mode
+from pg_trigger t
+join pg_proc p on p.oid = t.tgfoid
+where t.tgrelid = 'public.profiles'::regclass
+  and not t.tgisinternal
+order by t.tgname;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 5. Manual behavior verification (run manually after applying; do NOT ship as
+--    part of a batch — each check prints PASS/FAIL via notice and the final
+--    raise rolls every change back, leaving data untouched).
+--
+--    Impersonation accuracy: `set local role authenticated` plus a
+--    transaction-local `request.jwt.claims` setting reproduces exactly what
+--    PostgREST does for an authenticated client (RLS via auth.uid() with
+--    role=authenticated); `set local role service_role` reproduces the
+--    Worker's service-role connection. Every subtransaction resets the role
+--    on BOTH success and failure paths so later impersonations always start
+--    from postgres, and the trailing intentional exception aborts the
+--    transaction so NO statement persists (the begin;/rollback; wrapper is a
+--    second safety net).
 --
 --    Replace <TEST_USER_UUID> with the FULL UUID of a real test account.
---    The whole block is one transaction ending in an intentional failure so
---    nothing persists. "rol" warnings/notices print PASS/FAIL lines.
--- ─────────────────────────────────────────────────────────────────────────────
--- 4a. Column privilege state (read-only, no transaction needed):
---
--- select
---   has_column_privilege('authenticated', 'public.profiles', 'username', 'UPDATE')            as auth_upd_username,          -- expect true
---   has_column_privilege('authenticated', 'public.profiles', 'subscription_tier', 'UPDATE')   as auth_upd_subscription_tier, -- expect false
---   has_column_privilege('authenticated', 'public.profiles', 'admin_tier_override', 'UPDATE') as auth_upd_admin_override,    -- expect false
---   has_column_privilege('authenticated', 'public.profiles', 'is_admin', 'UPDATE')            as auth_upd_is_admin;          -- expect false
---
--- 4b. Behavior checks (transactional, self-rolling-back):
 --
 -- begin;
 --
@@ -196,8 +282,10 @@ create trigger profiles_privileged_insert_guard
 --     update public.profiles set username = coalesce(nullif(username, ''), 'audit_ok')
 --     where id = v_uid;
 --     raise notice 'PASS 1/5: authenticated username self-update succeeded';
+--     reset role;  -- restore postgres so later SET ROLE targets are reachable
 --   exception when others then
 --     raise notice 'FAIL 1/5: authenticated username self-update failed: %', sqlerrm;
+--     reset role;
 --   end;
 --
 --   -- 2. authenticated admin_tier_override change fails
@@ -210,6 +298,7 @@ create trigger profiles_privileged_insert_guard
 --     reset role;
 --   exception when others then
 --     raise notice 'PASS 2/5: admin_tier_override change rejected [%] %', sqlstate, sqlerrm;
+--     reset role;  -- subtransaction rollback already restored it; explicit for clarity
 --   end;
 --
 --   -- 3. authenticated subscription_tier change fails
@@ -222,6 +311,7 @@ create trigger profiles_privileged_insert_guard
 --     reset role;
 --   exception when others then
 --     raise notice 'PASS 3/5: subscription_tier change rejected [%] %', sqlstate, sqlerrm;
+--     reset role;  -- subtransaction rollback already restored it; explicit for clarity
 --   end;
 --
 --   -- 4. authenticated is_admin change fails
@@ -234,6 +324,7 @@ create trigger profiles_privileged_insert_guard
 --     reset role;
 --   exception when others then
 --     raise notice 'PASS 4/5: is_admin change rejected [%] %', sqlstate, sqlerrm;
+--     reset role;  -- subtransaction rollback already restored it; explicit for clarity
 --   end;
 --
 --   -- 5. service_role subscription update succeeds
@@ -241,8 +332,10 @@ create trigger profiles_privileged_insert_guard
 --     set local role service_role;
 --     update public.profiles set subscription_tier = 'pro' where id = v_uid;
 --     raise notice 'PASS 5/5: service_role subscription_tier update succeeded';
+--     reset role;  -- restore postgres before the value-comparison check
 --   exception when others then
 --     raise notice 'FAIL 5/5: service_role subscription_tier update failed: %', sqlerrm;
+--     reset role;
 --   end;
 --
 --   -- 6. protected values are unchanged after the rejected attempts
