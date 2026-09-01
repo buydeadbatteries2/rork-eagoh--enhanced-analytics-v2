@@ -1332,19 +1332,42 @@ async function bulkEnrichPurchases(rows: SyncPurchaseRow[]): Promise<EnrichedPur
   });
 }
 
-/** Get active syncs for a buyer (currently active purchases). */
+/**
+ * Get active syncs for a buyer (currently active purchases).
+ *
+ * Phase D2.3Q: account-wide by design — filtered only by buyer_id,
+ * active = true, and (when the trusted status column exists on this
+ * database) purchase_status = 'completed'. Never scoped by the selected
+ * buyer EAGOH, domain, filters, listing visibility, or tab. Expired and
+ * reversed purchases (active = false) are excluded here but remain
+ * permanently in getMyPurchases history — expiration never deletes.
+ */
 export async function getActiveSyncs(buyerId: string): Promise<EnrichedPurchase[]> {
   await expireSyncs(buyerId); // Clean up expired first
 
-  const { data, error } = await supabase
-    .from("marketplace_sync_purchases")
-    .select("*")
-    .eq("buyer_id", buyerId)
-    .eq("active", true)
-    .order("expires_at", { ascending: true });
+  const fetchActive = async (withStatusFilter: boolean) => {
+    let q = supabase
+      .from("marketplace_sync_purchases")
+      .select("*")
+      .eq("buyer_id", buyerId)
+      .eq("active", true)
+      .order("expires_at", { ascending: true });
+    if (withStatusFilter) {
+      q = q.eq("purchase_status", "completed");
+    }
+    return await q;
+  };
 
-  if (error) throw error;
-  const rows = (data ?? []) as SyncPurchaseRow[];
+  let res = await fetchActive(true);
+  if (res.error?.code === "PGRST204") {
+    // The trusted purchase_status column is not present on this database
+    // yet — retry without the status filter. active = true already excludes
+    // expired rows, so results stay correct on unmigrated databases.
+    res = await fetchActive(false);
+  }
+
+  if (res.error) throw res.error;
+  const rows = (res.data ?? []) as SyncPurchaseRow[];
 
   return bulkEnrichPurchases(rows);
 }

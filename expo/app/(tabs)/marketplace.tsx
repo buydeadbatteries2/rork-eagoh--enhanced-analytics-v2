@@ -77,9 +77,7 @@ import {
   extractErrorMessage,
   formatMarketplaceError,
   getActiveFilters,
-  getActiveSyncs,
   getMyListings,
-  getMyPurchases,
   getVendorStats,
   listActiveListings,
   purchaseSync,
@@ -93,6 +91,14 @@ import {
   type SyncLevel,
   type VendorStatsRow,
 } from "@/services/marketplace";
+import {
+  EXCHANGE_ACTIVE_SYNCS_KEY,
+  EXCHANGE_PURCHASE_HISTORY_KEY,
+  invalidateExchangeSyncQueries,
+  useExchangeActiveSyncs,
+  useExchangePurchaseHistory,
+  useExchangeSyncForegroundRefetch,
+} from "@/hooks/useExchangeSyncQueries";
 import type { EagohRecord } from "@/services/eagohs";
 import {
   getActiveBanners,
@@ -2184,8 +2190,19 @@ export default function MarketplaceScreen(): JSX.Element {
   const [filters, setFilters] = useState<ListingFilters>({});
   const [listings, setListings] = useState<EnrichedListing[]>([]);
   const [myListings, setMyListings] = useState<EnrichedListing[]>([]);
-  const [activeSyncs, setActiveSyncsState] = useState<EnrichedPurchase[]>([]);
-  const [purchases, setPurchases] = useState<EnrichedPurchase[]>([]);
+  // ── Phase D2.3Q: durable, independent React Query datasets ──
+  // Active Syncs + Purchase History are rebuilt from Supabase on every cold
+  // start (refetchOnMount "always"), refetch on screen focus and on
+  // foreground return, and are keyed by the authenticated user ID only —
+  // never by the selected buyer EAGOH, domain, filters, or tab. Purchase
+  // History is user-owned read-only history and is NOT gated on
+  // subscription tier. A listing/filter failure can never erase or block
+  // either dataset, and one dataset failing never erases the other.
+  const activeSyncsQuery = useExchangeActiveSyncs(user?.id);
+  const purchaseHistoryQuery = useExchangePurchaseHistory(user?.id);
+  useExchangeSyncForegroundRefetch(user?.id);
+  const activeSyncs = activeSyncsQuery.data ?? [];
+  const purchases = purchaseHistoryQuery.data ?? [];
   const [filterMeta, setFilterMeta] = useState<{ domains: string[]; sports: string[]; ranks: string[] }>({ domains: [], sports: [], ranks: [] });
   // Separate loading states: initial load vs. filter refresh
   const [initialLoading, setInitialLoading] = useState(true);
@@ -2198,8 +2215,8 @@ export default function MarketplaceScreen(): JSX.Element {
   const loadedTabsRef = useRef<Set<string>>(new Set(["browse"]));
   const loadingTabsRef = useRef<Set<string>>(new Set());
   const [myListingsLoading, setMyListingsLoading] = useState(false);
-  const [activeSyncsLoading, setActiveSyncsLoading] = useState(false);
-  const [purchasesLoading, setPurchasesLoading] = useState(false);
+  const activeSyncsLoading = activeSyncsQuery.isPending;
+  const purchasesLoading = purchaseHistoryQuery.isPending;
   const [refreshing, setRefreshing] = useState(false);
   const [tab, setTab] = useState<"browse" | "rankings" | "my-listings" | "my-syncs" | "my-purchases">("browse");
   const [rankingsData, setRankingsData] = useState<Array<{ rank: number; eagoh_id: string; eagoh_name: string; reputation_score: number; rank_tier: RankTier; marketplace_trust: number; sync_success: number; marketplace_sales: number; owner_username: string }>>([]);
@@ -2373,33 +2390,10 @@ export default function MarketplaceScreen(): JSX.Element {
     }
   }, [user?.id, isPaid]);
 
-  const loadActiveSyncsData = useCallback(async () => {
-    if (!user?.id) return;
-    setActiveSyncsLoading(true);
-    try {
-      const syncs = await getActiveSyncs(user.id);
-      setActiveSyncsState(syncs);
-      loadedTabsRef.current.add("my-syncs");
-    } catch (err) {
-      console.warn("[marketplace] active syncs load error", err);
-    } finally {
-      setActiveSyncsLoading(false);
-    }
-  }, [user?.id]);
-
-  const loadPurchasesData = useCallback(async () => {
-    if (!user?.id || !isPaid) return;
-    setPurchasesLoading(true);
-    try {
-      const fresh = await getMyPurchases(user.id);
-      setPurchases(fresh);
-      loadedTabsRef.current.add("my-purchases");
-    } catch (err) {
-      console.warn("[marketplace] purchases load error", err);
-    } finally {
-      setPurchasesLoading(false);
-    }
-  }, [user?.id, isPaid]);
+  // ── Phase D2.3Q: Active Syncs and Purchase History no longer use manual
+  // lazy-tab loaders. They are independent React Query queries (declared
+  // above) that load on mount/cold start, retry transient failures, retain
+  // previous data during refetch, and refetch on focus and foreground.
 
   // ── Pull-to-refresh: refresh active tab's data ──
   // On Browse, explicitly refresh both listings and filter metadata.
@@ -2420,15 +2414,15 @@ export default function MarketplaceScreen(): JSX.Element {
         ]);
       } else if (tab === "my-listings") {
         await loadMyListingsData();
-      } else if (tab === "my-syncs") {
-        await loadActiveSyncsData();
-      } else if (tab === "my-purchases") {
-        await loadPurchasesData();
+      } else if (tab === "my-syncs" && user?.id) {
+        await queryClient.refetchQueries({ queryKey: [EXCHANGE_ACTIVE_SYNCS_KEY, user.id], type: "active" });
+      } else if (tab === "my-purchases" && user?.id) {
+        await queryClient.refetchQueries({ queryKey: [EXCHANGE_PURCHASE_HISTORY_KEY, user.id], type: "active" });
       }
     } finally {
       setRefreshing(false);
     }
-  }, [tab, loadBrowseData, loadMyListingsData, loadActiveSyncsData, loadPurchasesData, queryClient]);
+  }, [tab, loadBrowseData, loadMyListingsData, queryClient, user?.id]);
 
   useEffect(() => {
     loadBrowseData();
@@ -2544,8 +2538,11 @@ export default function MarketplaceScreen(): JSX.Element {
         h.success();
         Alert.alert("Sync Purchased", `You now have ${level} sync access for ${days} day(s).`);
         setPurchaseModal(null);
-        loadActiveSyncsData();
-        if (loadedTabsRef.current.has("my-purchases")) loadPurchasesData();
+        // Phase D2.3Q: rebuild both datasets from Supabase — invalidate the
+        // query keys so each active query refetches exactly once. No
+        // optimistic purchase row is created and the purchase RPC is never
+        // repeated.
+        invalidateExchangeSyncQueries(queryClient);
         queryClient.invalidateQueries({ queryKey: ["marketplace-listings"] });
         queryClient.invalidateQueries({ queryKey: ["vendorOrders"] });
         queryClient.invalidateQueries({ queryKey: ["vendorEarningsSummary"] });
@@ -2555,7 +2552,7 @@ export default function MarketplaceScreen(): JSX.Element {
     } finally {
       setPurchasing(false);
     }
-  }, [user?.id, purchaseModal, selectedBuyerEagoh, selectedBuyerDomain, loadActiveSyncsData, loadPurchasesData]);
+  }, [user?.id, purchaseModal, selectedBuyerEagoh, selectedBuyerDomain, queryClient]);
 
   const handleToggleListing = useCallback(async (id: string, active: boolean) => {
     // ── Re-entry guard: prevent duplicate requests from rapid taps ──
@@ -2682,24 +2679,27 @@ export default function MarketplaceScreen(): JSX.Element {
               ...(isPaid ? [
                 { key: "my-listings" as const, label: "My Listings" },
                 { key: "my-syncs" as const, label: "Active Syncs" },
-                { key: "my-purchases" as const, label: "My Purchases" },
               ] : []),
+              // Phase D2.3Q: Purchase History is user-owned read-only history —
+              // visible to any authenticated buyer, even while tier hydration
+              // temporarily resolves to free. Browse/purchase/sell stay paid-only.
+              ...(user?.id ? [{ key: "my-purchases" as const, label: "My Purchases" }] : []),
             ]).map((t) => (
               <Pressable
                 key={t.key}
                 onPress={() => {
                   const newTab = t.key as typeof tab;
                   setTab(newTab);
-                  if (!loadedTabsRef.current.has(newTab) && !loadingTabsRef.current.has(newTab)) {
+                  // Phase D2.3Q: My Syncs and My Purchases are independent
+                  // React Query queries — they load/refetch themselves. Only
+                  // My Listings keeps its lazy loader.
+                  if (
+                    newTab === "my-listings" &&
+                    !loadedTabsRef.current.has(newTab) &&
+                    !loadingTabsRef.current.has(newTab)
+                  ) {
                     loadingTabsRef.current.add(newTab);
-                    const loadFn =
-                      newTab === "my-listings" ? loadMyListingsData
-                      : newTab === "my-syncs" ? loadActiveSyncsData
-                      : newTab === "my-purchases" ? loadPurchasesData
-                      : null;
-                    if (loadFn) {
-                      loadFn().finally(() => { loadingTabsRef.current.delete(newTab); });
-                    }
+                    loadMyListingsData().finally(() => { loadingTabsRef.current.delete(newTab); });
                   }
                 }}
                 style={[styles.tabChip, tab === t.key && styles.tabChipActive]}
@@ -2916,6 +2916,18 @@ export default function MarketplaceScreen(): JSX.Element {
           </View>
         );
       }
+      if (activeSyncsQuery.isError && allActive.length === 0) {
+        return (
+          <View style={styles.emptyWrap}>
+            <AlertTriangle color={palette.ember} size={40} />
+            <Text style={styles.emptyTitle}>Couldn't Load Active Syncs</Text>
+            <Text style={styles.emptyBody}>We couldn't reach your sync records. Nothing was lost — try again.</Text>
+            <Pressable onPress={() => activeSyncsQuery.refetch()} style={({ pressed }) => [styles.emptyActionBtn, pressed && { opacity: 0.8 }]}>
+              <Text style={styles.emptyActionText}>Retry</Text>
+            </Pressable>
+          </View>
+        );
+      }
       if (allActive.length === 0) {
         return (
           <View style={styles.syncsEmptyCard}>
@@ -2944,6 +2956,18 @@ export default function MarketplaceScreen(): JSX.Element {
           <View style={styles.loadingWrap}>
             <ActivityIndicator color={palette.cyan} size="large" />
             <Text style={styles.loadingTitle}>Loading Purchase History...</Text>
+          </View>
+        );
+      }
+      if (purchaseHistoryQuery.isError && purchases.length === 0) {
+        return (
+          <View style={styles.emptyWrap}>
+            <AlertTriangle color={palette.ember} size={40} />
+            <Text style={styles.emptyTitle}>Couldn't Load Purchase History</Text>
+            <Text style={styles.emptyBody}>Your purchase history is safe — we just couldn't load it right now.</Text>
+            <Pressable onPress={() => purchaseHistoryQuery.refetch()} style={({ pressed }) => [styles.emptyActionBtn, pressed && { opacity: 0.8 }]}>
+              <Text style={styles.emptyActionText}>Retry</Text>
+            </Pressable>
           </View>
         );
       }
