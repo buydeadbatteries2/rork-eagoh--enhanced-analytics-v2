@@ -98,6 +98,10 @@ import {
   useExchangeActiveSyncs,
   useExchangePurchaseHistory,
   useExchangeSyncForegroundRefetch,
+  useExchangeVendorActiveSyncs,
+  useExchangeVendorDashboard,
+  useExchangeVendorForegroundRefetch,
+  useExchangeVendorUnreadSales,
 } from "@/hooks/useExchangeSyncQueries";
 import type { EagohRecord } from "@/services/eagohs";
 import {
@@ -317,13 +321,27 @@ function Hero(): JSX.Element {
   );
 }
 
-// ── Vendor Stats Card ──────────────────────────────────────────────────
+// ── Vendor Stats Card ──────────────────────────────────────────────
+//
+// Phase D2.3R — Vendor Dashboard with sale visibility:
+//   • Active Customer Syncs count (account-wide, from the vendor queries)
+//   • Total Sync Sales count
+//   • Neurons Earned This Month
+//   • "New Sync Sale" badge when unread exchange_sale notifications exist —
+//     tapping the badge or the Sales & Orders button opens Sales & Orders.
+//   • Sales & Orders is visually prominent (gold, full-width).
+//
+// All vendor datasets are independent React Query queries keyed by the
+// authenticated user ID — a marketplace/listing failure can never erase or
+// block the dashboard, and the badge refetches on focus/foreground.────
 
 const VendorStatsCard = memo(function VendorStatsCard(): JSX.Element | null {
   const { user } = useAuth();
   const { profile, effectiveSubscriptionTier: tier } = useProfile();
   const router = useRouter();
+  const h = useHaptics();
   const isVendorEligible = !!user?.id && !!profile && canTransact(tier);
+  const vendorId = isVendorEligible ? user!.id : undefined;
 
   // Cached vendor stats — ~60s staleTime avoids refetching on every Exchange
   // visit. Loading and error states never hide the card, so Sales & Orders
@@ -335,6 +353,16 @@ const VendorStatsCard = memo(function VendorStatsCard(): JSX.Element | null {
     enabled: isVendorEligible,
   });
 
+  // Independent, account-wide vendor sale datasets (Phase D2.3R).
+  const activeSyncsQuery = useExchangeVendorActiveSyncs(vendorId);
+  const dashboardQuery = useExchangeVendorDashboard(vendorId);
+  const unreadSalesQuery = useExchangeVendorUnreadSales(vendorId);
+
+  const openSalesOrders = useCallback(() => {
+    h.light();
+    router.push("/vendor-orders");
+  }, [h, router]);
+
   if (!isVendorEligible) return null;
 
   const stats = statsQuery.data ?? null;
@@ -345,6 +373,11 @@ const VendorStatsCard = memo(function VendorStatsCard(): JSX.Element | null {
   const showStats = stats != null;
   const rankHex = showStats ? rankColor(stats.rank) : palette.muted;
   const statValue = (v: number): string | number => (showStats ? v : "—");
+
+  const unreadSales = unreadSalesQuery.data ?? 0;
+  const activeCustomerSyncs = activeSyncsQuery.data?.length ?? dashboardQuery.data?.activeCustomerSyncs ?? 0;
+  const totalSales = dashboardQuery.data?.totalSales ?? 0;
+  const earnedThisMonth = dashboardQuery.data?.earnedThisMonth ?? 0;
 
   return (
     <View style={styles.vendorStatsCard}>
@@ -360,15 +393,15 @@ const VendorStatsCard = memo(function VendorStatsCard(): JSX.Element | null {
       </View>
       <View style={styles.vendorStatsGrid}>
         <View style={styles.vendorStatItem}>
-          <Text style={styles.vendorStatValue}>{statValue(stats?.active_listings ?? 0)}</Text>
-          <Text style={styles.vendorStatLabel}>Active</Text>
+          <Text style={[styles.vendorStatValue, { color: palette.cyan }]}>{activeCustomerSyncs}</Text>
+          <Text style={styles.vendorStatLabel}>Active Syncs</Text>
         </View>
         <View style={styles.vendorStatItem}>
-          <Text style={styles.vendorStatValue}>{statValue(stats?.total_sales ?? 0)}</Text>
-          <Text style={styles.vendorStatLabel}>Sales</Text>
+          <Text style={styles.vendorStatValue}>{totalSales}</Text>
+          <Text style={styles.vendorStatLabel}>Total Sales</Text>
         </View>
         <View style={styles.vendorStatItem}>
-          <Text style={[styles.vendorStatValue, { color: palette.gold }]}>{statValue(stats?.edge_earned_this_month ?? 0)}</Text>
+          <Text style={[styles.vendorStatValue, { color: palette.gold }]}>{earnedThisMonth}</Text>
           <Text style={styles.vendorStatLabel}>EC This Month</Text>
         </View>
         <View style={styles.vendorStatItem}>
@@ -376,16 +409,35 @@ const VendorStatsCard = memo(function VendorStatsCard(): JSX.Element | null {
           <Text style={styles.vendorStatLabel}>Sync Score</Text>
         </View>
       </View>
+      {/* New Sync Sale banner — shown only when unread sale notifications exist. */}
+      {unreadSales > 0 ? (
+        <Pressable
+          onPress={openSalesOrders}
+          style={({ pressed }) => [styles.newSaleBanner, pressed && styles.pressed]}
+        >
+          <View style={styles.newSalePulse} />
+          <Text style={styles.newSaleText}>New Sync Sale</Text>
+          <View style={styles.newSaleCountWrap}>
+            <Text style={styles.newSaleCount}>{unreadSales}</Text>
+          </View>
+          <ChevronRight color={palette.void} size={14} />
+        </Pressable>
+      ) : null}
       <Pressable
-        onPress={() => router.push("/vendor-orders")}
+        onPress={openSalesOrders}
         style={({ pressed }) => [
           styles.salesOrdersBtn,
           pressed && styles.pressed,
         ]}
       >
-        <ShoppingBag color={palette.gold} size={14} />
+        <ShoppingBag color={palette.gold} size={16} />
         <Text style={styles.salesOrdersBtnText}>Sales & Orders</Text>
-        <ChevronRight color={palette.muted} size={14} />
+        {activeCustomerSyncs > 0 ? (
+          <View style={styles.salesOrdersCountWrap}>
+            <Text style={styles.salesOrdersCount}>{activeCustomerSyncs}</Text>
+          </View>
+        ) : null}
+        <ChevronRight color={palette.gold} size={16} />
       </Pressable>
     </View>
   );
@@ -2201,6 +2253,8 @@ export default function MarketplaceScreen(): JSX.Element {
   const activeSyncsQuery = useExchangeActiveSyncs(user?.id);
   const purchaseHistoryQuery = useExchangePurchaseHistory(user?.id);
   useExchangeSyncForegroundRefetch(user?.id);
+  // Phase D2.3R — vendor sale datasets also rebuild on focus/foreground.
+  useExchangeVendorForegroundRefetch(user?.id);
   const activeSyncs = activeSyncsQuery.data ?? [];
   const purchases = purchaseHistoryQuery.data ?? [];
   const [filterMeta, setFilterMeta] = useState<{ domains: string[]; sports: string[]; ranks: string[] }>({ domains: [], sports: [], ranks: [] });
@@ -3255,15 +3309,61 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 6,
+    gap: 8,
     marginTop: 12,
-    paddingVertical: 9,
-    borderRadius: 5,
-    borderWidth: 1,
-    borderColor: "rgba(255,181,71,0.30)",
-    backgroundColor: "rgba(255,181,71,0.08)",
+    paddingVertical: 13,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    borderColor: "rgba(255,181,71,0.55)",
+    backgroundColor: "rgba(255,181,71,0.12)",
+    shadowColor: palette.gold,
+    shadowOpacity: 0.22,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 0 },
   },
-  salesOrdersBtnText: { color: palette.gold, fontSize: 12, fontWeight: "900", flex: 1 },
+  salesOrdersBtnText: { color: palette.gold, fontSize: 14, fontWeight: "900", flex: 1, letterSpacing: 0.5 },
+  salesOrdersCountWrap: {
+    minWidth: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: palette.gold,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 6,
+  },
+  salesOrdersCount: { color: palette.void, fontSize: 11, fontWeight: "900" },
+  newSaleBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 12,
+    paddingVertical: 11,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+    backgroundColor: palette.ember,
+    shadowColor: palette.ember,
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  newSalePulse: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: palette.void,
+  },
+  newSaleText: { color: palette.void, fontSize: 13, fontWeight: "900", flex: 1, letterSpacing: 0.8 },
+  newSaleCountWrap: {
+    minWidth: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: palette.void,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 6,
+  },
+  newSaleCount: { color: palette.ember, fontSize: 11, fontWeight: "900" },
 
   // Live Intelligence — active syncs section
   activeSyncsSectionGlow: {

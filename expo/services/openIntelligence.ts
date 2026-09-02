@@ -1083,6 +1083,8 @@ export function hasModerationAccess(profile: { is_admin: boolean | null; admin_t
 export type IntelligenceNotification = {
   id: string;
   entryId: string | null;
+  /** Exchange purchase linked to exchange_sale notifications (vendor sales). */
+  purchaseId: string | null;
   notificationType: string;
   title: string;
   message: string;

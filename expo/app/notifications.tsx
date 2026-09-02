@@ -127,7 +127,7 @@ function NotificationCard({
 }: {
   notification: IntelligenceNotification;
   onMarkRead: (id: string) => void;
-  onTap: (entryId: string | null) => void;
+  onTap: (notification: IntelligenceNotification) => void;
   busy: string | null;
 }): JSX.Element {
   const h = useHaptics();
@@ -146,7 +146,7 @@ function NotificationCard({
         if (!notification.isRead) {
           onMarkRead(notification.id);
         }
-        onTap(notification.entryId);
+        onTap(notification);
       }}
       style={({ pressed }) => [
         notifStyles.card,
@@ -171,7 +171,9 @@ function NotificationCard({
         <View style={notifStyles.bottomRow}>
           <Clock color={palette.muted} size={10} />
           <Text style={notifStyles.date}>{dateLabel}</Text>
-          {notification.entryId ? (
+          {notification.notificationType === "exchange_sale" ? (
+            <Text style={notifStyles.entryHint}>Tap to view Sales & Orders →</Text>
+          ) : notification.entryId ? (
             <Text style={notifStyles.entryHint}>Tap to view entry →</Text>
           ) : null}
         </View>
@@ -246,8 +248,20 @@ export default function NotificationsScreen(): JSX.Element {
     }
   }, [unreadCount, h, refreshAll]);
 
-  const handleTap = useCallback((entryId: string | null): void => {
-    if (entryId) {
+  const handleTap = useCallback((notification: IntelligenceNotification): void => {
+    // Phase D2.3R — a vendor sale notification opens the corresponding
+    // Sales & Orders record. The purchase link is carried as a route param
+    // so the matching order is highlighted; no private IDs beyond that
+    // single purchase reference are exposed.
+    if (notification.notificationType === "exchange_sale") {
+      router.push(
+        notification.purchaseId
+          ? ({ pathname: "/vendor-orders", params: { purchaseId: notification.purchaseId } } as never)
+          : ("/vendor-orders" as never),
+      );
+      return;
+    }
+    if (notification.entryId) {
       router.push("/my-intelligence" as never);
     }
   }, [router]);

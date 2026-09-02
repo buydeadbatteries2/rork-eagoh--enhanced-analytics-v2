@@ -4930,6 +4930,7 @@ type NotificationRow = {
   id: string;
   user_id: string;
   entry_id: string | null;
+  purchase_id: string | null;
   notification_type: string;
   title: string;
   message: string;
@@ -4955,7 +4956,7 @@ async function handleGetNotifications(request: Request, env: Env): Promise<Respo
   // Fetch the user's own notifications via anon client (RLS enforces self-only)
   const { data, error } = await supabase
     .from("intelligence_notifications")
-    .select("id, user_id, entry_id, notification_type, title, message, is_read, created_at")
+    .select("id, user_id, entry_id, purchase_id, notification_type, title, message, is_read, created_at")
     .eq("user_id", userId)
     .order("created_at", { ascending: false })
     .limit(50);
@@ -4972,6 +4973,7 @@ async function handleGetNotifications(request: Request, env: Env): Promise<Respo
     notifications: notifications.map((n) => ({
       id: n.id,
       entryId: n.entry_id,
+      purchaseId: n.purchase_id,
       notificationType: n.notification_type,
       title: n.title,
       message: n.message,
@@ -12032,10 +12034,112 @@ async function handleBannerPurchase(request: Request, env: Env): Promise<Respons
 // trigger rebuild — force deploy for atomic sync purchase endpoint + route registration
 
 // ── Vendor Sale Notification ──────────────────────────────────────────────
-// Creates an in-app notification for the vendor after a successful Exchange
-// sync purchase. Called by the client (buyer) after purchaseSync succeeds.
-// Best-effort: the purchase already succeeded; notification failure is
-// non-fatal. Uses service_role to insert into intelligence_notifications.
+// Phase D2.3R — shared, idempotent vendor sale notification creation.
+//
+// Called from TWO places:
+//   1. handleExchangePurchase — the Worker's CONFIRMED post-purchase success
+//      path. Runs only after the atomic RPC returns ok=true AND strict
+//      success verification passes, so the vendor is notified even if the
+//      buyer's app closes immediately after paying.
+//   2. handleExchangeSaleNotify — the preserved /exchange/sale-notify
+//      endpoint, kept as a safe repair/retry path for purchases made by
+//      older clients or where the confirmed-path insert failed.
+//
+// Idempotency: a pre-insert dedup select plus the database unique partial
+// index intelligence_notifications_exchange_sale_purchase_unique
+// (user_id, purchase_id) where notification_type = 'exchange_sale'
+// guarantee at most one notification per (vendor, purchase). A unique
+// conflict (23505) is treated as successful deduplication, never an error.
+//
+// This function NEVER throws and NEVER affects the purchase: every failure
+// path returns a structured outcome the caller swallows.
+
+export type ExchangeSaleNotificationOutcome =
+  | { ok: true; created: true; notificationId: string }
+  | { ok: true; created: false; reason: "purchase_not_found" | "purchase_reversed" | "already_notified" | "duplicate_confirmed" }
+  | { ok: false; reason: "lookup_failed" | "insert_failed" | "unexpected" };
+
+/** Purchase statuses that must never produce a vendor sale notification. */
+const SALE_NOTIFY_REVERSED_STATUSES: ReadonlySet<string> = new Set([
+  "refunded", "payment_reversed", "charged_back", "disputed", "invalidated", "admin_revoked",
+]);
+
+export async function createExchangeSaleNotificationForPurchase(
+  serviceClient: SupabaseClient,
+  purchaseId: string,
+): Promise<ExchangeSaleNotificationOutcome> {
+  try {
+    const { data: purchase, error: purchaseErr } = await serviceClient
+      .from("marketplace_sync_purchases")
+      .select("id, vendor_id, eagoh_id, sync_level, days, edge_cost, buyer_display_name, purchase_status")
+      .eq("id", purchaseId)
+      .maybeSingle();
+
+    if (purchaseErr) return { ok: false, reason: "lookup_failed" };
+    if (!purchase) return { ok: true, created: false, reason: "purchase_not_found" };
+
+    const purchaseRow = purchase as {
+      id: string; vendor_id: string; eagoh_id: string;
+      sync_level: string; days: number; edge_cost: number;
+      buyer_display_name: string | null; purchase_status: string | null;
+    };
+
+    if (purchaseRow.purchase_status && SALE_NOTIFY_REVERSED_STATUSES.has(purchaseRow.purchase_status)) {
+      return { ok: true, created: false, reason: "purchase_reversed" };
+    }
+
+    // Idempotency pre-check: one notification per (vendor user, purchase).
+    const { data: existingNotif } = await serviceClient
+      .from("intelligence_notifications")
+      .select("id")
+      .eq("user_id", purchaseRow.vendor_id)
+      .eq("purchase_id", purchaseRow.id)
+      .eq("notification_type", "exchange_sale")
+      .maybeSingle();
+    if (existingNotif) return { ok: true, created: false, reason: "already_notified" };
+
+    // EAGOH snapshot name for the notification message (best-effort).
+    const { data: eagoh } = await serviceClient
+      .from("eagohs")
+      .select("name")
+      .eq("id", purchaseRow.eagoh_id)
+      .maybeSingle();
+    const eagohName = (eagoh as { name: string } | null)?.name ?? "Unknown EAGOH";
+    const buyerName = purchaseRow.buyer_display_name && purchaseRow.buyer_display_name.trim().length > 0
+      ? purchaseRow.buyer_display_name.trim()
+      : "A user";
+
+    const { data: inserted, error: insertErr } = await serviceClient
+      .from("intelligence_notifications")
+      .insert({
+        user_id: purchaseRow.vendor_id,
+        purchase_id: purchaseRow.id,
+        notification_type: "exchange_sale",
+        title: "New Sync Sale",
+        message: `${buyerName} purchased ${purchaseRow.sync_level} access to ${eagohName} for ${purchaseRow.days} day(s). You earned ${purchaseRow.edge_cost} EC.`,
+        is_read: false,
+      })
+      .select("id")
+      .single();
+
+    if (insertErr) {
+      // 23505 = unique index hit → a concurrent/previous notification for
+      // this (vendor, purchase) already exists: successful deduplication.
+      if (insertErr.code === "23505") {
+        return { ok: true, created: false, reason: "duplicate_confirmed" };
+      }
+      return { ok: false, reason: "insert_failed" };
+    }
+
+    const notificationId = (inserted as { id: string } | null)?.id ?? "";
+    return notificationId
+      ? { ok: true, created: true, notificationId }
+      : { ok: false, reason: "insert_failed" };
+  } catch {
+    // Never throws — notification failure can never affect a completed purchase.
+    return { ok: false, reason: "unexpected" };
+  }
+}
 
 async function handleExchangeSaleNotify(request: Request, env: Env): Promise<Response> {
   if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) {
@@ -12063,72 +12167,23 @@ async function handleExchangeSaleNotify(request: Request, env: Env): Promise<Res
   const purchaseId = typeof payload.purchaseId === "string" ? payload.purchaseId.trim() : "";
   if (!purchaseId) return jsonResponse({ ok: false, error: "Purchase ID required." }, 400);
 
-  // Verify the purchase exists and the caller is the buyer (not the vendor)
-  const { data: purchase, error: purchaseErr } = await serviceClient
-    .from("marketplace_sync_purchases")
-    .select("id, buyer_id, vendor_id, eagoh_id, sync_level, days, edge_cost, buyer_display_name, purchase_status")
-    .eq("id", purchaseId)
-    .maybeSingle();
+  // Buyer-only auth check is preserved for the repair path.
+  const outcome = await createExchangeSaleNotificationForPurchase(serviceClient, purchaseId);
 
-  if (purchaseErr || !purchase) {
-    return jsonResponse({ ok: false, error: "Purchase not found." }, 404);
+  if (!outcome.created) {
+    if (!outcome.ok || outcome.reason === "purchase_not_found") {
+      return jsonResponse({ ok: false, error: "Purchase not found." }, 404);
+    }
+    return jsonResponse({ ok: true, skipped: true, reason: outcome.reason });
+  }
+  if (!outcome.ok) {
+    // Non-fatal by contract: the purchase already succeeded. This endpoint
+    // stays a best-effort repair path — never a hard error for the buyer.
+    console.warn("[exchange/sale-notify] notification insert failed:", outcome.reason);
+    return jsonResponse({ ok: true, skipped: true, reason: "insert_failed" });
   }
 
-  const purchaseRow = purchase as {
-    id: string; buyer_id: string; vendor_id: string; eagoh_id: string;
-    sync_level: string; days: number; edge_cost: number;
-    buyer_display_name: string | null; purchase_status: string | null;
-  };
-
-  // Only the buyer can trigger the vendor notification
-  if (purchaseRow.buyer_id !== userId) {
-    return jsonResponse({ ok: false, error: "Only the buyer can trigger this notification." }, 403);
-  }
-
-  // Skip if the purchase was reversed (refunded, disputed, etc.)
-  const reversedStatuses = ["refunded", "payment_reversed", "charged_back", "disputed", "invalidated", "admin_revoked"];
-  if (purchaseRow.purchase_status && reversedStatuses.includes(purchaseRow.purchase_status)) {
-    return jsonResponse({ ok: true, skipped: true, reason: "purchase_reversed" });
-  }
-
-  // Fetch the EAGOH name for the notification message
-  const { data: eagoh } = await serviceClient
-    .from("eagohs")
-    .select("name")
-    .eq("id", purchaseRow.eagoh_id)
-    .maybeSingle();
-  const eagohName = (eagoh as { name: string } | null)?.name ?? "Unknown EAGOH";
-  const buyerName = purchaseRow.buyer_display_name ?? "A user";
-
-  // Idempotency: check if a notification already exists for this purchase
-  const { data: existingNotif } = await serviceClient
-    .from("intelligence_notifications")
-    .select("id")
-    .eq("user_id", purchaseRow.vendor_id)
-    .eq("purchase_id", purchaseRow.id)
-    .eq("notification_type", "exchange_sale")
-    .maybeSingle();
-
-  if (existingNotif) {
-    return jsonResponse({ ok: true, skipped: true, reason: "already_notified" });
-  }
-
-  // Create the vendor notification
-  try {
-    await serviceClient.from("intelligence_notifications").insert({
-      user_id: purchaseRow.vendor_id,
-      purchase_id: purchaseRow.id,
-      notification_type: "exchange_sale",
-      title: "New Exchange Sale",
-      message: `${buyerName} purchased ${purchaseRow.sync_level} access to ${eagohName} for ${purchaseRow.days} day(s). You earned ${purchaseRow.edge_cost} EC.`,
-      is_read: false,
-    });
-  } catch (e) {
-    console.warn("[exchange/sale-notify] notification insert failed:", e instanceof Error ? e.message : "unknown");
-    // Non-fatal — the purchase already succeeded
-  }
-
-  return jsonResponse({ ok: true });
+  return jsonResponse({ ok: true, notificationId: outcome.notificationId });
 }
 
 // trigger rebuild — force deploy for atomic sync purchase endpoint + route registration
@@ -12717,6 +12772,32 @@ export async function handleExchangePurchase(request: Request, env: Env): Promis
       errorCode: "purchase_verification_failed",
       error: "Purchase verification failed. Please check your purchase history before trying again.",
     }, 500);
+  }
+
+  // ── Phase D2.3R: vendor sale notification (confirmed post-purchase path) ──
+  // Runs ONLY here, after the atomic RPC returned ok=true AND strict success
+  // verification passed — no longer dependent on the buyer's app staying
+  // open. Failure is swallowed: it must never roll back or fail the
+  // completed purchase. The unique exchange-sale index plus the helper's
+  // dedup select guarantee the vendor is never notified twice, and the
+  // /exchange/sale-notify endpoint remains a safe repair/retry path.
+  const purchaseIdForNotification =
+    typeof result.purchase.id === "string" ? result.purchase.id : "";
+  if (purchaseIdForNotification) {
+    try {
+      const outcome = await createExchangeSaleNotificationForPurchase(
+        serviceClient,
+        purchaseIdForNotification,
+      );
+      if (!outcome.ok) {
+        console.warn("[exchange/purchase] vendor sale notification skipped (non-fatal)", {
+          userIdPrefix: userId.slice(0, 8),
+          ref: "PX-NOTIF-01",
+        });
+      }
+    } catch {
+      // Non-fatal by contract — the purchase is already committed.
+    }
   }
 
   return jsonResponse({

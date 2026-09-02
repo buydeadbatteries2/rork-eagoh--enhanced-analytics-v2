@@ -1,22 +1,35 @@
 /**
- * Sales & Orders — Vendor purchase order history.
+ * Sales & Orders — Vendor purchase order history (Phase D2.3R).
  *
- * Shows summary totals (Sales This Month, EC Earned This Month, Lifetime Sales)
- * and a list of vendor purchase orders derived from marketplace_sync_purchases.
+ * Two account-wide sections rebuilt from Supabase (authoritative source):
+ *   • Active Customer Syncs — live syncs of this vendor's EAGOHs with buyer
+ *     snapshot, sync %, duration, price, purchase/expiration dates, time
+ *     remaining, and an Active badge.
+ *   • Sales History — ALL statuses (Active, Completed, Expired, Refunded,
+ *     Reversed), newest first. Expired sales are never removed.
  *
- * Each order shows: Order ID, EAGOH name + image, buyer display name,
- * purchased percentage, duration, purchase date, total buyer cost,
- * vendor earnings, and status (Active, Completed, Refunded, Reversed).
- *
- * Newest orders first. Uses React Query for caching + auto-refresh.
+ * Durability (Phase D2.3R): independent React Query queries keyed by the
+ * authenticated user ID, refetched on cold start (refetchOnMount "always"),
+ * screen focus, and AppState return to active. A marketplace/listing failure
+ * can never erase or block vendor sales. Opening this screen marks unread
+ * exchange_sale notifications as read, so the Vendor Dashboard badge
+ * ("New Sync Sale") updates immediately.
  */
 
 import { palette } from "@/constants/colors";
 import { useHaptics } from "@/hooks/useHaptics";
 import { useSafeBack } from "@/hooks/useSafeBack";
 import { useAuth } from "@/providers/AuthProvider";
-import { getVendorOrders, getVendorEarningsSummary, type VendorOrder, type VendorEarningsSummary } from "@/services/vendorOrders";
 import { OptimizedEagohImage } from "@/app/_components/PerformancePrimitives";
+import {
+  EXCHANGE_VENDOR_UNREAD_SALES_KEY,
+  useExchangeVendorActiveSyncs,
+  useExchangeVendorDashboard,
+  useExchangeVendorForegroundRefetch,
+  useExchangeVendorSalesHistory,
+  useExchangeVendorUnreadSales,
+} from "@/hooks/useExchangeSyncQueries";
+import { markUnreadSaleNotificationsRead } from "@/services/vendorSales";
 import {
   ChevronLeft,
   Coins,
@@ -28,28 +41,44 @@ import {
   XCircle,
   RotateCcw,
   WifiOff,
+  Timer,
 } from "lucide-react-native";
-import React, { memo, useCallback, useState } from "react";
+import React, { memo, useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
-  FlatList,
   Pressable,
   RefreshControl,
+  ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
-import { useQuery } from "@tanstack/react-query";
+import { useQueryClient, useQuery } from "@tanstack/react-query";
 import { Image } from "expo-image";
+import { useLocalSearchParams } from "expo-router";
+import type { VendorSale } from "@/services/vendorSales";
 
 // ── Status helpers ─────────────────────────────────────────────────────
+
+export type OrderStatus = "Active" | "Completed" | "Expired" | "Refunded" | "Reversed";
+
+/** Map the DB purchase_status to a user-facing order status. */
+function mapOrderStatus(purchaseStatus: string | null, active: boolean): OrderStatus {
+  if (!purchaseStatus || purchaseStatus === "completed") {
+    return active ? "Active" : "Completed";
+  }
+  if (purchaseStatus === "expired") return "Expired";
+  if (purchaseStatus === "refunded") return "Refunded";
+  return "Reversed";
+}
 
 function statusColor(status: string): string {
   switch (status) {
     case "Active": return palette.success;
     case "Completed": return palette.cyan;
+    case "Expired": return palette.muted;
     case "Refunded": return palette.ember;
     case "Reversed": return palette.gold;
     default: return palette.muted;
@@ -62,6 +91,7 @@ function statusIcon(status: string): JSX.Element {
   switch (status) {
     case "Active": return <CheckCircle color={color} size={size} />;
     case "Completed": return <CheckCircle color={color} size={size} />;
+    case "Expired": return <Timer color={color} size={size} />;
     case "Refunded": return <XCircle color={color} size={size} />;
     case "Reversed": return <RotateCcw color={color} size={size} />;
     default: return <PackageOpen color={color} size={size} />;
@@ -76,9 +106,39 @@ function formatDate(iso: string): string {
   }
 }
 
+/** Human time remaining until an expiration timestamp. */
+function timeRemaining(expiresAt: string, now: number): string {
+  const ms = new Date(expiresAt).getTime() - now;
+  if (!Number.isFinite(ms) || ms <= 0) return "Expired";
+  const mins = Math.floor(ms / 60_000);
+  const hours = Math.floor(mins / 60);
+  const days = Math.floor(hours / 24);
+  if (days > 0) return `${days}d ${hours % 24}h left`;
+  if (hours > 0) return `${hours}h ${mins % 60}m left`;
+  return `${mins}m left`;
+}
+
+/** Re-render every 60s so "time remaining" stays honest without heavy timers. */
+function useNow(intervalMs: number = 60_000): number {
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
 // ── Summary Card ───────────────────────────────────────────────────────
 
-const SummaryCard = memo(function SummaryCard({ summary }: { summary: VendorEarningsSummary | undefined }): JSX.Element {
+const SummaryCard = memo(function SummaryCard({
+  activeSyncs,
+  totalSales,
+  earnedThisMonth,
+}: {
+  activeSyncs: number;
+  totalSales: number;
+  earnedThisMonth: number;
+}): JSX.Element {
   return (
     <View style={styles.summaryCard}>
       <LinearGradient colors={["rgba(255,181,71,0.14)", "rgba(10,20,38,0.92)"]} style={StyleSheet.absoluteFill} />
@@ -88,43 +148,121 @@ const SummaryCard = memo(function SummaryCard({ summary }: { summary: VendorEarn
       </View>
       <View style={styles.summaryGrid}>
         <View style={styles.summaryItem}>
-          <Text style={styles.summaryValue}>{summary?.salesThisMonth ?? 0}</Text>
-          <Text style={styles.summaryLabel}>Sales This Month</Text>
+          <Text style={[styles.summaryValue, { color: palette.cyan }]}>{activeSyncs}</Text>
+          <Text style={styles.summaryLabel}>Active Syncs</Text>
         </View>
         <View style={styles.summaryItem}>
-          <Text style={[styles.summaryValue, { color: palette.gold }]}>{summary?.earnedThisMonth ?? 0}</Text>
-          <Text style={styles.summaryLabel}>EC Earned</Text>
+          <Text style={styles.summaryValue}>{totalSales}</Text>
+          <Text style={styles.summaryLabel}>Total Sales</Text>
         </View>
         <View style={styles.summaryItem}>
-          <Text style={[styles.summaryValue, { color: palette.cyan }]}>{summary?.lifetimeSales ?? 0}</Text>
-          <Text style={styles.summaryLabel}>Lifetime Sales</Text>
+          <Text style={[styles.summaryValue, { color: palette.gold }]}>{earnedThisMonth}</Text>
+          <Text style={styles.summaryLabel}>EC This Month</Text>
         </View>
       </View>
     </View>
   );
 });
 
-// ── Order Card ─────────────────────────────────────────────────────────
+// ── Active Customer Sync Card ──────────────────────────────────────────
 
-const OrderCard = memo(function OrderCard({ order }: { order: VendorOrder }): JSX.Element {
-  const sColor = statusColor(order.status);
-  const orderIdShort = order.id.slice(0, 8).toUpperCase();
+const ActiveSyncCard = memo(function ActiveSyncCard({ sale }: { sale: VendorSale }): JSX.Element {
+  const now = useNow();
+  const remaining = timeRemaining(sale.expires_at, now);
 
   return (
     <View style={styles.orderCard}>
       <View style={styles.orderHeader}>
-        <View style={styles.orderHeaderLeft}>
-          <Text style={styles.orderId}>#{orderIdShort}</Text>
-          <Text style={styles.orderDate}>{formatDate(order.created_at)}</Text>
+        <View style={styles.buyerRow}>
+          {sale.buyer_avatar_url ? (
+            <Image source={{ uri: sale.buyer_avatar_url }} style={styles.buyerAvatarLarge} contentFit="cover" />
+          ) : (
+            <View style={[styles.buyerAvatarLarge, styles.buyerAvatarFallback]}>
+              <Text style={styles.buyerAvatarInitial}>{(sale.buyer_display_name ?? "?").slice(0, 1).toUpperCase()}</Text>
+            </View>
+          )}
+          <View>
+            <Text style={styles.buyerNameLarge}>{sale.buyer_display_name ?? "Anonymous"}</Text>
+            <Text style={styles.orderDate}>Purchased {formatDate(sale.created_at)}</Text>
+          </View>
         </View>
-        <View style={[styles.statusBadge, { borderColor: `${sColor}44`, backgroundColor: `${sColor}0E` }]}>
-          {statusIcon(order.status)}
-          <Text style={[styles.statusText, { color: sColor }]}>{order.status}</Text>
+        <View style={[styles.statusBadge, { borderColor: `${palette.success}44`, backgroundColor: `${palette.success}0E` }]}>
+          {statusIcon("Active")}
+          <Text style={[styles.statusText, { color: palette.success }]}>Active</Text>
         </View>
       </View>
 
       <View style={styles.orderBody}>
-        {/* EAGOH Image */}
+        <View style={styles.orderImageSection}>
+          <OptimizedEagohImage
+            tone="cyan"
+            label={sale.eagoh_name}
+            size="compact"
+            imageUrl={sale.eagoh_image_url}
+            showLabel={false}
+          />
+        </View>
+        <View style={styles.orderInfo}>
+          <Text style={styles.eagohName} numberOfLines={1}>{sale.eagoh_name}</Text>
+          <View style={styles.detailsRow}>
+            <View style={styles.detailItem}>
+              <Text style={styles.detailLabel}>Sync</Text>
+              <Text style={styles.detailValue}>{sale.sync_level}</Text>
+            </View>
+            <View style={styles.detailItem}>
+              <Text style={styles.detailLabel}>Duration</Text>
+              <Text style={styles.detailValue}>{sale.days}d</Text>
+            </View>
+            <View style={styles.detailItem}>
+              <Text style={styles.detailLabel}>Price</Text>
+              <Text style={styles.detailValue}>{sale.edge_cost} EC</Text>
+            </View>
+          </View>
+          <View style={styles.detailsRow}>
+            <View style={styles.detailItem}>
+              <Text style={styles.detailLabel}>Expires</Text>
+              <Text style={styles.detailValue}>{formatDate(sale.expires_at)}</Text>
+            </View>
+            <View style={styles.detailItem}>
+              <Text style={styles.detailLabel}>Time Remaining</Text>
+              <Text style={[styles.detailValue, { color: palette.success }]}>{remaining}</Text>
+            </View>
+          </View>
+        </View>
+      </View>
+
+      <View style={styles.orderFooter}>
+        <Coins color={palette.gold} size={13} />
+        <Text style={styles.earningsLabel}>You Earned</Text>
+        <Text style={styles.earningsValue}>+{sale.edge_cost} EC</Text>
+      </View>
+    </View>
+  );
+});
+
+// ── History Order Card ─────────────────────────────────────────────────
+
+const OrderCard = memo(function OrderCard({
+  order,
+  highlighted,
+}: {
+  order: VendorSale;
+  highlighted: boolean;
+}): JSX.Element {
+  const status = mapOrderStatus(order.purchase_status, order.active);
+  const sColor = statusColor(status);
+
+  return (
+    <View style={[styles.orderCard, highlighted && styles.orderCardHighlighted]}>
+      <View style={styles.orderHeader}>
+        <Text style={styles.orderDate}>{formatDate(order.created_at)}</Text>
+        <View style={[styles.statusBadge, { borderColor: `${sColor}44`, backgroundColor: `${sColor}0E` }]}>
+          {statusIcon(status)}
+          <Text style={[styles.statusText, { color: sColor }]}>{status}</Text>
+        </View>
+      </View>
+
+      <View style={styles.orderBody}>
         <View style={styles.orderImageSection}>
           <OptimizedEagohImage
             tone="cyan"
@@ -134,12 +272,8 @@ const OrderCard = memo(function OrderCard({ order }: { order: VendorOrder }): JS
             showLabel={false}
           />
         </View>
-
-        {/* Info */}
         <View style={styles.orderInfo}>
           <Text style={styles.eagohName} numberOfLines={1}>{order.eagoh_name}</Text>
-
-          {/* Buyer */}
           <View style={styles.buyerRow}>
             {order.buyer_avatar_url ? (
               <Image source={{ uri: order.buyer_avatar_url }} style={styles.buyerAvatar} contentFit="cover" />
@@ -148,8 +282,6 @@ const OrderCard = memo(function OrderCard({ order }: { order: VendorOrder }): JS
             )}
             <Text style={styles.buyerName}>{order.buyer_display_name ?? "Anonymous"}</Text>
           </View>
-
-          {/* Details */}
           <View style={styles.detailsRow}>
             <View style={styles.detailItem}>
               <Text style={styles.detailLabel}>Sync</Text>
@@ -167,15 +299,47 @@ const OrderCard = memo(function OrderCard({ order }: { order: VendorOrder }): JS
         </View>
       </View>
 
-      {/* Earnings footer */}
       <View style={styles.orderFooter}>
         <Coins color={palette.gold} size={13} />
         <Text style={styles.earningsLabel}>Vendor Earnings</Text>
-        <Text style={styles.earningsValue}>+{order.vendor_earnings} EC</Text>
+        <Text style={styles.earningsValue}>+{order.edge_cost} EC</Text>
       </View>
     </View>
   );
 });
+
+// ── Section Header ─────────────────────────────────────────────────────
+
+function SectionHeader({ icon, title, count, error, onRetry, retrying }: {
+  icon: JSX.Element;
+  title: string;
+  count: number;
+  error: boolean;
+  onRetry: () => void;
+  retrying: boolean;
+}): JSX.Element {
+  return (
+    <View style={styles.sectionHeaderWrap}>
+      <View style={styles.sectionHeader}>
+        {icon}
+        <Text style={styles.sectionTitle}>{title}</Text>
+        {!error ? <Text style={styles.sectionCount}>{count}</Text> : null}
+      </View>
+      {error ? (
+        <Pressable onPress={onRetry} disabled={retrying} style={styles.sectionRetryBtn}>
+          {retrying ? (
+            <ActivityIndicator color={palette.cyan} size="small" />
+          ) : (
+            <>
+              <WifiOff color={palette.ember} size={12} />
+              <Text style={styles.sectionRetryText}>Load failed — Retry</Text>
+            </>
+          )}
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
 
 // ── Main Screen ────────────────────────────────────────────────────────
 
@@ -183,74 +347,70 @@ export default function SalesOrdersScreen(): JSX.Element {
   const { user } = useAuth();
   const h = useHaptics();
   const goBack = useSafeBack();
+  const queryClient = useQueryClient();
+  const params = useLocalSearchParams<{ purchaseId?: string }>();
+  const highlightedId = typeof params.purchaseId === "string" ? params.purchaseId : null;
 
-  // No automatic retries — repeated 522 attempts would keep the screen on a
-  // spinner for a long time. A Try Again button is shown instead.
-  const ordersQuery = useQuery<VendorOrder[]>({
-    queryKey: ["vendorOrders", user?.id],
-    queryFn: () => getVendorOrders(user!.id),
-    staleTime: 30_000,
-    enabled: !!user?.id,
-    retry: false,
-  });
+  // Independent, account-wide vendor datasets (never filtered by the
+  // selected EAGOH, filters, domain, or tab). refetchOnMount "always"
+  // rebuilds everything after a cold start.
+  const activeQuery = useExchangeVendorActiveSyncs(user?.id);
+  const historyQuery = useExchangeVendorSalesHistory(user?.id);
+  const dashboardQuery = useExchangeVendorDashboard(user?.id);
+  const unreadQuery = useExchangeVendorUnreadSales(user?.id);
+  // Focus + AppState return-to-active refetch (first focus skipped — the
+  // mount fetch already covers cold start).
+  useExchangeVendorForegroundRefetch(user?.id);
 
-  const summaryQuery = useQuery<VendorEarningsSummary>({
-    queryKey: ["vendorEarningsSummary", user?.id],
-    queryFn: () => getVendorEarningsSummary(user!.id),
-    staleTime: 30_000,
-    enabled: !!user?.id,
-    retry: false,
-  });
+  // ── Mark unread sale notifications as read when the screen opens ──
+  // The badge update is OPTIMISTIC (same query key the Vendor Dashboard
+  // badge reads), so it clears immediately. If the worker call fails, the
+  // invalidation restores the true count — the badge never lies.
+  const unread = unreadQuery.data ?? 0;
+  useEffect(() => {
+    if (unread <= 0 || !user?.id) return;
+    queryClient.setQueryData([EXCHANGE_VENDOR_UNREAD_SALES_KEY, user.id], 0);
+    void markUnreadSaleNotificationsRead().finally(() => {
+      void queryClient.invalidateQueries({ queryKey: [EXCHANGE_VENDOR_UNREAD_SALES_KEY] });
+    });
+  }, [unread, user?.id, queryClient]);
 
-  const { refetch: refetchOrders } = ordersQuery;
-  const { refetch: refetchSummary } = summaryQuery;
+  const activeSales = activeQuery.data ?? [];
+  const history = historyQuery.data ?? [];
 
-  // While either query is refetching, Try Again is disabled and shows a
-  // spinner — rapid taps can never create repeated request groups. The
-  // button re-enables once both queries settle.
-  const isRetrying = ordersQuery.isFetching || summaryQuery.isFetching;
-
-  const handleTryAgain = useCallback(() => {
-    if (isRetrying) return;
-    h.light();
-    void refetchOrders();
-    void refetchSummary();
-  }, [h, refetchOrders, refetchSummary, isRetrying]);
+  const handleRetryActive = useCallback(() => { h.light(); void activeQuery.refetch(); }, [h, activeQuery]);
+  const handleRetryHistory = useCallback(() => { h.light(); void historyQuery.refetch(); }, [h, historyQuery]);
 
   const [refreshing, setRefreshing] = useState(false);
   const handleRefresh = useCallback(async () => {
     h.light();
     setRefreshing(true);
     try {
-      // Wait for BOTH refetches to settle so the spinner stays active
-      // through the entire refresh.
-      await Promise.allSettled([refetchOrders(), refetchSummary()]);
+      await Promise.allSettled([
+        activeQuery.refetch(),
+        historyQuery.refetch(),
+        dashboardQuery.refetch(),
+        unreadQuery.refetch(),
+      ]);
     } finally {
       setRefreshing(false);
     }
-  }, [h, refetchOrders, refetchSummary]);
+  }, [h, activeQuery, historyQuery, dashboardQuery, unreadQuery]);
 
-  const orders = ordersQuery.data ?? [];
-  const isLoading = ordersQuery.isPending && orders.length === 0;
-  // First load failed with nothing cached → show the error state.
-  // If order history loaded but only the summary failed, the orders render
-  // with summary fallback values (never a full-screen error).
-  const isFirstLoadError = ordersQuery.isError && orders.length === 0;
+  const isLoading =
+    (activeQuery.isPending && !activeQuery.isError) &&
+    (historyQuery.isPending && !historyQuery.isError);
+  // Full-screen error only when BOTH sections failed with nothing cached —
+  // one failed request must never erase the other section.
+  const isFirstLoadError =
+    activeQuery.isError && activeSales.length === 0 &&
+    historyQuery.isError && history.length === 0;
 
-  const renderItem = useCallback(({ item }: { item: VendorOrder }) => (
-    <OrderCard order={item} />
-  ), []);
-
-  const ListHeader = useCallback(() => (
-    <View>
-      <SummaryCard summary={summaryQuery.data} />
-      <View style={styles.sectionHeader}>
-        <ShoppingBag color={palette.cyan} size={15} />
-        <Text style={styles.sectionTitle}>Order History</Text>
-        <Text style={styles.sectionCount}>{orders.length}</Text>
-      </View>
-    </View>
-  ), [summaryQuery.data, orders.length]);
+  const handleFullRetry = useCallback(() => {
+    h.light();
+    void activeQuery.refetch();
+    void historyQuery.refetch();
+  }, [h, activeQuery, historyQuery]);
 
   return (
     <SafeAreaView style={styles.container} edges={["top"]}>
@@ -271,18 +431,10 @@ export default function SalesOrdersScreen(): JSX.Element {
             EAGOH could not reach the marketplace service. Check your connection and try again.
           </Text>
           <Pressable
-            onPress={handleTryAgain}
-            disabled={isRetrying}
-            style={({ pressed }) => [
-              styles.retryBtn,
-              (pressed || isRetrying) && { opacity: 0.8 },
-            ]}
+            onPress={handleFullRetry}
+            style={({ pressed }) => [styles.retryBtn, pressed && { opacity: 0.8 }]}
           >
-            {isRetrying ? (
-              <ActivityIndicator color={palette.void} size="small" />
-            ) : (
-              <RotateCcw color={palette.void} size={15} />
-            )}
+            <RotateCcw color={palette.void} size={15} />
             <Text style={styles.retryBtnText}>Try Again</Text>
           </Pressable>
         </View>
@@ -291,22 +443,8 @@ export default function SalesOrdersScreen(): JSX.Element {
           <ActivityIndicator color={palette.cyan} size="large" />
         </View>
       ) : (
-        <FlatList
-          data={orders}
-          keyExtractor={(item) => item.id}
-          renderItem={renderItem}
-          ListHeaderComponent={ListHeader}
-          ListEmptyComponent={
-            !ordersQuery.isLoading ? (
-              <View style={styles.emptyContainer}>
-                <PackageOpen color={palette.muted} size={40} />
-                <Text style={styles.emptyTitle}>No Sales Yet</Text>
-                <Text style={styles.emptyHint}>
-                  When someone purchases your EAGOH sync, the order will appear here.
-                </Text>
-              </View>
-            ) : null
-          }
+        <ScrollView
+          style={styles.scroll}
           contentContainerStyle={styles.listContent}
           refreshControl={
             <RefreshControl
@@ -317,7 +455,58 @@ export default function SalesOrdersScreen(): JSX.Element {
             />
           }
           showsVerticalScrollIndicator={false}
-        />
+        >
+          <SummaryCard
+            activeSyncs={activeSales.length}
+            totalSales={dashboardQuery.data?.totalSales ?? 0}
+            earnedThisMonth={dashboardQuery.data?.earnedThisMonth ?? 0}
+          />
+
+          {/* ── Active Customer Syncs ── */}
+          <SectionHeader
+            icon={<ShoppingBag color={palette.success} size={15} />}
+            title="Active Customer Syncs"
+            count={activeSales.length}
+            error={activeQuery.isError && activeSales.length === 0}
+            onRetry={handleRetryActive}
+            retrying={activeQuery.isFetching}
+          />
+          {activeSales.length === 0 && !(activeQuery.isError && activeSales.length === 0) ? (
+            <View style={styles.emptyContainer}>
+              <PackageOpen color={palette.muted} size={32} />
+              <Text style={styles.emptyTitleSmall}>No Active Customer Syncs</Text>
+              <Text style={styles.emptyHint}>
+                When someone purchases a sync of your EAGOH, it appears here with live time remaining.
+              </Text>
+            </View>
+          ) : (
+            activeSales.map((sale) => <ActiveSyncCard key={sale.id} sale={sale} />)
+          )}
+
+          {/* ── Sales History ── */}
+          <View style={styles.sectionDivider} />
+          <SectionHeader
+            icon={<Crown color={palette.gold} size={15} />}
+            title="Sales History"
+            count={history.length}
+            error={historyQuery.isError && history.length === 0}
+            onRetry={handleRetryHistory}
+            retrying={historyQuery.isFetching}
+          />
+          {history.length === 0 && !(historyQuery.isError && history.length === 0) ? (
+            <View style={styles.emptyContainer}>
+              <PackageOpen color={palette.muted} size={32} />
+              <Text style={styles.emptyTitleSmall}>No Sales Yet</Text>
+              <Text style={styles.emptyHint}>
+                When someone purchases your EAGOH sync, the order will appear here.
+              </Text>
+            </View>
+          ) : (
+            history.map((order) => (
+              <OrderCard key={order.id} order={order} highlighted={order.id === highlightedId} />
+            ))
+          )}
+        </ScrollView>
       )}
     </SafeAreaView>
   );
@@ -356,6 +545,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  scroll: { flex: 1 },
   listContent: {
     padding: 16,
     paddingBottom: 40,
@@ -402,11 +592,12 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   // Section header
+  sectionHeaderWrap: { marginBottom: 12 },
   sectionHeader: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    marginBottom: 12,
+    marginBottom: 8,
   },
   sectionTitle: {
     color: palette.text,
@@ -419,6 +610,20 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "900",
   },
+  sectionRetryBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: `${palette.ember}44`,
+    backgroundColor: `${palette.ember}0E`,
+    marginBottom: 8,
+  },
+  sectionRetryText: { color: palette.ember, fontSize: 11, fontWeight: "800" },
+  sectionDivider: { height: 1, backgroundColor: palette.line, marginVertical: 18 },
   // Order card
   orderCard: {
     borderRadius: 12,
@@ -428,22 +633,19 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: palette.line,
   },
+  orderCardHighlighted: {
+    borderColor: palette.gold,
+    borderWidth: 1.5,
+    shadowColor: palette.gold,
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 0 },
+  },
   orderHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 10,
-  },
-  orderHeaderLeft: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  orderId: {
-    color: palette.cyan,
-    fontSize: 11,
-    fontWeight: "900",
-    letterSpacing: 1,
   },
   orderDate: {
     color: palette.muted,
@@ -490,8 +692,17 @@ const styles = StyleSheet.create({
   buyerRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    gap: 8,
     marginBottom: 8,
+  },
+  buyerAvatarLarge: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: palette.line,
+    alignItems: "center",
+    justifyContent: "center",
   },
   buyerAvatar: {
     width: 18,
@@ -502,15 +713,28 @@ const styles = StyleSheet.create({
   },
   buyerAvatarFallback: {
     backgroundColor: palette.obsidian,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  buyerAvatarInitial: {
+    color: palette.cyan,
+    fontSize: 13,
+    fontWeight: "900",
   },
   buyerName: {
     color: palette.muted,
     fontSize: 12,
     fontWeight: "600",
   },
+  buyerNameLarge: {
+    color: palette.text,
+    fontSize: 14,
+    fontWeight: "900",
+  },
   detailsRow: {
     flexDirection: "row",
     gap: 12,
+    marginTop: 2,
   },
   detailItem: {
     flex: 1,
@@ -550,22 +774,26 @@ const styles = StyleSheet.create({
   // Empty
   emptyContainer: {
     alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 60,
-    gap: 12,
+    paddingVertical: 28,
+    gap: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: palette.line,
+    backgroundColor: "rgba(10,20,38,0.35)",
+    marginBottom: 12,
   },
-  emptyTitle: {
+  emptyTitleSmall: {
     color: palette.text,
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: "900",
   },
   emptyHint: {
     color: palette.muted,
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: "600",
     textAlign: "center",
-    paddingHorizontal: 40,
-    lineHeight: 20,
+    paddingHorizontal: 28,
+    lineHeight: 18,
   },
   // First-load error
   errorContainer: {
