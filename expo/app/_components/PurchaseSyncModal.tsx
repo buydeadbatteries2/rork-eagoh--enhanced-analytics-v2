@@ -10,8 +10,10 @@
  */
 
 import { palette } from "@/constants/colors";
+import type { LiveSyncView } from "@/services/activeSyncIndicator";
 import { LinearGradient } from "expo-linear-gradient";
 import {
+  Activity,
   ArrowRightLeft,
   Award,
   BookOpen,
@@ -183,6 +185,10 @@ function parseKnowledgeAttributes(
 export type PurchaseSyncModalProps = {
   visible: boolean;
   listing: EnrichedListing | null;
+  /** Phase D2.3S entry guard: while the buyer's sync for this listing is
+   *  live, the modal renders the Active Sync details sheet instead of
+   *  purchase options — purchase can never be initiated a second time. */
+  liveSync?: LiveSyncView | null;
   /** Informational only: the EAGOH the purchase will be attributed to. The
    *  Worker remains authoritative on eligibility and domain. */
   buyerInfo?: { name: string; domain: string } | null;
@@ -201,11 +207,89 @@ export type PurchaseSyncModalProps = {
   onViewVendorProfile: (vendorId: string) => void;
 };
 
+// ── Sync Live details sheet (Phase D2.3S entry guard) ────────────────────
+
+/** Formats an ISO timestamp as a short local date label, e.g. "Sep 2, 14:32". */
+function formatSyncDateLabel(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const hh = d.getHours().toString().padStart(2, "0");
+  const mm = d.getMinutes().toString().padStart(2, "0");
+  return `${months[d.getMonth()]} ${d.getDate()}, ${hh}:${mm}`;
+}
+
+/**
+ * Phase D2.3S — Active Sync details sheet. Rendered INSTEAD of the purchase
+ * sheet whenever the buyer's sync for this listing is live: shows the sync
+ * level, duration, time remaining, and start/expiry, with no purchase
+ * options. The purchase action is disabled at the source (listing buttons
+ * route "Sync Live" taps to the buyer's Active Sync details), so this guard
+ * is defense-in-depth for every other entry path — the purchase RPC is never
+ * called a second time.
+ */
+function SyncLiveDetailsSheet({
+  listing,
+  liveSync,
+  onClose,
+}: {
+  listing: EnrichedListing;
+  liveSync: LiveSyncView;
+  onClose: () => void;
+}): JSX.Element {
+  const eagohName = listing.eagoh?.name ?? "EAGOH";
+  return (
+    <View style={styles.modalSheet}>
+      <LinearGradient colors={["#0A1628", "#050D18"]} style={StyleSheet.absoluteFill} pointerEvents="none" />
+      <View style={styles.modalHandle} />
+      <View style={styles.modalHeader}>
+        <Text style={styles.modalTitle}>Sync Live</Text>
+        <Pressable onPress={onClose} style={styles.modalClose}>
+          <X color={palette.muted} size={20} />
+        </Pressable>
+      </View>
+      <View style={styles.syncLiveBody}>
+        <View style={styles.syncLivePill}>
+          <Activity color={palette.void} size={13} />
+          <Text style={styles.syncLivePillText}>Sync Live · {liveSync.timeLeft}</Text>
+        </View>
+        <Text style={styles.syncLiveTitle}>{eagohName}</Text>
+        <Text style={styles.syncLiveSub}>
+          {liveSync.syncLevel} sync · {liveSync.days} day{liveSync.days > 1 ? "s" : ""} of live access is active
+        </Text>
+        <View style={styles.syncLiveMetaCard}>
+          <View style={styles.syncLiveMetaRow}>
+            <Text style={styles.syncLiveMetaLabel}>Started</Text>
+            <Text style={styles.syncLiveMetaValue}>{formatSyncDateLabel(liveSync.startedAt)}</Text>
+          </View>
+          <View style={styles.syncLiveMetaRow}>
+            <Text style={styles.syncLiveMetaLabel}>Expires</Text>
+            <Text style={styles.syncLiveMetaValue}>{formatSyncDateLabel(liveSync.expiresAt)}</Text>
+          </View>
+        </View>
+        <View style={styles.syncLiveNoticeRow}>
+          <Shield color={palette.success} size={12} />
+          <Text style={styles.syncLiveNoticeText}>
+            This sync is already live for your selected EAGOH. Purchase is disabled while the sync is active — open the Exchange to view your Active Syncs.
+          </Text>
+        </View>
+        <Pressable
+          onPress={onClose}
+          style={({ pressed }) => [styles.confirmButton, styles.syncLiveCloseButton, pressed && styles.pressed]}
+        >
+          <Text style={styles.confirmButtonText}>Close</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
 // ── Component ────────────────────────────────────────────────────────────
 
 export default function PurchaseSyncModal({
   visible,
   listing,
+  liveSync,
   buyerInfo,
   buyerOptions,
   selectedBuyerEagohId,
@@ -260,6 +344,14 @@ export default function PurchaseSyncModal({
           onPress={onClose}
         />
 
+        {/* ── Phase D2.3S: entry guard — while the buyer's sync for this
+            listing is live, the Active Sync details sheet replaces the
+            purchase sheet entirely. Purchase options are never rendered and
+            the purchase RPC is never called a second time. ── */}
+        {liveSync ? (
+          <SyncLiveDetailsSheet listing={listing} liveSync={liveSync} onClose={onClose} />
+        ) : (
+        <>
         {/* ── Main Purchase Sheet ── */}
         <View style={styles.modalSheet}>
           <LinearGradient colors={["#0A1628", "#050D18"]} style={StyleSheet.absoluteFill} pointerEvents="none" />
@@ -709,6 +801,8 @@ export default function PurchaseSyncModal({
             </View>
           </View>
         )}
+        </>
+      )}
       </View>
     </Modal>
   );
@@ -719,6 +813,19 @@ export default function PurchaseSyncModal({
 const SCREEN_HEIGHT = Dimensions.get("window").height;
 
 const styles = StyleSheet.create({
+  // ── Phase D2.3S: Sync Live details sheet ──
+  syncLiveBody: { paddingHorizontal: 16, paddingBottom: 24, gap: 12 },
+  syncLivePill: { flexDirection: "row" as const, alignItems: "center" as const, alignSelf: "flex-start" as const, gap: 6, backgroundColor: palette.success, borderRadius: 5, paddingHorizontal: 10, paddingVertical: 6, marginTop: 4 },
+  syncLivePillText: { color: palette.void, fontSize: 13, fontWeight: "900" as const },
+  syncLiveTitle: { color: palette.text, fontSize: 22, fontWeight: "900" as const, letterSpacing: -0.5 },
+  syncLiveSub: { color: palette.muted, fontSize: 13, fontWeight: "700" as const },
+  syncLiveMetaCard: { borderRadius: 5, borderWidth: 1, borderColor: "rgba(0,255,178,0.28)", backgroundColor: "rgba(0,255,178,0.06)", padding: 12, gap: 8 },
+  syncLiveMetaRow: { flexDirection: "row" as const, alignItems: "center" as const, justifyContent: "space-between" as const },
+  syncLiveMetaLabel: { color: palette.muted, fontSize: 12, fontWeight: "800" as const },
+  syncLiveMetaValue: { color: palette.text, fontSize: 13, fontWeight: "900" as const },
+  syncLiveNoticeRow: { flexDirection: "row" as const, gap: 8, alignItems: "flex-start" as const, marginTop: 2 },
+  syncLiveNoticeText: { color: palette.muted, fontSize: 12, lineHeight: 17, flex: 1, fontWeight: "600" as const },
+  syncLiveCloseButton: { backgroundColor: palette.success, marginTop: 8 },
   modalOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.65)",

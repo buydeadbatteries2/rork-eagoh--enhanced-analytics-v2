@@ -103,6 +103,12 @@ import {
   useExchangeVendorForegroundRefetch,
   useExchangeVendorUnreadSales,
 } from "@/hooks/useExchangeSyncQueries";
+import {
+  buildLiveSyncMap,
+  resolveListingPurchaseAction,
+  type LiveSyncView,
+} from "@/services/activeSyncIndicator";
+import { useSyncClock } from "@/hooks/useSyncClock";
 import type { EagohRecord } from "@/services/eagohs";
 import {
   getActiveBanners,
@@ -526,6 +532,7 @@ const ListingCard = memo(function ListingCard({
   onViewVendorProfile,
   vendorMetrics,
   vendorRep,
+  liveSync,
 }: {
   item: EnrichedListing;
   isPaid: boolean;
@@ -535,6 +542,8 @@ const ListingCard = memo(function ListingCard({
   onViewVendorProfile: (vendorId: string) => void;
   vendorMetrics?: VendorQualityMetrics | null;
   vendorRep?: PublicReputation | null;
+  /** Phase D2.3S: non-null while the buyer's sync for this listing is live. */
+  liveSync?: LiveSyncView | null;
 }): JSX.Element {
   const isOwnListing = !!(currentUserId && item.vendor_id === currentUserId);
   const eagoh = item.eagoh;
@@ -770,13 +779,28 @@ const ListingCard = memo(function ListingCard({
             style={({ pressed }) => [
               styles.buyButton,
               (!isPaid || isOwnListing) && styles.buyButtonDisabled,
+              liveSync && styles.buyButtonSyncLive,
               pressed && styles.pressed,
             ]}
           >
-            <Tag color={isOwnListing ? palette.muted : isPaid ? palette.void : palette.muted} size={13} />
-            <Text style={[styles.buyButtonText, (!isPaid || isOwnListing) && styles.buyButtonTextDisabled]}>
-              {isOwnListing ? "Your Listing" : isPaid ? "Purchase" : "Browse"}
-            </Text>
+            {liveSync ? (
+              // Phase D2.3S: the sync is live — the purchase action is
+              // replaced by "Sync Live · <time left>"; pressing routes to the
+              // buyer's Active Sync details (never the purchase modal).
+              <>
+                <Activity color={palette.void} size={13} />
+                <Text style={styles.buyButtonText} numberOfLines={1}>
+                  Sync Live · {liveSync.timeLeft}
+                </Text>
+              </>
+            ) : (
+              <>
+                <Tag color={isOwnListing ? palette.muted : isPaid ? palette.void : palette.muted} size={13} />
+                <Text style={[styles.buyButtonText, (!isPaid || isOwnListing) && styles.buyButtonTextDisabled]}>
+                  {isOwnListing ? "Your Listing" : isPaid ? "Purchase" : "Browse"}
+                </Text>
+              </>
+            )}
           </Pressable>
         </View>
       </View>
@@ -1147,10 +1171,13 @@ const CarouselListingCard = memo(function CarouselListingCard({
   item,
   isPaid,
   onPurchase,
+  liveSync,
 }: {
   item: EnrichedListing;
   isPaid: boolean;
   onPurchase: (listing: EnrichedListing) => void;
+  /** Phase D2.3S: non-null while the buyer's sync for this listing is live. */
+  liveSync?: LiveSyncView | null;
 }): JSX.Element {
   const eagoh = item.eagoh;
   const minPrice = [item.price_25_per_day, item.price_50_per_day, item.price_75_per_day, item.price_100_per_day]
@@ -1171,7 +1198,14 @@ const CarouselListingCard = memo(function CarouselListingCard({
       <View style={styles.carouselCardInfo}>
         <Text style={styles.carouselCardName} numberOfLines={1}>{eagoh?.name ?? "Unnamed"}</Text>
         <Text style={styles.carouselCardVendor} numberOfLines={1}>{item.vendor_username ?? "Anonymous"}</Text>
-        {minPrice ? (
+        {liveSync ? (
+          // Phase D2.3S: live indicator pill — pressing the card routes to the
+          // buyer's Active Sync details via onPurchase (never the purchase modal).
+          <View style={styles.carouselSyncLivePill}>
+            <Activity color={palette.void} size={9} />
+            <Text style={styles.carouselSyncLiveText} numberOfLines={1}>Sync Live · {liveSync.timeLeft}</Text>
+          </View>
+        ) : minPrice ? (
           <View style={styles.carouselCardPrice}>
             <Coins color={palette.gold} size={10} />
             <Text style={styles.carouselCardPriceText}>{minPrice} EC/day</Text>
@@ -1189,11 +1223,14 @@ const DomainCarouselSection = memo(function DomainCarouselSection({
   listings,
   isPaid,
   onPurchase,
+  liveSyncMap,
 }: {
   domain: string;
   listings: EnrichedListing[];
   isPaid: boolean;
   onPurchase: (listing: EnrichedListing) => void;
+  /** Phase D2.3S: vendor EAGOH id → live sync view for the selected buyer EAGOH. */
+  liveSyncMap?: Map<string, LiveSyncView>;
 }): JSX.Element {
   return (
     <View style={styles.carouselSection}>
@@ -1208,6 +1245,7 @@ const DomainCarouselSection = memo(function DomainCarouselSection({
             item={item}
             isPaid={isPaid}
             onPurchase={onPurchase}
+            liveSync={liveSyncMap?.get(item.eagoh_id) ?? null}
           />
         )}
         keyExtractor={(item) => item.id}
@@ -1223,9 +1261,12 @@ const DomainCarouselSection = memo(function DomainCarouselSection({
 const ActiveSyncCard = memo(function ActiveSyncCard({
   item,
   userId,
+  autoExpand = false,
 }: {
   item: EnrichedPurchase;
   userId?: string | null;
+  /** Phase D2.3S: auto-expand when a "Sync Live" listing tap routes here. */
+  autoExpand?: boolean;
 }): JSX.Element {
   const h = useHaptics();
   const [expanded, setExpanded] = useState(false);
@@ -1234,6 +1275,11 @@ const ActiveSyncCard = memo(function ActiveSyncCard({
   const [loadingEntries, setLoadingEntries] = useState(false);
   const [feedbackModalEntryId, setFeedbackModalEntryId] = useState<string | null>(null);
   const [disputeModalEntryId, setDisputeModalEntryId] = useState<string | null>(null);
+
+  // Phase D2.3S: tapping a "Sync Live" listing button opens this sync's details.
+  useEffect(() => {
+    if (autoExpand) setExpanded(true);
+  }, [autoExpand]);
 
   // Phase 7A: Exchange search & filter
   const [exchangeSearch, setExchangeSearch] = useState("");
@@ -1878,7 +1924,7 @@ const MyListingCard = memo(function MyListingCard({
 
 // ── Marketplace Sponsored Banner Carousel ──────────────────────────────
 
-const MktSponsoredBanner = memo(function MktSponsoredBanner({ item, userId, reputation }: { item: EnrichedBanner; userId: string | null; reputation: ReputationRow | undefined }): JSX.Element {
+const MktSponsoredBanner = memo(function MktSponsoredBanner({ item, userId, reputation, syncLive = false }: { item: EnrichedBanner; userId: string | null; reputation: ReputationRow | undefined; syncLive?: boolean }): JSX.Element {
   const h = useHaptics();
   const router = useRouter();
   const eagohRank: RankTier = (reputation?.rank as RankTier) ?? "Dormant";
@@ -1923,6 +1969,14 @@ const MktSponsoredBanner = memo(function MktSponsoredBanner({ item, userId, repu
       <View style={styles.mktBannerInfo}>
         <Text style={styles.mktBannerName} numberOfLines={1}>{safeName}</Text>
         <Text style={styles.mktBannerDomain}>{domainLabel}</Text>
+        {syncLive && (
+          // Phase D2.3S: the promoted listing's sync is live for this buyer —
+          // tapping still opens public-listing, whose CTA shows "Sync Live".
+          <View style={styles.mktBannerSyncLivePill}>
+            <Activity color={palette.void} size={9} />
+            <Text style={styles.mktBannerSyncLiveText}>SYNC LIVE</Text>
+          </View>
+        )}
         {repScore > 0 && (
           <View style={[styles.mktBannerRankRow, { borderColor: `${accent}33`, backgroundColor: `${accent}10` }]}>
             <Award color={accent} size={11} />
@@ -1938,7 +1992,7 @@ const MktSponsoredBanner = memo(function MktSponsoredBanner({ item, userId, repu
   );
 });
 
-const MktSponsoredCarousel = memo(function MktSponsoredCarousel({ userId, selectedDomain, onPromote }: { userId: string | null; selectedDomain: string; onPromote: () => void }): JSX.Element | null {
+const MktSponsoredCarousel = memo(function MktSponsoredCarousel({ userId, selectedDomain, onPromote, liveSyncMap }: { userId: string | null; selectedDomain: string; onPromote: () => void; liveSyncMap?: Map<string, LiveSyncView> }): JSX.Element | null {
   // Phase D2: Marketplace sponsors are scoped to the selected buyer-EAGOH
   // domain. No request fires and nothing renders without a selection.
   const { data: banners, isLoading: loading } = useQuery<EnrichedBanner[]>({
@@ -1985,7 +2039,7 @@ const MktSponsoredCarousel = memo(function MktSponsoredCarousel({ userId, select
         <FlatList
           data={banners ?? []}
           renderItem={({ item }) => (
-            <MktSponsoredBanner item={item} userId={userId} reputation={bannerRepMap.get(item.eagoh_id)} />
+            <MktSponsoredBanner item={item} userId={userId} reputation={bannerRepMap.get(item.eagoh_id)} syncLive={liveSyncMap?.has(item.eagoh_id) ?? false} />
           )}
           keyExtractor={(item) => item.id}
           horizontal
@@ -2028,6 +2082,7 @@ const DomainListingSection = memo(function DomainListingSection({
   repMap,
   vendorMetricsMap,
   vendorRepMap,
+  liveSyncMap,
 }: {
   domain: string;
   domainListings: EnrichedListing[];
@@ -2038,6 +2093,8 @@ const DomainListingSection = memo(function DomainListingSection({
   repMap: Map<string, ReputationRow>;
   vendorMetricsMap: Map<string, VendorQualityMetrics>;
   vendorRepMap: Map<string, PublicReputation>;
+  /** Phase D2.3S: vendor EAGOH id → live sync view for the selected buyer EAGOH. */
+  liveSyncMap: Map<string, LiveSyncView>;
 }): JSX.Element {
   const renderItem = useCallback(({ item }: { item: EnrichedListing }) => (
     <ListingCard
@@ -2049,8 +2106,9 @@ const DomainListingSection = memo(function DomainListingSection({
       onViewVendorProfile={onViewVendorProfile}
       vendorMetrics={vendorMetricsMap.get(item.vendor_id)}
       vendorRep={vendorRepMap.get(item.vendor_id)}
+      liveSync={liveSyncMap.get(item.eagoh_id) ?? null}
     />
-  ), [isPaid, currentUserId, onPurchase, onViewVendorProfile, repMap, vendorMetricsMap, vendorRepMap]);
+  ), [isPaid, currentUserId, onPurchase, onViewVendorProfile, repMap, vendorMetricsMap, vendorRepMap, liveSyncMap]);
 
   return (
     <View style={styles.carouselSection}>
@@ -2257,6 +2315,21 @@ export default function MarketplaceScreen(): JSX.Element {
   useExchangeVendorForegroundRefetch(user?.id);
   const activeSyncs = activeSyncsQuery.data ?? [];
   const purchases = purchaseHistoryQuery.data ?? [];
+  // ── Phase D2.3S: Active-Sync Listing Indicator ──
+  // A 30s wall-clock tick keeps "Sync Live · 2d 4h left" accurate and reverts
+  // the button to "Purchase" the moment a sync expires — no app restart.
+  const syncNowMs = useSyncClock(30_000);
+  // Live matches for the SELECTED "Browsing as" EAGOH, keyed by the listing's
+  // vendor EAGOH id. Recomputed when the selected EAGOH, the active-syncs
+  // dataset, or the clock changes — sync attribution belongs to the selected
+  // buyer EAGOH, so switching EAGOHs recalculates the live status.
+  const liveSyncMap = useMemo<Map<string, LiveSyncView>>(
+    () => buildLiveSyncMap(activeSyncs, selectedBuyerEagoh?.id ?? null, syncNowMs),
+    [activeSyncs, selectedBuyerEagoh?.id, syncNowMs],
+  );
+  // Non-null while a "Sync Live" tap routed to the Active Sync details —
+  // auto-expands the matching card in the Live Intelligence section.
+  const [focusedSyncId, setFocusedSyncId] = useState<string | null>(null);
   const [filterMeta, setFilterMeta] = useState<{ domains: string[]; sports: string[]; ranks: string[] }>({ domains: [], sports: [], ranks: [] });
   // Separate loading states: initial load vs. filter refresh
   const [initialLoading, setInitialLoading] = useState(true);
@@ -2666,8 +2739,23 @@ export default function MarketplaceScreen(): JSX.Element {
   const handlePurchasePress = useCallback((l: EnrichedListing) => {
     if (!selectedBuyerEagoh || !selectedBuyerDomain) return;
     if (!isSameExchangeDomain(l.eagoh?.domain ?? l.eagoh?.sport, selectedBuyerDomain)) return;
+    // Phase D2.3S: while the buyer's sync for this listing is live (selected
+    // buyer EAGOH + vendor EAGOH), the tap opens the buyer's Active Sync
+    // details instead of the purchase modal — the purchase RPC is never
+    // called a second time.
+    const resolved = resolveListingPurchaseAction({
+      listingEagohId: l.eagoh_id,
+      buyerEagohId: selectedBuyerEagoh.id,
+      activeSyncs,
+      nowMs: syncNowMs,
+    });
+    if (resolved.action === "sync-details") {
+      h.selection();
+      setFocusedSyncId(resolved.live.purchaseId);
+      return;
+    }
     setPurchaseModal(l);
-  }, [selectedBuyerEagoh, selectedBuyerDomain]);
+  }, [selectedBuyerEagoh, selectedBuyerDomain, activeSyncs, syncNowMs, h]);
   const handleViewVendorProfile = useCallback((vendorId: string) => {
     setPublicProfileVendorId(vendorId);
   }, []);
@@ -2695,6 +2783,7 @@ export default function MarketplaceScreen(): JSX.Element {
           userId={user?.id ?? null}
           selectedDomain={selectedBuyerDomain}
           onPromote={() => setBannerModalVisible(true)}
+          liveSyncMap={liveSyncMap}
         />
 
         {/* Live Intelligence — active syncs (above filters) */}
@@ -2718,7 +2807,7 @@ export default function MarketplaceScreen(): JSX.Element {
               <Text style={styles.liveTitle}>Your Active Syncs</Text>
               <Text style={styles.liveSub}>Intelligence currently available to your selected EAGOH.</Text>
               {activeSyncs.map((s) => (
-                <ActiveSyncCard key={s.id} item={s} userId={user?.id} />
+                <ActiveSyncCard key={s.id} item={s} userId={user?.id} autoExpand={s.id === focusedSyncId} />
               ))}
             </LinearGradient>
           </View>
@@ -2882,6 +2971,7 @@ export default function MarketplaceScreen(): JSX.Element {
                 repMap={repMap}
                 vendorMetricsMap={vendorMetricsMap}
                 vendorRepMap={vendorRepMap}
+                liveSyncMap={liveSyncMap}
               />
             ))}
           </View>
@@ -2915,6 +3005,7 @@ export default function MarketplaceScreen(): JSX.Element {
               repMap={repMap}
               vendorMetricsMap={vendorMetricsMap}
               vendorRepMap={vendorRepMap}
+              liveSyncMap={liveSyncMap}
             />
           ))}
         </View>
@@ -3161,6 +3252,7 @@ export default function MarketplaceScreen(): JSX.Element {
       <PurchaseSyncModal
         visible={!!purchaseModal}
         listing={purchaseModal}
+        liveSync={purchaseModal ? liveSyncMap.get(purchaseModal.eagoh_id) ?? null : null}
         buyerInfo={
           purchaseModal && selectedBuyerEagoh
             ? { name: selectedBuyerEagoh.name, domain: selectedBuyerDomain }
@@ -3731,6 +3823,16 @@ const styles = StyleSheet.create({
   buyButtonDisabled: { backgroundColor: "rgba(255,255,255,0.06)", borderWidth: 1, borderColor: palette.line },
   buyButtonText: { color: palette.void, fontSize: 12, fontWeight: "900" },
   buyButtonTextDisabled: { color: palette.muted },
+  // Phase D2.3S — Active-Sync Listing Indicator
+  buyButtonSyncLive: {
+    backgroundColor: palette.success,
+    borderWidth: 1,
+    borderColor: "rgba(0,255,178,0.5)",
+    shadowColor: palette.success,
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 0 },
+  },
 
   // My Listing Card
   myListingCard: {
@@ -4427,6 +4529,10 @@ const styles = StyleSheet.create({
   carouselCardPrice: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 3 },
   carouselCardPriceText: { color: palette.gold, fontSize: 12, fontWeight: "900" },
   carouselCardPriceFree: { color: palette.success, fontSize: 12, fontWeight: "900", marginTop: 3 },
+  carouselSyncLivePill: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 3, backgroundColor: palette.success, borderRadius: 5, paddingHorizontal: 6, paddingVertical: 2, alignSelf: "flex-start" as const },
+  carouselSyncLiveText: { color: palette.void, fontSize: 11, fontWeight: "900" },
+  mktBannerSyncLivePill: { flexDirection: "row", alignItems: "center", gap: 4, alignSelf: "flex-start" as const, backgroundColor: palette.success, borderRadius: 5, paddingHorizontal: 6, paddingVertical: 2, marginTop: 4 },
+  mktBannerSyncLiveText: { color: palette.void, fontSize: 10, fontWeight: "900", letterSpacing: 0.6 },
 
   repScoreBadge: { flexDirection: "row" as const, alignItems: "center" as const, gap: 3, borderWidth: 1, borderRadius: 5, paddingHorizontal: 6, paddingVertical: 2 },
   repScoreText: { fontSize: 10, fontWeight: "900" as const },

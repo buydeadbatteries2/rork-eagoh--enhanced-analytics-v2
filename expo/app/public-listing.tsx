@@ -12,6 +12,7 @@ import { palette } from "@/constants/colors";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import {
+  Activity,
   ArrowLeft,
   ArrowRightLeft,
   Coins,
@@ -51,6 +52,12 @@ import { useAuth } from "@/providers/AuthProvider";
 import { useEagohs } from "@/providers/EagohProvider";
 import { useQueryClient } from "@tanstack/react-query";
 import PublicProfileModal from "@/components/PublicProfileModal";
+import {
+  invalidateExchangeSyncQueries,
+  useExchangeActiveSyncs,
+} from "@/hooks/useExchangeSyncQueries";
+import { findLiveSyncForListing, type LiveSyncView } from "@/services/activeSyncIndicator";
+import { useSyncClock } from "@/hooks/useSyncClock";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -130,6 +137,37 @@ export default function PublicListingScreen(): JSX.Element {
     return eligiblePurchaseEagohs.find((e) => e.id === chosenBuyerEagohId) ?? null;
   }, [eligiblePurchaseEagohs, chosenBuyerEagohId]);
 
+  // ── Phase D2.3S: Active-Sync Listing Indicator ──
+  // The buyer's active syncs (account-wide, buyer_id = authenticated user,
+  // RLS-enforced; refetchOnMount "always" → restored after a cold restart).
+  // This screen has no single "Browsing as" EAGOH — the buyer chooses which
+  // EAGOH purchases inside the modal — so the live check runs against every
+  // eligible buyer EAGOH for this same-domain listing: if ANY of them already
+  // holds a live sync on the listing's vendor EAGOH, sync access already
+  // exists and the CTA shows "Sync Live · <time left>".
+  const activeSyncsQuery = useExchangeActiveSyncs(user?.id);
+  const activeSyncs = activeSyncsQuery.data ?? [];
+  const syncNowMs = useSyncClock(30_000);
+  const listingSyncDomain = listing ? normalizeDomainId(listing.eagoh_domain ?? "") : "";
+  const eligibleSyncEagohs = useMemo<EagohRecord[]>(() => {
+    if (!listingSyncDomain) return [];
+    return (eagohs ?? []).filter(
+      (e) =>
+        e.is_default_shell !== true &&
+        !(e.is_default_shell === null && e.is_user_forged === false) &&
+        e.status !== "dormant" &&
+        isSameExchangeDomain(e.domain ?? e.sport, listingSyncDomain),
+    );
+  }, [eagohs, listingSyncDomain]);
+  const liveSync = useMemo<LiveSyncView | null>(() => {
+    if (!listing) return null;
+    for (const e of eligibleSyncEagohs) {
+      const live = findLiveSyncForListing(activeSyncs, e.id, listing.eagoh_id, syncNowMs);
+      if (live) return live;
+    }
+    return null;
+  }, [listing, eligibleSyncEagohs, activeSyncs, syncNowMs]);
+
   // While the modal is open (and EAGOHs have finished loading):
   //   - no eligible EAGOHs → close safely and show the Domain Requirement
   //     message (never a dead purchase flow, never a false error while loading)
@@ -137,7 +175,7 @@ export default function PublicListingScreen(): JSX.Element {
   //     WITHOUT making a purchase request.
   useEffect(() => {
     if (!purchaseListing || eagohsLoading) return;
-    if (eligiblePurchaseEagohs.length === 0) {
+    if (eligiblePurchaseEagohs.length === 0 && !liveSync) {
       setPurchaseListing(null);
       setShowSourceInfo(false);
       setChosenBuyerEagohId(null);
@@ -152,7 +190,7 @@ export default function PublicListingScreen(): JSX.Element {
       setShowSourceInfo(false);
       setChosenBuyerEagohId(null);
     }
-  }, [purchaseListing, eagohsLoading, eligiblePurchaseEagohs, chosenBuyerEagohId]);
+  }, [purchaseListing, eagohsLoading, eligiblePurchaseEagohs, chosenBuyerEagohId, liveSync]);
 
   useEffect(() => {
     if (!listingId) {
@@ -305,6 +343,22 @@ export default function PublicListingScreen(): JSX.Element {
     }
   }, [isAuthenticated, listingId, router, eagohs, eagohsLoading]);
 
+  // ── Phase D2.3S: tapping the live CTA opens the buyer's Active Sync
+  // details — never the purchase flow. The modal's entry guard renders the
+  // live-sync details sheet (level, time remaining, expiry) instead of
+  // purchase options, so the purchase RPC is never called a second time.
+  const handleLiveSyncPress = useCallback(async (): Promise<void> => {
+    h.selection();
+    if (!listingId) return;
+    try {
+      const enriched = await getListingById(listingId);
+      if (!enriched || !enriched.active) return;
+      setPurchaseListing(enriched);
+    } catch {
+      // Non-fatal: the CTA keeps showing Sync Live; nothing to open.
+    }
+  }, [h, listingId]);
+
   const handlePurchaseConfirm = useCallback(async (level: SyncLevel, days: number): Promise<void> => {
     if (!user?.id || !purchaseListing) return;
     // ── Phase D2.1: an eligible same-domain buyer EAGOH is required. With
@@ -338,6 +392,10 @@ export default function PublicListingScreen(): JSX.Element {
         Alert.alert("Sync Purchased", `You now have ${level} sync access for ${days} day(s).`);
         setPurchaseListing(null);
         queryClient.invalidateQueries({ queryKey: ["profile"] });
+        // Phase D2.3S: refetch active syncs so the listing CTA flips to
+        // "Sync Live" immediately — no app restart, and the purchase RPC is
+        // never called a second time.
+        invalidateExchangeSyncQueries(queryClient);
       }
     } catch (err: unknown) {
       Alert.alert("Error", (err as Error).message ?? "Purchase failed.");
@@ -574,6 +632,21 @@ export default function PublicListingScreen(): JSX.Element {
           <View style={[styles.ctaBtn, styles.ctaBtnDisabled]}>
             <Text style={[styles.ctaText, { color: palette.muted, fontSize: 13 }]}>This Exchange listing is no longer available.</Text>
           </View>
+        ) : liveSync ? (
+          // Phase D2.3S: the sync is live — "Purchase" is replaced by a
+          // green/teal "Sync Live · <time left>" CTA. Pressing opens the
+          // Active Sync details (guard sheet), never the purchase modal.
+          <Pressable
+            onPress={handleLiveSyncPress}
+            style={({ pressed }) => [styles.ctaBtn, styles.ctaBtnSyncLive, pressed && { opacity: 0.85 }]}
+          >
+            <LinearGradient
+              colors={[palette.success, `${palette.success}cc`]}
+              style={StyleSheet.absoluteFill}
+            />
+            <Activity color={palette.void} size={17} />
+            <Text style={styles.ctaText} numberOfLines={1}>Sync Live · {liveSync.timeLeft}</Text>
+          </Pressable>
         ) : (
           <Pressable
             onPress={handlePurchase}
@@ -594,6 +667,7 @@ export default function PublicListingScreen(): JSX.Element {
       <PurchaseSyncModal
         visible={!!purchaseListing}
         listing={purchaseListing}
+        liveSync={liveSync}
         buyerInfo={
           purchaseListing && chosenBuyerEagoh
             ? { name: chosenBuyerEagoh.name, domain: purchaseDomain }
@@ -805,6 +879,16 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   ctaText: { color: palette.void, fontSize: 16, fontWeight: "900" as const },
+  // Phase D2.3S — Active-Sync Listing Indicator
+  ctaBtnSyncLive: {
+    backgroundColor: palette.success,
+    borderWidth: 1,
+    borderColor: "rgba(0,255,178,0.55)",
+    shadowColor: palette.success,
+    shadowOpacity: 0.45,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 0 },
+  },
   ctaBtnDisabled: {
     backgroundColor: "rgba(255,255,255,0.05)",
     borderWidth: 1,

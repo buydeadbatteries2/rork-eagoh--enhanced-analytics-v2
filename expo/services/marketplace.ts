@@ -211,6 +211,9 @@ export type SyncPurchaseRow = {
   id: string;
   listing_id: string;
   buyer_id: string;
+  /** Buyer EAGOH the sync is attributed to (Phase D2.3Q attribution; null
+   *  only for legacy rows created before the column existed). */
+  buyer_eagoh_id: string | null;
   vendor_id: string;
   eagoh_id: string;
   sync_level: SyncLevel;
