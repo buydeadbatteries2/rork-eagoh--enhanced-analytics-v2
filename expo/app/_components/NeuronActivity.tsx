@@ -187,8 +187,12 @@ function FilterTab({
         active && { backgroundColor: pal.blueSoft, borderColor: pal.blue },
         pressed && { opacity: 0.7 },
       ]}
+      accessibilityRole="button"
+      accessibilityLabel={`Filter transactions by ${label}`}
+      accessibilityState={{ selected: active }}
     >
       <Text
+        numberOfLines={1}
         style={[
           filterStyles.tabText,
           { color: active ? pal.cyan : pal.muted },
@@ -202,11 +206,19 @@ function FilterTab({
 
 const filterStyles = StyleSheet.create({
   tab: {
+    // Compact chip: fixed row-height footprint, centered content. Grows
+    // WIDER with text (never vertically) — no flex: 1, no percentage height.
+    height: 34,
+    minHeight: 34,
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 5,
     borderWidth: 1,
     borderColor: "rgba(120,180,255,0.18)",
+    alignItems: "center" as const,
+    justifyContent: "center" as const,
+    alignSelf: "center" as const,
+    flexShrink: 0,
   },
   tabText: {
     fontSize: 11,
@@ -545,11 +557,13 @@ function NeuronActivityModal({
           </Pressable>
         </View>
 
-        {/* Filter tabs */}
+        {/* Filter tabs — compact horizontally scrollable row. The bar is
+            height-locked so it can never expand vertically into columns. */}
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{ gap: 6, paddingHorizontal: 16, paddingBottom: 8 }}
+          style={modalStyles.filterBar}
+          contentContainerStyle={modalStyles.filterBarContent}
         >
           {FILTERS.map((f) => (
             <FilterTab
@@ -617,6 +631,19 @@ const modalStyles = StyleSheet.create({
     alignItems: "center" as const,
     justifyContent: "center" as const,
     backgroundColor: "rgba(120,180,255,0.12)",
+  },
+  // Compact filter row: constrained so the horizontal ScrollView can never
+  // grow vertically — chips stay centered in a single ~44pt row.
+  filterBar: {
+    flexGrow: 0,
+    flexShrink: 0,
+    height: 44,
+  },
+  filterBarContent: {
+    alignItems: "center" as const,
+    justifyContent: "flex-start" as const,
+    gap: 6,
+    paddingHorizontal: 16,
   },
 });
 
