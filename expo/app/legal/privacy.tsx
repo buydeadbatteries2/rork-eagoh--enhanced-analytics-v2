@@ -6,8 +6,12 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 const SECTIONS: { title: string; body: string }[] = [
   {
+    title: "Introduction",
+    body: "This Privacy Policy explains how EAGOH (\"we\", \"us\", \"our\"), operated by NDSTRII Studios LLC, collects, uses, stores, and protects your information when you use the EAGOH mobile application and website (collectively, the \"Platform\"). By using EAGOH, you agree to the practices described in this policy.",
+  },
+  {
     title: "Information We Collect",
-    body: "We collect information you provide when creating an account, using EAGOH features, and interacting with the platform. This includes account credentials, profile details, EAGOH configurations, Open Intelligence observations, Exchange marketplace activity, Arena matchups, Faction participation data, sponsored banner bookings, and Neuron transaction history.",
+    body: "We collect information you provide when creating an account, using EAGOH features, and interacting with the platform. This includes account credentials, profile details, EAGOH configurations, Open Intelligence observations, Exchange marketplace activity (listings, purchases, sync windows, and vendor orders), Arena matchups, Faction participation and join requests, sponsored banner bookings, notification records, and Neuron transaction history.",
   },
   {
     title: "Account Information",
@@ -19,11 +23,15 @@ const SECTIONS: { title: string; body: string }[] = [
   },
   {
     title: "User Content",
-    body: "Content you create on EAGOH, including EAGOH identities, Open Intelligence observations, Exchange listings, Faction messages, source credentials, and generated images, is stored on our servers. You control what you share publicly through Exchange listings, Faction activity, and your public profile. Private data such as your email, account settings, and Neuron transaction history are never shared publicly.",
+    body: "Content you create on EAGOH, including EAGOH identities, Open Intelligence observations, Exchange listings, Faction messages, source credentials, retained intelligence entries, and generated images, is stored on our servers. You control what you share publicly through Exchange listings, Faction activity, and your public profile. Private data such as your email, account settings, and Neuron transaction history are never shared publicly.",
   },
   {
-    title: "Device Information",
-    body: "We collect basic device information necessary for app functionality, including device model, operating system version, and app version. This information helps us debug issues and improve the platform experience.",
+    title: "Exchange & Marketplace Activity",
+    body: "We record Exchange activity necessary to operate the marketplace, including listings you create, purchases you make or receive, buyer and vendor EAGOH attribution, sync start and expiry times, purchase status (such as completed, refunded, reversed, disputed, or invalidated), and your purchase history. Expired and refunded purchase records are retained in history for record-keeping and dispute resolution. Purchase records are visible to the buyer, the vendor, and authorized administrators; public listings are visible to other users as described in the listing.",
+  },
+  {
+    title: "Neuron Transaction Data",
+    body: "EAGOH records all Neuron transactions, including subscription allocations, purchases, spending, rewards, refunds, and rollovers. This data is used to display your Neuron activity history, compute balances, and maintain platform integrity. Transaction data is private and visible only to you and authorized EAGOH administrators. Transaction records may be retained for accounting and dispute resolution purposes even after account deletion.",
   },
   {
     title: "AI Processing Disclosure",
@@ -31,19 +39,23 @@ const SECTIONS: { title: string; body: string }[] = [
   },
   {
     title: "Third-Party Providers",
-    body: "EAGOH relies on the following third-party services:\n\n• Supabase — provides database hosting, authentication, and file storage for your account data, EAGOH content, and generated images.\n\n• OpenAI — processes text prompts for AI chat analysis, observation quality scoring, Arena comparisons, and EAGOH intelligence responses.\n\n• RevenueCat — manages subscription purchases, Neuron Pack purchases, and payment processing through Apple App Store in-app purchase. RevenueCat does not receive your EAGOH content, observation data, or Faction activity.\n\n• Apple App Store — processes all in-app purchases. Payment information is handled by Apple and is not accessible to EAGOH.\n\nEach provider adheres to its own privacy and security standards. We do not sell personal information to any third party.",
-  },
-  {
-    title: "Neuron Transaction Data",
-    body: "EAGOH records all Neuron transactions, including subscription allocations, purchases, spending, rewards, refunds, and rollovers. This data is used to display your Neuron activity history, compute balances, and maintain platform integrity. Transaction data is private and visible only to you and authorized EAGOH administrators. Transaction records may be retained for accounting and dispute resolution purposes even after account deletion.",
+    body: "EAGOH relies on the following third-party services:\n\n• Supabase — provides database hosting, authentication, and file storage for your account data, EAGOH content, and generated images.\n\n• OpenAI — processes text prompts for AI chat analysis, observation quality scoring, Arena comparisons, EAGOH intelligence responses, and image generation.\n\n• RevenueCat — manages subscription purchases, Neuron Pack purchases, and payment processing through Apple App Store in-app purchase. RevenueCat does not receive your EAGOH content, observation data, or Faction activity.\n\n• Apple App Store — processes all in-app purchases. Payment information is handled by Apple and is not accessible to EAGOH.\n\nEach provider adheres to its own privacy and security standards. We do not sell personal information to any third party.",
   },
   {
     title: "Social Share Verification",
     body: "If you participate in the Social Share Verification program, you may submit screenshots of shared EAGOH content for verification. These screenshots are reviewed for authenticity and may be retained for fraud prevention purposes. Submitted screenshots are not shared publicly and are visible only to authorized reviewers.",
   },
   {
+    title: "Notifications",
+    body: "If you use EAGOH, we generate in-app notification records related to your account activity, such as purchase confirmations, Faction updates, and platform announcements. These records are tied to your account and are not shared with other users. You can manage notification preferences in your account settings.",
+  },
+  {
+    title: "Device Information",
+    body: "We collect basic device information necessary for app functionality, including device model, operating system version, and app version. This information helps us debug issues and improve the platform experience.",
+  },
+  {
     title: "Data Retention",
-    body: "We retain your account data and content for as long as your account remains active. If you delete your account, we will remove your personal data within 30 days, except where retention is required by law. Anonymized or aggregated data may be retained for analytical purposes. Neuron transaction records may be retained for accounting and dispute resolution purposes as described in the Neuron Transaction Data section.",
+    body: "We retain your account data and content for as long as your account remains active. If you delete your account, we will remove your personal data within 30 days, except where retention is required by law. Anonymized or aggregated data may be retained for analytical purposes. Neuron transaction records and Exchange purchase records may be retained for accounting, fraud prevention, and dispute resolution purposes as described in those sections.",
   },
   {
     title: "Security",
@@ -51,7 +63,7 @@ const SECTIONS: { title: string; body: string }[] = [
   },
   {
     title: "Your Rights",
-    body: "You have the right to: (a) access your personal data stored in EAGOH; (b) request correction of inaccurate data; (c) request deletion of your account and associated data through the app settings; (d) withdraw consent where processing is consent-based. Account deletion permanently removes your EAGOHs, observations, Exchange listings, Faction memberships, retained intelligence, and profile data. To exercise these rights, contact us at eagohsupport@ndstriistudios.com.",
+    body: "You have the right to: (a) access your personal data stored in EAGOH; (b) request correction of inaccurate data; (c) request deletion of your account and associated data through the app settings; (d) withdraw consent where processing is consent-based; (e) receive a copy of your data in a portable format where required by law; and (f) object to or restrict certain processing where required by law.\n\nIf you are located in the European Economic Area or the United Kingdom, you have these rights under the GDPR. If you are a California resident, the CCPA gives you the right to know what personal information is collected, to request deletion, and to be free from discrimination for exercising these rights. We do not sell or share personal information as those terms are defined under the CCPA.\n\nAccount deletion permanently removes your EAGOHs, observations, Exchange listings, Faction memberships, retained intelligence, and profile data. To exercise these rights, contact us at eagohsupport@ndstriistudios.com.",
   },
   {
     title: "Children's Privacy",
@@ -91,7 +103,7 @@ export default function PrivacyScreen(): JSX.Element {
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        <Text style={styles.lastUpdated}>Last updated: August 2026</Text>
+        <Text style={styles.lastUpdated}>Last updated: September 2026</Text>
         <View style={styles.pledge}>
           <Text style={styles.pledgeTitle}>We do not sell personal information.</Text>
           <Text style={styles.pledgeBody}>

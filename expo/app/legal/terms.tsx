@@ -6,8 +6,12 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 const SECTIONS: { title: string; body: string }[] = [
   {
+    title: "Acceptance of Terms",
+    body: "These Terms of Service (\"Terms\") govern your access to and use of the EAGOH mobile application and website (collectively, the \"Platform\") operated by NDSTRII Studios LLC. By creating an account or accessing or using EAGOH, you agree to be bound by these Terms and our Privacy Policy. If you do not agree, you may not use EAGOH.",
+  },
+  {
     title: "Eligibility",
-    body: "You must be at least 13 years old to use EAGOH. By creating an account, you confirm that you meet this age requirement and that all registration information you provide is accurate and complete.",
+    body: "You must be at least 13 years old to use EAGOH. If you are under the age of majority in your jurisdiction, you represent that you have permission from a parent or legal guardian to use the Platform. By creating an account, you confirm that you meet this age requirement and that all registration information you provide is accurate and complete.",
   },
   {
     title: "Description of Service",
@@ -15,11 +19,11 @@ const SECTIONS: { title: string; body: string }[] = [
   },
   {
     title: "User Accounts",
-    body: "You are responsible for maintaining the confidentiality of your account credentials. You agree to notify us immediately of any unauthorized use. EAGOH reserves the right to suspend or terminate accounts that violate these Terms.",
+    body: "You are responsible for maintaining the confidentiality of your account credentials. You agree to notify us immediately of any unauthorized use. You are responsible for all activity that occurs under your account. EAGOH reserves the right to suspend or terminate accounts that violate these Terms.",
   },
   {
     title: "Subscriptions and Neurons",
-    body: "EAGOH offers subscription tiers (Free, Pro, Oracle Elite, Syndicate) that allocate monthly Neurons for platform activities. Subscriptions are processed through RevenueCat via Apple App Store in-app purchase. Neurons are virtual platform currency with no real-world cash value. They cannot be redeemed for money, transferred outside the platform, or exchanged for any financial instrument. Subscription Neurons are subject to monthly rollover caps: unused subscription Neurons roll over only if you retained at least 10% of the prior month's allocation, up to a maximum of 10% of the prior allocation. Free tier Neurons do not roll over. Purchased Neuron Packs are available through RevenueCat and do not expire. Purchased Neurons are non-refundable except as required by applicable law. If a subscription is canceled, the current billing cycle's allocation remains available until the cycle ends; subsequent monthly allocations will not be granted.",
+    body: "EAGOH offers subscription tiers (Free, Pro, Oracle Elite, Syndicate) that allocate monthly Neurons for platform activities. Subscriptions are processed through RevenueCat via Apple App Store in-app purchase. Neurons are virtual platform currency with no real-world cash value. They cannot be redeemed for money, transferred outside the platform, or exchanged for any financial instrument. Subscription Neurons are subject to monthly rollover caps: unused subscription Neurons roll over only if you retained at least 10% of the prior month's allocation, up to a maximum of 10% of the prior allocation. Free tier Neurons do not roll over. Purchased Neuron Packs are available through RevenueCat and do not expire. Purchased Neurons are non-refundable except as required by applicable law. If a subscription is canceled, the current billing cycle's allocation remains available until the cycle ends; subsequent monthly allocations will not be granted. Subscriptions renew automatically unless canceled at least 24 hours before the end of the current period, and can be managed through your Apple App Store account settings.",
   },
   {
     title: "Open Intelligence",
@@ -27,7 +31,7 @@ const SECTIONS: { title: string; body: string }[] = [
   },
   {
     title: "Exchange Marketplace",
-    body: "The EAGOH Exchange enables mock intelligence sync transactions between users using Neurons. Vendors create listings for their EAGOHs at chosen price points (25%, 50%, 75%, 100% sync levels) and durations (1–5 days). Buyers pay Neurons to temporarily access a vendor EAGOH's intelligence. EAGOH does not guarantee the accuracy, reliability, or value of any Exchange listing. Users participate at their own discretion. A vendor cannot purchase their own listing.",
+    body: "The EAGOH Exchange enables mock intelligence sync transactions between users using Neurons. Vendors create listings for their EAGOHs at chosen price points (25%, 50%, 75%, 100% sync levels) and durations (1–5 days). Buyers pay Neurons to temporarily access a vendor EAGOH's intelligence. When a purchase completes, the buyer's selected EAGOH gains temporary access (an \"active sync\") to the vendor EAGOH's intelligence for the listed duration window. Access expires automatically when the window ends, and expired purchases remain in the buyer's purchase history for reference. Multiple active syncs may exist at the same time across different EAGOHs. EAGOH does not guarantee the accuracy, reliability, or value of any Exchange listing. Users participate at their own discretion. A vendor cannot purchase their own listing. Exchange purchases are non-refundable except in cases of platform or technical error, at EAGOH's discretion.",
   },
   {
     title: "Retained Exchange Intelligence",
@@ -47,7 +51,7 @@ const SECTIONS: { title: string; body: string }[] = [
   },
   {
     title: "Factions",
-    body: "Factions are voluntary analyst alliances for collaborative intelligence. Users may create or join Factions, participate in faction activity feeds, share intelligence, and compete in faction rankings. Faction leaders may manage membership and settings. EAGOH does not guarantee the accuracy, reliability, or value of any Faction intelligence or activity. Users participate at their own discretion.",
+    body: "Factions are voluntary analyst alliances for collaborative intelligence. Users may create or join Factions (joining may require approval from faction leadership), participate in faction activity feeds, share intelligence, and compete in faction rankings. Faction leaders may manage membership, join requests, and settings. EAGOH does not guarantee the accuracy, reliability, or value of any Faction intelligence or activity. Users participate at their own discretion.",
   },
   {
     title: "Social Share Verification",
@@ -67,7 +71,11 @@ const SECTIONS: { title: string; body: string }[] = [
   },
   {
     title: "Prohibited Conduct",
-    body: "You agree not to: (a) use EAGOH for any illegal purpose; (b) attempt to manipulate or exploit platform systems, including leaderboard rankings, Arena outcomes, or Exchange pricing; (c) harass, abuse, or harm other users; (d) upload malicious code or content; (e) impersonate others or misrepresent affiliations; (f) attempt unauthorized access to platform systems; (g) use automated tools to scrape or extract data without permission; (h) submit fraudulent social share verification screenshots; (i) create multiple accounts to exploit Neuron allocations or reward systems; (j) resell, transfer, or barter Neurons or account access outside the platform.",
+    body: "You agree not to: (a) use EAGOH for any illegal purpose; (b) attempt to manipulate or exploit platform systems, including leaderboard rankings, Arena outcomes, or Exchange pricing; (c) harass, abuse, or harm other users; (d) upload malicious code or content; (e) impersonate others or misrepresent affiliations; (f) attempt unauthorized access to platform systems; (g) use automated tools to scrape or extract data without permission; (h) submit fraudulent social share verification screenshots; (i) create multiple accounts to exploit Neuron allocations or reward systems; (j) resell, transfer, or barter Neurons or account access outside the platform; or (k) exploit bugs, race conditions, or unintended platform behavior, including duplicate or overlapping transaction exploits.",
+  },
+  {
+    title: "Content Moderation and Enforcement",
+    body: "We may review content and account activity for compliance with these Terms. If we determine that you or your content violate these Terms, we may take action including removing content, issuing warnings, restricting features, adjusting Neuron balances affected by prohibited conduct, suspending your account, or terminating your account. We may, at our discretion, consider appeals submitted to our support email.",
   },
   {
     title: "Disclaimer",
@@ -76,6 +84,10 @@ const SECTIONS: { title: string; body: string }[] = [
   {
     title: "Limitation of Liability",
     body: "To the maximum extent permitted by law, NDSTRII Studios LLC and its affiliates shall not be liable for any indirect, incidental, special, consequential, or punitive damages arising from your use of EAGOH. Our total liability for any claim shall not exceed the amount you paid us in the 12 months preceding the claim.",
+  },
+  {
+    title: "Governing Law",
+    body: "These Terms are governed by the laws of the United States and the State of [State], without regard to conflict-of-law principles. Any dispute arising from these Terms or your use of EAGOH shall be resolved in the courts located in that jurisdiction, unless applicable law provides otherwise.",
   },
   {
     title: "Account Termination",
@@ -111,7 +123,7 @@ export default function TermsScreen(): JSX.Element {
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        <Text style={styles.lastUpdated}>Last updated: August 2026</Text>
+        <Text style={styles.lastUpdated}>Last updated: September 2026</Text>
         {SECTIONS.map((section) => (
           <View key={section.title} style={styles.section}>
             <Text style={styles.sectionTitle}>{section.title}</Text>
