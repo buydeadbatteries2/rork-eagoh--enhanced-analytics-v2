@@ -44,6 +44,7 @@ import React, { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Linking,
   Modal,
   Pressable,
   ScrollView,
@@ -2576,6 +2577,16 @@ export default function SettingsScreen(): JSX.Element {
             label: "Terms of Service",
             icon: <FileText color={pal.muted} size={18} />,
             onPress: navigateTo("/legal/terms"),
+          },
+          {
+            kind: "link",
+            label: "Terms of Use (EULA)",
+            icon: <Link2 color={pal.muted} size={18} />,
+            onPress: () => {
+              void Linking.openURL(
+                "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/",
+              );
+            },
           },
           {
             kind: "link",
