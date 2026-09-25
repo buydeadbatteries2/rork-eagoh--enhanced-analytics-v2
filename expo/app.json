@@ -16,7 +16,10 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "app.rork.30jz62ydo3j4acgin2ijq",
-      "buildNumber": "2"
+      "buildNumber": "2",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "EAGOH uses your photo library so you can select and upload images for features that support image input, such as adding an image to your EAGOH content or analysis."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -37,7 +40,13 @@
       ],
       "expo-font",
       "expo-web-browser",
-      "@react-native-community/datetimepicker"
+      "@react-native-community/datetimepicker",
+      [
+        "expo-image-picker",
+        {
+          "photoPermission": "EAGOH uses your photo library so you can select and upload images for features that support image input, such as adding an image to your EAGOH content or analysis."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
