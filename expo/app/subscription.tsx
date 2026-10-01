@@ -704,91 +704,128 @@ export default function SubscriptionScreen(): JSX.Element {
           console.log(`[Subscription] Purchasing: packageId=${resolvedPkg.identifier} productId=${productId}`);
 
           // ── Purchase the resolved package ────────────────────────
+          // The StoreKit/RevenueCat purchase operation is fully isolated from
+          // all post-purchase work: a failure or cancellation here can NEVER
+          // be reported as a successful purchase. Success messaging is only
+          // allowed once rcPurchase has returned a confirmed result.
           setPurchaseStatusMsg("Completing your App Store purchase...");
-          const purchaseResult = await rcPurchase(resolvedPkg);
-          const activeEntitlements = purchaseResult.customerInfo.entitlements?.active;
-          const entitlementKeys = activeEntitlements ? Object.keys(activeEntitlements) : [];
-          console.log(`[Subscription] Purchase success — active entitlements: ${entitlementKeys.join(", ") || "none"}`);
-
-          // ── Verify the expected entitlement is active ──
-          // Use CustomerInfo immediately from the purchase result.
-          // If the entitlement is not yet present (delayed Apple receipt
-          // processing), refresh CustomerInfo once before showing pending.
-          const expectedEntitlementId = SUBSCRIPTION_ENTITLEMENT_IDS[tier];
-          let hasExpectedEntitlement = entitlementKeys.includes(expectedEntitlementId);
-          let finalEntitlements = entitlementKeys;
-
-          if (!hasExpectedEntitlement) {
-            // ── One-time CustomerInfo refresh ──
-            // Apple/RevenueCat receipt processing can be delayed. The
-            // purchaseResult.customerInfo may not yet reflect the entitlement.
-            // Refresh once from RevenueCat before showing the pending state.
-            console.log(`[Subscription] Entitlement not in purchase result — refreshing CustomerInfo once`);
-            if (isMountedRef.current) {
-              setPurchaseStatusMsg("Verifying your App Store purchase...");
+          let purchaseResult: Awaited<ReturnType<typeof rcPurchase>>;
+          try {
+            purchaseResult = await rcPurchase(resolvedPkg);
+          } catch (purchaseErr: unknown) {
+            const errObj = purchaseErr as { userCancelled?: boolean; message?: string };
+            if (errObj?.userCancelled) {
+              // User cancelled in Apple's purchase sheet — neither success nor failure.
+              if (__DEV__) console.log("[Subscription] User cancelled purchase");
+              return;
             }
-            try {
-              const { getCustomerInfo: fetchInfo } = await import("@/services/revenuecat");
-              const refreshedInfo = await fetchInfo();
-              const refreshedEnts = refreshedInfo.entitlements?.active;
-              finalEntitlements = refreshedEnts ? Object.keys(refreshedEnts) : [];
-              hasExpectedEntitlement = finalEntitlements.includes(expectedEntitlementId);
-              if (hasExpectedEntitlement) {
-                console.log(`[Subscription] Entitlement found after refresh: ${expectedEntitlementId}`);
-              }
-            } catch (refreshErr) {
-              console.warn("[Subscription] CustomerInfo refresh failed:", refreshErr);
-            }
-          }
-
-          if (!hasExpectedEntitlement) {
-            // Entitlement still not present after refresh. The purchase DID
-            // complete (no error was thrown), but Apple/RevenueCat receipt
-            // processing is delayed. Do NOT crash. Do NOT force Pro.
-            // Preserve any temporary valid entitlement. Allow Restore.
-            console.warn(`[Subscription] Entitlement still pending after refresh: expected ${expectedEntitlementId}, got [${finalEntitlements.join(", ")}]`);
-            if (isMountedRef.current) {
-              setPurchaseStatusMsg(null);
-            }
+            const msg = errObj?.message ?? String(purchaseErr);
+            console.warn("[Subscription] Purchase failed:", msg);
             Alert.alert(
-              "Your App Store subscription is still being verified.",
-              "Your purchase was completed successfully. Apple is processing the receipt, which can take a few minutes.\n\nUse Restore Purchases in a few minutes to complete activation, or close and reopen the app.",
+              "Purchase Failed",
+              "The purchase could not be completed. You were not charged. Please try again.",
             );
             return;
           }
 
-          // ── Entitlement confirmed — wait for backend sync ──
-          // The RevenueCatProvider's purchaseMutation.onSuccess already fires the
-          // backend sync (with a coordination lock to prevent duplicates from
-          // the CustomerInfoUpdateListener). Give it a moment to complete, then
-          // refresh local state. All state updates are guarded by isMountedRef.
-          if (isMountedRef.current) {
-            setPurchaseStatusMsg("Activating your subscription and adding neurons...");
-          }
-          await new Promise((resolve) => setTimeout(resolve, 1500));
+          // ── Post-purchase phase (purchase confirmed) ──
+          // rcPurchase returned successfully — the Apple transaction is real.
+          // Any failure from here on is a sync/refresh problem and must be
+          // reported as "still refreshing", never as a failed purchase.
+          try {
+            const activeEntitlements = purchaseResult.customerInfo.entitlements?.active;
+            const entitlementKeys = activeEntitlements ? Object.keys(activeEntitlements) : [];
+            console.log(`[Subscription] Purchase success — active entitlements: ${entitlementKeys.join(", ") || "none"}`);
 
-          // Refresh local state — guarded by mounted check.
-          // If the user left the screen, the RevenueCatProvider listener
-          // already handled the sync; we just skip the UI update.
-          if (isMountedRef.current) {
-            try {
-              await refreshAll();
-            } catch (refreshErr) {
-              console.warn("[Subscription] refreshAll failed after purchase:", refreshErr);
+            // ── Verify the expected entitlement is active ──
+            // Use CustomerInfo immediately from the purchase result.
+            // If the entitlement is not yet present (delayed Apple receipt
+            // processing), refresh CustomerInfo once before showing pending.
+            const expectedEntitlementId = SUBSCRIPTION_ENTITLEMENT_IDS[tier];
+            let hasExpectedEntitlement = entitlementKeys.includes(expectedEntitlementId);
+            let finalEntitlements = entitlementKeys;
+
+            if (!hasExpectedEntitlement) {
+              // ── One-time CustomerInfo refresh ──
+              // Apple/RevenueCat receipt processing can be delayed. The
+              // purchaseResult.customerInfo may not yet reflect the entitlement.
+              // Refresh once from RevenueCat before showing the pending state.
+              console.log(`[Subscription] Entitlement not in purchase result — refreshing CustomerInfo once`);
+              if (isMountedRef.current) {
+                setPurchaseStatusMsg("Verifying your App Store purchase...");
+              }
+              try {
+                const { getCustomerInfo: fetchInfo } = await import("@/services/revenuecat");
+                const refreshedInfo = await fetchInfo();
+                const refreshedEnts = refreshedInfo.entitlements?.active;
+                finalEntitlements = refreshedEnts ? Object.keys(refreshedEnts) : [];
+                hasExpectedEntitlement = finalEntitlements.includes(expectedEntitlementId);
+                if (hasExpectedEntitlement) {
+                  console.log(`[Subscription] Entitlement found after refresh: ${expectedEntitlementId}`);
+                }
+              } catch (refreshErr) {
+                console.warn("[Subscription] CustomerInfo refresh failed:", refreshErr);
+              }
             }
-          }
 
-          if (isMountedRef.current) {
-            setPurchaseSuccess(true);
-            setPurchaseStatusMsg("Subscription activated. Your neurons are ready.");
-          }
+            if (!hasExpectedEntitlement) {
+              // Entitlement still not present after refresh. The purchase DID
+              // complete (no error was thrown), but Apple/RevenueCat receipt
+              // processing is delayed. Do NOT crash. Do NOT force Pro.
+              // Preserve any temporary valid entitlement. Allow Restore.
+              console.warn(`[Subscription] Entitlement still pending after refresh: expected ${expectedEntitlementId}, got [${finalEntitlements.join(", ")}]`);
+              if (isMountedRef.current) {
+                setPurchaseStatusMsg(null);
+              }
+              Alert.alert(
+                "Your App Store subscription is still being verified.",
+                "Your purchase was completed successfully. Apple is processing the receipt, which can take a few minutes.\n\nUse Restore Purchases in a few minutes to complete activation, or close and reopen the app.",
+              );
+              return;
+            }
 
-          // Show success alert — safe even if unmounted (Alert is global).
-          const tierLabel = TIER_LABELS[tier];
-          Alert.alert(
-            "Subscription Activated",
-            `Welcome to ${tierLabel}! Your benefits are now active.`,
-          );
+            // ── Entitlement confirmed — wait for backend sync ──
+            // The RevenueCatProvider's purchaseMutation.onSuccess already fires the
+            // backend sync (with a coordination lock to prevent duplicates from
+            // the CustomerInfoUpdateListener). Give it a moment to complete, then
+            // refresh local state. All state updates are guarded by isMountedRef.
+            if (isMountedRef.current) {
+              setPurchaseStatusMsg("Activating your subscription and adding neurons...");
+            }
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+
+            // Refresh local state — guarded by mounted check.
+            // If the user left the screen, the RevenueCatProvider listener
+            // already handled the sync; we just skip the UI update.
+            if (isMountedRef.current) {
+              try {
+                await refreshAll();
+              } catch (refreshErr) {
+                console.warn("[Subscription] refreshAll failed after purchase:", refreshErr);
+              }
+            }
+
+            if (isMountedRef.current) {
+              setPurchaseSuccess(true);
+              setPurchaseStatusMsg("Subscription activated. Your neurons are ready.");
+            }
+
+            // Show success alert — safe even if unmounted (Alert is global).
+            const tierLabel = TIER_LABELS[tier];
+            Alert.alert(
+              "Subscription Activated",
+              `Welcome to ${tierLabel}! Your benefits are now active.`,
+            );
+          } catch (postPurchaseErr: unknown) {
+            // Purchase already confirmed by RevenueCat — this is a post-purchase
+            // sync/refresh failure, NOT a purchase failure.
+            const msg = postPurchaseErr instanceof Error ? postPurchaseErr.message : String(postPurchaseErr);
+            console.warn("[Subscription] Post-purchase sync failed:", msg);
+            Alert.alert(
+              "Purchase Received",
+              "Your purchase was completed, but EAGOH is still refreshing your subscription status. Please check again shortly.",
+            );
+          }
         } else if (__DEV__) {
           // ── Dev test subscription (Expo Go / Rork preview) ──────────
           // RevenueCat is not available — use the test tier override.
@@ -801,6 +838,10 @@ export default function SubscriptionScreen(): JSX.Element {
           );
         }
       } catch (err: unknown) {
+        // Defensive: any error reaching this outer catch occurred BEFORE the
+        // purchase operation ran (package resolution, availability checks) —
+        // the purchase-specific errors are handled inside handleSubscribe's
+        // isolated purchase try/catch. It must NEVER be reported as success.
         const errObj = err as { userCancelled?: boolean; message?: string };
         if (errObj?.userCancelled) {
           // User cancelled — not an error
@@ -808,23 +849,12 @@ export default function SubscriptionScreen(): JSX.Element {
             console.log("[Subscription] User cancelled purchase");
           }
         } else {
-          const msg = errObj?.message ?? "Purchase failed";
-          console.warn("[Subscription] Purchase error:", msg);
-          // If the purchase actually succeeded but a post-purchase UI step
-          // threw, show a reassuring message instead of crashing.
-          // The RevenueCat listener + backend sync handle activation.
-          if (isMountedRef.current) {
-            Alert.alert(
-              "Purchase Completed",
-              "Your subscription was purchased successfully. Your account is being refreshed.",
-            );
-          } else {
-            // Screen unmounted — Alert is global, still safe to show.
-            Alert.alert(
-              "Purchase Completed",
-              "Your subscription was purchased successfully. Your account is being refreshed.",
-            );
-          }
+          const msg = errObj?.message ?? String(err);
+          console.warn("[Subscription] Purchase flow error (pre-purchase):", msg);
+          Alert.alert(
+            "Purchase Failed",
+            "The purchase could not be completed. You were not charged. Please try again.",
+          );
         }
       } finally {
         // Guard all state cleanup with mounted check.
